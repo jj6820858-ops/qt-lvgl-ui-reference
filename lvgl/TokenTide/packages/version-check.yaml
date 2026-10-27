@@ -1,0 +1,63 @@
+# Update awareness: polls the latest GitHub release a few times a day and
+# exposes "Update Available" to Home Assistant, so an automation can nudge
+# you to open the Builder and hit Install. Uses the blocking http_request
+# component - acceptable at this cadence.
+
+http_request:
+  id: http_client
+  timeout: 10s
+  watchdog_timeout: 30s
+
+text_sensor:
+  - platform: template
+    id: fw_version
+    name: "Firmware Version"
+    entity_category: diagnostic
+    lambda: 'return {"${tokentide_version}"};'
+    update_interval: 6h
+  - platform: template
+    id: latest_release
+    name: "Latest Release"
+    entity_category: diagnostic
+    update_interval: never
+
+binary_sensor:
+  - platform: template
+    id: update_available
+    name: "Update Available"
+    device_class: update
+
+script:
+  - id: check_update
+    mode: single
+    then:
+      - http_request.get:
+          url: https://api.github.com/repos/eldios/tokentide/releases/latest
+          request_headers:
+            User-Agent: "tokentide/${tokentide_version}"
+            Accept: "application/vnd.github+json"
+          capture_response: true
+          max_response_buffer_size: 8192
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code != 200) return;
+                  json::parse_json(body, [](JsonObject root) -> bool {
+                    const char *tag = root["tag_name"];
+                    if (tag == nullptr) return false;
+                    std::string latest = tag;
+                    if (!latest.empty() && latest[0] == 'v') latest.erase(0, 1);
+                    id(latest_release).publish_state(latest);
+                    id(update_available).publish_state(latest != "${tokentide_version}");
+                    return true;
+                  });
+
+interval:
+  - interval: 6h
+    startup_delay: 2min
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - script.execute: check_update

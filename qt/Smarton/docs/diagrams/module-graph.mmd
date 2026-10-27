@@ -1,0 +1,45 @@
+graph BT
+    common[common<br/>vocabulary types]
+    core[core<br/>RingBuffer]
+    domain[domain<br/>Reading, Range]
+    services[services<br/>IReadingSource, MonitoringService]
+    infra[infrastructure<br/>SimulatedReadingSource]
+    models[models<br/>SmarTon.Models]
+    backend[backend<br/>SmarTon.Backend]
+
+    theme[Ui.Theme]
+    helpers[Ui.Helpers]
+    controls[Ui.Controls]
+    layouts[Ui.Layouts]
+    components[Ui.Components]
+    nav[Ui.Navigation]
+    dialogs[Ui.Dialogs]
+    screens[Ui.Screens]
+    app[app<br/>composition root]
+
+    core --> common
+    domain --> common
+    services --> domain
+    services --> core
+    infra --> services
+    models --> services
+    models --> infra
+    backend --> common
+
+    theme --> backend
+    controls --> theme
+    controls --> helpers
+    layouts --> theme
+    components --> controls
+    components --> layouts
+    nav --> controls
+    dialogs --> controls
+    dialogs --> layouts
+    screens --> components
+    screens --> dialogs
+    screens --> models
+    app --> screens
+    app --> nav
+
+    classDef boundary fill:#0B6E5F,stroke:#083f36,color:#fff
+    class models,backend boundary

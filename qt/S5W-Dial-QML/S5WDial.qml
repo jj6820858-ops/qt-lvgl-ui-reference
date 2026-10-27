@@ -1,0 +1,1 @@
+plasmoid/contents/ui/S5WDial.qml

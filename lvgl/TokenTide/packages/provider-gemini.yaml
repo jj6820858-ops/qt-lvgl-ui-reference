@@ -1,0 +1,94 @@
+# Gemini (Google AI plan) usage provider - OPT-IN. Include this package and
+# set gemini_refresh_token / gemini_client_secret (see
+# devices/secrets.example.yaml); without it the device has no Gemini slot,
+# without the two substitutions the slot shows "no data".
+#
+# Reads the plan's quota windows the way Antigravity does: Code Assist
+# v1internal:retrieveUserQuotaSummary with the Antigravity OAuth login. The
+# 5h slot shows the gemini-5h bucket, the 7d slot the most used weekly
+# Gemini bucket (gemini-weekly or the Argon weekly bucket). Using that login
+# outside Antigravity is against the Antigravity terms (clause 6) and can
+# get the account suspended; this provider is for owners who accept that.
+#
+# The refresh token comes from a one-time host login
+# (tools/gemini_refresh_token.py). Google refresh tokens do not rotate, so
+# the device refreshes its access token without persisting anything; the
+# token dies only when revoked or after 6 months without use.
+#
+# Polling chains off the Claude poll result like Codex: one TLS session at
+# a time, serialized by the TLS gate.
+
+substitutions:
+  gemini_refresh_token: ""
+  gemini_client_secret: ""
+
+esphome:
+  on_boot:
+    # Before the engine counts providers (usage-poller.yaml, priority 750).
+    - priority: 800
+      then:
+        - lambda: "id(gemini_present) = true;"
+
+sensor:
+  - platform: template
+    id: usage_gemini_5h
+    name: "Gemini 5h Utilization"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: template
+    id: usage_gemini_7d
+    name: "Gemini 7d Utilization"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: never
+
+text_sensor:
+  - platform: template
+    id: gemini_status
+    name: "Gemini Limit Status"
+    update_interval: never
+
+tokentide_poller:
+  # Merges into the engine's handler: every Claude poll (interval or
+  # manual) is followed by a Gemini poll, serialized.
+  on_result:
+    - tokentide_poller.gemini_poll: gemini_probe
+  gemini:
+    id: gemini_probe
+    refresh_token: ${gemini_refresh_token}
+    client_secret: ${gemini_client_secret}
+    on_result:
+      - lambda: |-
+          // An earlier reading and its reset times no longer hold: the
+          // screens drop the countdown and the elapsed marker with them.
+          auto clear_reading = [&]() {
+            id(gemini_5h_pct) = -1;
+            id(gemini_7d_pct) = -1;
+            id(reset_gemini_5h_epoch) = 0;
+            id(reset_gemini_7d_epoch) = 0;
+            id(usage_gemini_5h).publish_state(NAN);
+            id(usage_gemini_7d).publish_state(NAN);
+          };
+          if (code == -1 || (code == 200 && u5 < 0 && u7 < 0)) {
+            // No credentials, or no Gemini quota bucket for this account.
+            clear_reading();
+            id(gemini_state) = tokentide_poller::STATE_NO_DATA;
+            id(gemini_status).publish_state("${str_no_data}");
+          } else if (code == 200) {
+            id(gemini_state) = tokentide_poller::STATE_OK;
+            id(gemini_5h_pct) = u5;
+            id(gemini_7d_pct) = u7;
+            id(reset_gemini_5h_epoch) = (long) r5;
+            id(reset_gemini_7d_epoch) = (long) r7;
+            if (u5 >= 0) id(usage_gemini_5h).publish_state(u5);
+            if (u7 >= 0) id(usage_gemini_7d).publish_state(u7);
+            id(gemini_status).publish_state("${str_status_ok}");
+          } else if (code == 401 || code == 403) {
+            clear_reading();
+            id(gemini_state) = tokentide_poller::STATE_AUTH_ERROR;
+            id(gemini_status).publish_state("${str_token_error}");
+          } else {
+            id(gemini_state) = tokentide_poller::STATE_NET_ERROR;
+            id(gemini_status).publish_state("${str_net_error}");
+          }

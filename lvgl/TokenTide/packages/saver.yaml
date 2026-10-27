@@ -1,0 +1,810 @@
+# OPTIONAL screensaver, not included by any board: the crab sails its
+# boat on a sea whose level IS your usage (0% = empty, 100% = full).
+# Opt in by adding this file to your packages and binding a gesture to
+# toggle_saver (set the theme_tap_script substitution to "toggle_saver");
+# the timeout below opens it by itself. Small screens override the
+# sprite substitutions (saver_sprite_size "small", saver_sprite_scale
+# "0.58", saver_boat_w "40", saver_boat_h "26").
+# Requires idle.yaml (note_activity, last_activity_s, last_wake_ms),
+# packages/themes.yaml (show_active_theme) and a UI package providing
+# font_small.
+
+# Sprite paths default to GitHub raw URLs so the package works when
+# imported remotely (image file: paths resolve in the USER's config dir,
+# not in the cloned package). Local dev entry points override the base
+# with a repo-relative path; small-screen boards override size + scale.
+substitutions:
+  saver_sprite_base: "https://raw.githubusercontent.com/eldios/tokentide/v${tokentide_version}/assets/sprites"
+  saver_sprite_size: "big"
+  # Small/big pixel ratio - scales the hard-coded big sprite metrics in
+  # the animation lambda. Keep in sync with tools/slice_spritesheet.py.
+  saver_sprite_scale: "1.0"
+  saver_boat_w: "96"
+  saver_boat_h: "51"
+  saver_timeout_default: "600"
+
+globals:
+  - id: saver_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  # Mirror of the saver_metric select: newer ESPHome template selects no
+  # longer expose .state to lambdas, on_value is the portable path.
+  - id: saver_metric_is_7d
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+image:
+  - file: ${saver_sprite_base}/boat-${saver_sprite_size}-r.png
+    id: spr_boat_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/boat-${saver_sprite_size}-l.png
+    id: spr_boat_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/cloud.png
+    id: spr_cloud
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/moon.png
+    id: spr_moon
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/wave.png
+    id: spr_wave
+    type: RGB565
+    transparency: alpha_channel
+  # Fauna (see tools/slice_spritesheet.py): directional species ship -r/-l
+  # pairs, symmetric ones a single file.
+  - file: ${saver_sprite_base}/fish-orange-${saver_sprite_size}-r.png
+    id: spr_fish_orange_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/fish-orange-${saver_sprite_size}-l.png
+    id: spr_fish_orange_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/fish-yellow-${saver_sprite_size}-r.png
+    id: spr_fish_yellow_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/fish-yellow-${saver_sprite_size}-l.png
+    id: spr_fish_yellow_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/fish-teal-${saver_sprite_size}-r.png
+    id: spr_fish_teal_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/fish-teal-${saver_sprite_size}-l.png
+    id: spr_fish_teal_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/seahorse-${saver_sprite_size}-r.png
+    id: spr_seahorse_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/seahorse-${saver_sprite_size}-l.png
+    id: spr_seahorse_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/fish-purple-${saver_sprite_size}-r.png
+    id: spr_fish_purple_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/fish-purple-${saver_sprite_size}-l.png
+    id: spr_fish_purple_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/jellyfish-${saver_sprite_size}.png
+    id: spr_jellyfish
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/octopus-${saver_sprite_size}.png
+    id: spr_octopus
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/shark-${saver_sprite_size}-r.png
+    id: spr_shark_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/shark-${saver_sprite_size}-l.png
+    id: spr_shark_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/bubbles-${saver_sprite_size}.png
+    id: spr_bubbles
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/seaweed-${saver_sprite_size}.png
+    id: spr_seaweed
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/seagull-${saver_sprite_size}-r.png
+    id: spr_seagull_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/seagull-${saver_sprite_size}-l.png
+    id: spr_seagull_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/bat-${saver_sprite_size}-r.png
+    id: spr_bat_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/bat-${saver_sprite_size}-l.png
+    id: spr_bat_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/star-${saver_sprite_size}-r.png
+    id: spr_star_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/star-${saver_sprite_size}-l.png
+    id: spr_star_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/ufo-${saver_sprite_size}.png
+    id: spr_ufo
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/plane-${saver_sprite_size}-r.png
+    id: spr_plane_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${saver_sprite_base}/plane-${saver_sprite_size}-l.png
+    id: spr_plane_l
+    type: RGB565
+    transparency: alpha_channel
+
+# Sky decoration settings - HA config entities, persisted in NVS.
+switch:
+  - platform: template
+    id: saver_enabled
+    name: "Screensaver"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: saver_stars
+    name: "Saver Stars"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: saver_moon
+    name: "Saver Moon"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: saver_fauna
+    name: "Saver Fauna"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+select:
+  - platform: template
+    id: saver_metric
+    name: "Screensaver Metric"
+    entity_category: config
+    options: ["5h", "7d"]
+    initial_option: "5h"
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lambda: "id(saver_metric_is_7d) = (x == \"7d\");"
+
+number:
+  - platform: template
+    id: saver_timeout
+    name: "Screensaver Timeout"
+    entity_category: config
+    unit_of_measurement: "s"
+    min_value: 0
+    max_value: 7200
+    step: 10
+    initial_value: ${saver_timeout_default}
+    restore_value: true
+    optimistic: true
+  - platform: template
+    id: saver_cloud_count
+    name: "Saver Clouds"
+    entity_category: config
+    min_value: 0
+    max_value: 16
+    step: 1
+    initial_value: 3
+    restore_value: true
+    optimistic: true
+  - platform: template
+    id: saver_star_count
+    name: "Saver Stars Count"
+    entity_category: config
+    min_value: 0
+    max_value: 16
+    step: 1
+    initial_value: 12
+    restore_value: true
+    optimistic: true
+  - platform: template
+    id: saver_cloud_speed_min
+    name: "Saver Cloud Speed Min"
+    entity_category: config
+    unit_of_measurement: "px/s"
+    min_value: 1
+    max_value: 30
+    step: 1
+    initial_value: 2
+    restore_value: true
+    optimistic: true
+  - platform: template
+    id: saver_cloud_speed_max
+    name: "Saver Cloud Speed Max"
+    entity_category: config
+    unit_of_measurement: "px/s"
+    min_value: 1
+    max_value: 30
+    step: 1
+    initial_value: 5
+    restore_value: true
+    optimistic: true
+  - platform: template
+    id: saver_fauna_sea
+    name: "Saver Sea Creatures"
+    entity_category: config
+    min_value: 0
+    max_value: 4
+    step: 1
+    initial_value: 3
+    restore_value: true
+    optimistic: true
+  - platform: template
+    id: saver_fauna_sky
+    name: "Saver Sky Traffic"
+    entity_category: config
+    min_value: 0
+    max_value: 2
+    step: 1
+    initial_value: 1
+    restore_value: true
+    optimistic: true
+
+script:
+  - id: toggle_saver
+    mode: single
+    then:
+      - script.execute: note_activity
+      # A press that just woke the screen from full off is the wake
+      # itself: consume it instead of also switching pages (unsigned
+      # subtraction keeps the check correct across millis() wraparound).
+      - if:
+          condition:
+            lambda: "return (uint32_t) (millis() - id(last_wake_ms)) > 500;"
+          then:
+            - if:
+                condition:
+                  lambda: "return id(saver_active);"
+                then:
+                  # Back to the active theme page (packages/themes.yaml).
+                  - script.execute: show_active_theme
+                else:
+                  - lvgl.page.show: saver_page
+
+lvgl:
+  pages:
+    - id: saver_page
+      # Pure black: near-black shades show row banding on some ST7789
+      # panels (StickC Plus), and a night sky reads just as well in true
+      # black on every display.
+      bg_color: 0x000000
+      # Wave tiles intentionally overflow the right edge; without this the
+      # page turns scrollable and LVGL draws a drifting scrollbar.
+      scrollbar_mode: "off"
+      scrollable: false
+      on_load:
+        - lambda: "id(saver_active) = true;"
+      on_unload:
+        - lambda: "id(saver_active) = false;"
+      widgets:
+        # Full-page tap target: any touch leaves the screensaver.
+        - obj:
+            id: saver_tap
+            x: 0
+            y: 0
+            width: 100%
+            height: 100%
+            bg_opa: TRANSP
+            border_width: 0
+            on_click:
+              - script.execute: toggle_saver
+        # Stars: tiny dots, twinkling in the anim lambda, hidden underwater.
+        - obj: { id: star_0, x: 6%, y: 8%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_1, x: 16%, y: 22%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_2, x: 27%, y: 6%, width: 3, height: 3, radius: 1, bg_color: 0xD8D4C8, border_width: 0 }
+        - obj: { id: star_3, x: 38%, y: 30%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_4, x: 47%, y: 12%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_5, x: 57%, y: 26%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_6, x: 66%, y: 7%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_7, x: 74%, y: 34%, width: 3, height: 3, radius: 1, bg_color: 0xD8D4C8, border_width: 0 }
+        - obj: { id: star_8, x: 84%, y: 18%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_9, x: 92%, y: 40%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_10, x: 33%, y: 46%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_11, x: 62%, y: 44%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_12, x: 12%, y: 38%, width: 3, height: 3, radius: 1, bg_color: 0xD8D4C8, border_width: 0 }
+        - obj: { id: star_13, x: 52%, y: 42%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_14, x: 79%, y: 24%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - obj: { id: star_15, x: 88%, y: 10%, width: 2, height: 2, radius: 1, bg_color: 0xB8B4A8, border_width: 0 }
+        - image:
+            id: img_moon
+            src: spr_moon
+            align: TOP_RIGHT
+            x: -16
+            y: 10
+        - image:
+            id: img_cloud_0
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 4
+        - image:
+            id: img_cloud_1
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 33
+        - image:
+            id: img_cloud_2
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 6
+        - image:
+            id: img_cloud_3
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 35
+        - image:
+            id: img_cloud_4
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 8
+        - image:
+            id: img_cloud_5
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 37
+        - image:
+            id: img_cloud_6
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 10
+        - image:
+            id: img_cloud_7
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 39
+        - image:
+            id: img_cloud_8
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 12
+        - image:
+            id: img_cloud_9
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 41
+        - image:
+            id: img_cloud_10
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 14
+        - image:
+            id: img_cloud_11
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 43
+        - image:
+            id: img_cloud_12
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 16
+        - image:
+            id: img_cloud_13
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 45
+        - image:
+            id: img_cloud_14
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 18
+        - image:
+            id: img_cloud_15
+            src: spr_cloud
+            align: TOP_LEFT
+            x: 0
+            y: 47
+        # Sky traffic slots - species/position/direction driven by the
+        # animation lambda; hidden while the slot is idle.
+        - image:
+            id: img_sky_0
+            src: spr_seagull_r
+            hidden: true
+        - image:
+            id: img_sky_1
+            src: spr_plane_r
+            hidden: true
+        - obj:
+            id: water_rect
+            align: BOTTOM_MID
+            width: 100%
+            height: 10
+            bg_color: 0x1D4E79
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+        # Big translucent percentage: above the water so it never drowns,
+        # below creatures/waves/boat so the scene swims in front of it.
+        # The color must read on the black sky AND on the blue sea.
+        - label:
+            id: lbl_saver_pct
+            align: CENTER
+            y: -10
+            text_font: font_hero
+            text_color: 0xB8B4A8
+            text_opa: 45%
+            text: "--%"
+        # Ambient micro-bubbles: slow risers that break up the flat blue
+        # wall when the sea is high. Driven by the animation lambda.
+        - obj: { id: bub_0, hidden: true, x: 0, y: 0, width: 4, height: 4, radius: 2, bg_color: 0x6FA0CC, border_width: 0 }
+        - obj: { id: bub_1, hidden: true, x: 0, y: 0, width: 3, height: 3, radius: 2, bg_color: 0x5E8FBB, border_width: 0 }
+        - obj: { id: bub_2, hidden: true, x: 0, y: 0, width: 4, height: 4, radius: 2, bg_color: 0x6FA0CC, border_width: 0 }
+        - obj: { id: bub_3, hidden: true, x: 0, y: 0, width: 3, height: 3, radius: 2, bg_color: 0x5E8FBB, border_width: 0 }
+        - obj: { id: bub_4, hidden: true, x: 0, y: 0, width: 5, height: 5, radius: 3, bg_color: 0x7FB0DC, border_width: 0 }
+        - obj: { id: bub_5, hidden: true, x: 0, y: 0, width: 3, height: 3, radius: 2, bg_color: 0x5E8FBB, border_width: 0 }
+        - obj: { id: bub_6, hidden: true, x: 0, y: 0, width: 4, height: 4, radius: 2, bg_color: 0x6FA0CC, border_width: 0 }
+        - obj: { id: bub_7, hidden: true, x: 0, y: 0, width: 3, height: 3, radius: 2, bg_color: 0x5E8FBB, border_width: 0 }
+        - obj: { id: bub_8, hidden: true, x: 0, y: 0, width: 5, height: 5, radius: 3, bg_color: 0x7FB0DC, border_width: 0 }
+        - obj: { id: bub_9, hidden: true, x: 0, y: 0, width: 4, height: 4, radius: 2, bg_color: 0x6FA0CC, border_width: 0 }
+        # Underwater: static seaweed (needs enough water to be covered)
+        # and the sea creature slots. Declared before the waves and the
+        # boat so the surface always draws on top.
+        - image:
+            id: img_seaweed
+            src: spr_seaweed
+            hidden: true
+        - image:
+            id: img_sea_0
+            src: spr_fish_orange_r
+            hidden: true
+        - image:
+            id: img_sea_1
+            src: spr_fish_yellow_r
+            hidden: true
+        - image:
+            id: img_sea_2
+            src: spr_fish_teal_r
+            hidden: true
+        - image:
+            id: img_sea_3
+            src: spr_octopus
+            hidden: true
+        - image:
+            id: img_wave_0
+            src: spr_wave
+        - image:
+            id: img_wave_1
+            src: spr_wave
+        - image:
+            id: img_wave_2
+            src: spr_wave
+        - image:
+            id: img_wave_3
+            src: spr_wave
+        - image:
+            id: img_wave_4
+            src: spr_wave
+        - image:
+            id: img_wave_5
+            src: spr_wave
+        - image:
+            id: img_boat
+            src: spr_boat_r
+
+interval:
+  # Idle timeout: open the saver after saver_timeout seconds without
+  # activity (below 10s disables it, same rule as the idle.yaml timers).
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(saver_enabled).state && !id(saver_active)
+                  && id(saver_timeout).state >= 10
+                  && ((millis() / 1000) - id(last_activity_s)) >= (uint32_t) id(saver_timeout).state;
+          then:
+            - lvgl.page.show: saver_page
+  # Screensaver animation. Only does work while the saver page is shown.
+  # 33ms matches LVGL's 30fps refresh ceiling; all motion below is
+  # expressed in px/s via DT, so the tick rate only changes smoothness.
+  - interval: 33ms
+    then:
+      - lambda: |-
+          if (!id(saver_active) || id(is_screen_off)) return;
+          const float DT = 0.033f;
+          static float t = 0.0f;
+          t += DT;
+          lv_obj_t *scr = lv_scr_act();
+          int W = lv_obj_get_width(scr);
+          int H = lv_obj_get_height(scr);
+          if (W <= 0 || H <= 0) return;
+          // Water level = selected metric of the most used provider.
+          float pct = id(saver_metric_is_7d) ? id(worst_7d_pct) : id(worst_5h_pct);
+          if (pct < 0) pct = 0;
+          if (pct > 100) pct = 100;
+          int water_h = (int)(H * pct / 100.0f);
+          lv_obj_set_height(id(water_rect), water_h);
+          int wl = H - water_h;   // waterline y from screen top
+          // Boat: triangle sweep across the width, flipping the sprite
+          // at each turn; bobs across the waterline unless the sea is full.
+          const float period = 26.0f;
+          float phase = fmodf(t, period) / period;
+          bool moving_right = phase < 0.5f;
+          float px = moving_right ? (phase * 2.0f) : (2.0f - phase * 2.0f);
+          int bw = ${saver_boat_w};
+          int bh = ${saver_boat_h};
+          int x = (int)(px * (float)(W - bw));
+          float bob_amp = (pct >= 99.0f) ? 2.0f : 6.0f;
+          int hull = (int)(bh * 0.40f);   // how much hull sits in the water
+          int y = wl - bh + hull + (int)(bob_amp * sinf(t * 1.3f));
+          if (y > H - bh) y = H - bh;
+          if (y < 0) y = 0;
+          lv_obj_set_pos(id(img_boat), x, y);
+          static bool was_right = true;
+          if (moving_right != was_right) {
+            was_right = moving_right;
+            lv_image_set_src(id(img_boat), moving_right
+                ? id(spr_boat_r)->get_lv_image_dsc()
+                : id(spr_boat_l)->get_lv_image_dsc());
+          }
+          // Waves drift along the waterline.
+          int drift = (int)(t * 10.0f) % 64;
+          lv_obj_t *waves[6] = { id(img_wave_0), id(img_wave_1), id(img_wave_2),
+                                 id(img_wave_3), id(img_wave_4), id(img_wave_5) };
+          for (int i = 0; i < 6; i++) {
+            lv_obj_set_pos(waves[i], i * 64 - drift, wl - 6);
+          }
+          // Clouds: count (0-16) and speed range come from HA config
+          // entities; per-cloud speed interpolates min..max, phases stagger.
+          lv_obj_t *clouds[16] = { id(img_cloud_0), id(img_cloud_1), id(img_cloud_2), id(img_cloud_3), id(img_cloud_4), id(img_cloud_5), id(img_cloud_6), id(img_cloud_7), id(img_cloud_8), id(img_cloud_9), id(img_cloud_10), id(img_cloud_11), id(img_cloud_12), id(img_cloud_13), id(img_cloud_14), id(img_cloud_15) };
+          const float coff[16] = { 0.0f, 83.0f, 166.0f, 249.0f, 332.0f, 47.0f, 130.0f, 213.0f, 296.0f, 11.0f, 94.0f, 177.0f, 260.0f, 343.0f, 58.0f, 141.0f };
+          const int   cy[16]   = { 4, 33, 6, 35, 8, 37, 10, 39, 12, 41, 14, 43, 16, 45, 18, 47 };
+          int n_clouds = (int) id(saver_cloud_count).state;
+          float smin = id(saver_cloud_speed_min).state;
+          float smax = id(saver_cloud_speed_max).state;
+          if (smax < smin) smax = smin;
+          for (int i = 0; i < 16; i++) {
+            if (i >= n_clouds) {
+              lv_obj_add_flag(clouds[i], LV_OBJ_FLAG_HIDDEN);
+              continue;
+            }
+            lv_obj_clear_flag(clouds[i], LV_OBJ_FLAG_HIDDEN);
+            float sp = (n_clouds > 1) ? smin + (smax - smin) * i / (float)(n_clouds - 1)
+                                      : (smin + smax) / 2.0f;
+            int cx = (int)fmodf(t * sp + coff[i], (float)(W + 48)) - 48;
+            lv_obj_set_pos(clouds[i], cx, cy[i]);
+          }
+          // Moon on/off.
+          if (id(saver_moon).state) lv_obj_clear_flag(id(img_moon), LV_OBJ_FLAG_HIDDEN);
+          else                      lv_obj_add_flag(id(img_moon), LV_OBJ_FLAG_HIDDEN);
+          // Stars twinkle (count + on/off from HA); drown when the sea rises.
+          lv_obj_t *stars[16] = { id(star_0), id(star_1), id(star_2), id(star_3), id(star_4), id(star_5), id(star_6), id(star_7), id(star_8), id(star_9), id(star_10), id(star_11), id(star_12), id(star_13), id(star_14), id(star_15) };
+          bool stars_on = id(saver_stars).state;
+          int n_stars = (int) id(saver_star_count).state;
+          for (int i = 0; i < 16; i++) {
+            int sy = lv_obj_get_y(stars[i]);
+            if (!stars_on || i >= n_stars || sy >= wl - 4) {
+              lv_obj_add_flag(stars[i], LV_OBJ_FLAG_HIDDEN);
+            } else {
+              lv_obj_clear_flag(stars[i], LV_OBJ_FLAG_HIDDEN);
+              lv_opa_t opa = (lv_opa_t)(150 + 100 * sinf(t * (0.7f + 0.13f * i) + i * 2.1f));
+              lv_obj_set_style_bg_opa(stars[i], opa, 0);
+            }
+          }
+          // Fauna: sea creature + sky traffic slots (asciiquarium style).
+          // Each slot idles on a countdown, spawns off-screen with a
+          // random species/depth/speed, despawns past the opposite edge.
+          // Metrics below are big-sprite pixels, scaled by FSCALE.
+          const float FSCALE = ${saver_sprite_scale};
+          enum { N_SEA_SLOTS = 4, N_SKY_SLOTS = 2, N_SEA_SP = 9, N_SKY_SP = 5 };
+          lv_obj_t *sea_objs[N_SEA_SLOTS] = { id(img_sea_0), id(img_sea_1), id(img_sea_2), id(img_sea_3) };
+          lv_obj_t *sky_objs[N_SKY_SLOTS] = { id(img_sky_0), id(img_sky_1) };
+          // Species: 0 orange 1 yellow 2 teal 3 seahorse 4 purple
+          //          5 jellyfish 6 octopus 7 shark 8 bubbles
+          const void *sea_r[N_SEA_SP] = {
+            id(spr_fish_orange_r)->get_lv_image_dsc(), id(spr_fish_yellow_r)->get_lv_image_dsc(),
+            id(spr_fish_teal_r)->get_lv_image_dsc(), id(spr_seahorse_r)->get_lv_image_dsc(),
+            id(spr_fish_purple_r)->get_lv_image_dsc(), id(spr_jellyfish)->get_lv_image_dsc(),
+            id(spr_octopus)->get_lv_image_dsc(), id(spr_shark_r)->get_lv_image_dsc(),
+            id(spr_bubbles)->get_lv_image_dsc() };
+          const void *sea_l[N_SEA_SP] = {
+            id(spr_fish_orange_l)->get_lv_image_dsc(), id(spr_fish_yellow_l)->get_lv_image_dsc(),
+            id(spr_fish_teal_l)->get_lv_image_dsc(), id(spr_seahorse_l)->get_lv_image_dsc(),
+            id(spr_fish_purple_l)->get_lv_image_dsc(), id(spr_jellyfish)->get_lv_image_dsc(),
+            id(spr_octopus)->get_lv_image_dsc(), id(spr_shark_l)->get_lv_image_dsc(),
+            id(spr_bubbles)->get_lv_image_dsc() };
+          const int SEA_W[N_SEA_SP] = { 36, 40, 36, 28, 64, 44, 56, 96, 36 };
+          const int SEA_H[N_SEA_SP] = { 28, 38, 26, 45, 53, 63, 50, 55, 54 };
+          const float SEA_SPD_MIN[N_SEA_SP] = { 8, 6, 8, 3, 5, 2, 3, 18, 0 };
+          const float SEA_SPD_MAX[N_SEA_SP] = { 16, 13, 16, 7, 10, 5, 7, 30, 0 };
+          // Species: 0 seagull 1 bat 2 shooting star 3 ufo 4 plane
+          const void *sky_r[N_SKY_SP] = {
+            id(spr_seagull_r)->get_lv_image_dsc(), id(spr_bat_r)->get_lv_image_dsc(),
+            id(spr_star_r)->get_lv_image_dsc(), id(spr_ufo)->get_lv_image_dsc(),
+            id(spr_plane_r)->get_lv_image_dsc() };
+          const void *sky_l[N_SKY_SP] = {
+            id(spr_seagull_l)->get_lv_image_dsc(), id(spr_bat_l)->get_lv_image_dsc(),
+            id(spr_star_l)->get_lv_image_dsc(), id(spr_ufo)->get_lv_image_dsc(),
+            id(spr_plane_l)->get_lv_image_dsc() };
+          const int SKY_W[N_SKY_SP] = { 48, 40, 56, 48, 64 };
+          const int SKY_H[N_SKY_SP] = { 27, 19, 27, 42, 38 };
+          const float SKY_SPD_MIN[N_SKY_SP] = { 10, 12, 45, 8, 15 };
+          const float SKY_SPD_MAX[N_SKY_SP] = { 18, 22, 70, 25, 25 };
+          static bool  sea_on[N_SEA_SLOTS] = {};
+          static int   sea_sp[N_SEA_SLOTS] = {};
+          static int   sea_dir[N_SEA_SLOTS] = {};
+          static float sea_x[N_SEA_SLOTS] = {};
+          static float sea_frac[N_SEA_SLOTS] = {};
+          static float sea_spd[N_SEA_SLOTS] = {};
+          static int   sea_cd[N_SEA_SLOTS] = { 30, 120, 210, 300 };
+          static bool  sky_on[N_SKY_SLOTS] = {};
+          static int   sky_sp[N_SKY_SLOTS] = {};
+          static int   sky_dir[N_SKY_SLOTS] = {};
+          static float sky_x[N_SKY_SLOTS] = {};
+          static float sky_y[N_SKY_SLOTS] = {};
+          static float sky_spd[N_SKY_SLOTS] = {};
+          static int   sky_cd[N_SKY_SLOTS] = { 90, 540 };
+          auto rnd = [](uint32_t m) -> uint32_t { return m ? random_uint32() % m : 0; };
+          bool fauna_on = id(saver_fauna).state;
+          int n_sea = (int) id(saver_fauna_sea).state;
+          if (n_sea > N_SEA_SLOTS) n_sea = N_SEA_SLOTS;
+          int n_sky = (int) id(saver_fauna_sky).state;
+          if (n_sky > N_SKY_SLOTS) n_sky = N_SKY_SLOTS;
+          // Seaweed: bottom-anchored, shown only when the sea covers it.
+          int weed_h = (int)(102 * FSCALE);
+          if (fauna_on && water_h >= weed_h + (int)(8 * FSCALE)) {
+            lv_obj_clear_flag(id(img_seaweed), LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(id(img_seaweed), (int)(W * 0.10f), H - weed_h);
+          } else {
+            lv_obj_add_flag(id(img_seaweed), LV_OBJ_FLAG_HIDDEN);
+          }
+          // Ambient micro-bubbles: staggered slow risers with a gentle
+          // sway and shimmer, wrapping back to the bottom. They need a
+          // bit of depth to make sense.
+          lv_obj_t *bubs[10] = { id(bub_0), id(bub_1), id(bub_2), id(bub_3), id(bub_4),
+                                 id(bub_5), id(bub_6), id(bub_7), id(bub_8), id(bub_9) };
+          const float BUB_X[10] = { 0.08f, 0.19f, 0.31f, 0.42f, 0.50f,
+                                    0.61f, 0.70f, 0.81f, 0.90f, 0.96f };
+          static float bub_rise[10] = { 0, 14, 28, 42, 56, 7, 21, 35, 49, 63 };
+          int min_depth = (int)(36 * FSCALE);
+          for (int i = 0; i < 10; i++) {
+            if (water_h < min_depth) {
+              lv_obj_add_flag(bubs[i], LV_OBJ_FLAG_HIDDEN);
+              continue;
+            }
+            bub_rise[i] += (3.0f + (i % 4)) * FSCALE * DT;
+            float span_px = (float)(water_h - 12);
+            if (bub_rise[i] >= span_px)
+              bub_rise[i] = (float)(int) rnd((uint32_t)(span_px / 3) + 1);
+            int by = H - 6 - (int) bub_rise[i];
+            int bx = (int)(BUB_X[i] * W) + (int)(3.0f * sinf(t * 0.9f + i * 1.7f));
+            lv_obj_clear_flag(bubs[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(bubs[i], bx, by);
+            lv_obj_set_style_bg_opa(bubs[i], (lv_opa_t)(90 + 50 * sinf(t * 1.1f + i * 2.3f)), 0);
+          }
+          for (int i = 0; i < N_SEA_SLOTS; i++) {
+            if (!fauna_on || i >= n_sea) {
+              if (sea_on[i]) { sea_on[i] = false; lv_obj_add_flag(sea_objs[i], LV_OBJ_FLAG_HIDDEN); }
+              continue;
+            }
+            if (!sea_on[i]) {
+              if (sea_cd[i] > 0) { sea_cd[i]--; continue; }
+              int pick = -1;
+              for (int tries = 0; tries < 6; tries++) {
+                int s = (int) rnd(N_SEA_SP);
+                if (water_h < (int)(SEA_H[s] * FSCALE) + 16) continue;
+                if (s == 7 && rnd(4) != 0) continue;   // sharks are rare
+                pick = s;
+                break;
+              }
+              if (pick < 0) { sea_cd[i] = 60; continue; }
+              sea_on[i] = true;
+              sea_sp[i] = pick;
+              sea_dir[i] = (pick == 8) ? 1 : (rnd(2) ? 1 : -1);
+              sea_spd[i] = SEA_SPD_MIN[pick] + (SEA_SPD_MAX[pick] - SEA_SPD_MIN[pick]) * (rnd(101) / 100.0f);
+              sea_frac[i] = (pick == 8) ? 1.0f : rnd(101) / 100.0f;
+              int cw = (int)(SEA_W[pick] * FSCALE);
+              sea_x[i] = (pick == 8) ? (float)(int) rnd((uint32_t)(W - cw > 0 ? W - cw : 1))
+                                     : (sea_dir[i] > 0 ? -(float) cw : (float) W);
+              lv_image_set_src(sea_objs[i], sea_dir[i] > 0 ? sea_r[pick] : sea_l[pick]);
+              lv_obj_clear_flag(sea_objs[i], LV_OBJ_FLAG_HIDDEN);
+            }
+            int s = sea_sp[i];
+            int cw = (int)(SEA_W[s] * FSCALE), ch = (int)(SEA_H[s] * FSCALE);
+            bool gone = false;
+            if (s == 8) {
+              sea_frac[i] -= 0.08f * DT;   // bubbles rise and pop at the surface
+              if (sea_frac[i] <= 0.0f) gone = true;
+            } else {
+              sea_x[i] += sea_dir[i] * sea_spd[i] * FSCALE * DT;
+              if (sea_dir[i] > 0 ? sea_x[i] > W + 4 : sea_x[i] < -(cw + 4)) gone = true;
+            }
+            int span = water_h - ch - (int)(10 * FSCALE);
+            if (span < 0) gone = true;   // water dropped below the creature
+            if (gone) {
+              sea_on[i] = false;
+              lv_obj_add_flag(sea_objs[i], LV_OBJ_FLAG_HIDDEN);
+              sea_cd[i] = 60 + (int) rnd(300);
+              continue;
+            }
+            int y = wl + (int)(6 * FSCALE) + (int)(span * sea_frac[i]);
+            if (s == 5) y += (int)(4.0f * sinf(t * 1.7f + i * 2.1f));   // jellyfish bob
+            lv_obj_set_pos(sea_objs[i], (int) sea_x[i], y);
+          }
+          for (int i = 0; i < N_SKY_SLOTS; i++) {
+            if (!fauna_on || i >= n_sky) {
+              if (sky_on[i]) { sky_on[i] = false; lv_obj_add_flag(sky_objs[i], LV_OBJ_FLAG_HIDDEN); }
+              continue;
+            }
+            if (!sky_on[i]) {
+              if (sky_cd[i] > 0) { sky_cd[i]--; continue; }
+              int s = (int) rnd(N_SKY_SP);
+              int ch = (int)(SKY_H[s] * FSCALE);
+              int band = wl - ch - (int)(46 * FSCALE);
+              if (band < 8) { sky_cd[i] = 90; continue; }   // sea too high, no sky room
+              sky_on[i] = true;
+              sky_sp[i] = s;
+              sky_dir[i] = rnd(2) ? 1 : -1;
+              sky_spd[i] = SKY_SPD_MIN[s] + (SKY_SPD_MAX[s] - SKY_SPD_MIN[s]) * (rnd(101) / 100.0f);
+              sky_y[i] = 6 + (int) rnd((uint32_t) band);
+              int cw = (int)(SKY_W[s] * FSCALE);
+              sky_x[i] = sky_dir[i] > 0 ? -(float) cw : (float) W;
+              lv_image_set_src(sky_objs[i], sky_dir[i] > 0 ? sky_r[s] : sky_l[s]);
+              lv_obj_clear_flag(sky_objs[i], LV_OBJ_FLAG_HIDDEN);
+            }
+            int s = sky_sp[i];
+            int cw = (int)(SKY_W[s] * FSCALE), ch = (int)(SKY_H[s] * FSCALE);
+            sky_x[i] += sky_dir[i] * sky_spd[i] * FSCALE * DT;
+            if (s == 2) sky_y[i] += 8.0f * FSCALE * DT;   // shooting star falls
+            bool gone = (sky_dir[i] > 0 ? sky_x[i] > W + 4 : sky_x[i] < -(cw + 4))
+                     || (int) sky_y[i] + ch >= wl - 4;
+            if (gone) {
+              sky_on[i] = false;
+              lv_obj_add_flag(sky_objs[i], LV_OBJ_FLAG_HIDDEN);
+              sky_cd[i] = 240 + (int) rnd(900);   // sky traffic is occasional
+              continue;
+            }
+            int y = (int) sky_y[i];
+            if (s == 3) y += (int)(3.0f * sinf(t * 2.3f + i));   // ufo hover wobble
+            lv_obj_set_pos(sky_objs[i], (int) sky_x[i], y);
+          }
+          // Big translucent percentage behind the scene.
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%d%%", (int) pct);
+          lv_label_set_text(id(lbl_saver_pct), buf);

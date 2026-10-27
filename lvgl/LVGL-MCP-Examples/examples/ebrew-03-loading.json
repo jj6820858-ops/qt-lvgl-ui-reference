@@ -1,0 +1,125 @@
+{
+  "format_version": 3,
+  "lvgl_version": "9.6.0",
+  "display": {
+    "width": 800,
+    "height": 480,
+    "rotation": 0,
+    "dpi": 130,
+    "color_format": "XRGB8888",
+    "theme": "light",
+    "scale": 1
+  },
+  "screen": {
+    "type": "lv_obj",
+    "path": "lv_obj#0",
+    "x": 0,
+    "y": 0,
+    "w": 800,
+    "h": 480,
+    "abs": {
+      "x1": 0,
+      "y1": 0,
+      "x2": 799,
+      "y2": 479
+    },
+    "flags": [
+      "clickable",
+      "scrollable"
+    ],
+    "styles": {
+      "bg_opa": 255,
+      "bg_color": "#ffffff",
+      "pad_row": 11,
+      "pad_column": 11,
+      "text_color": "#212121",
+      "font": "montserrat_14",
+      "line_height": 16
+    },
+    "children": [
+      {
+        "type": "lv_label",
+        "path": "lv_label#0",
+        "x": 349,
+        "y": 177,
+        "w": 103,
+        "h": 27,
+        "abs": {
+          "x1": 349,
+          "y1": 177,
+          "x2": 451,
+          "y2": 203
+        },
+        "flags": [
+          "scrollable"
+        ],
+        "text": "E-BREW",
+        "long_mode": "wrap",
+        "styles": {
+          "bg_opa": 0,
+          "text_color": "#d4af37",
+          "font": "montserrat_24",
+          "line_height": 27
+        }
+      },
+      {
+        "type": "lv_label",
+        "path": "lv_label#1",
+        "x": 350,
+        "y": 251,
+        "w": 100,
+        "h": 18,
+        "abs": {
+          "x1": 350,
+          "y1": 251,
+          "x2": 449,
+          "y2": 268
+        },
+        "flags": [
+          "scrollable"
+        ],
+        "text": "Inicializace...",
+        "long_mode": "wrap",
+        "styles": {
+          "bg_opa": 0,
+          "text_color": "#666666",
+          "font": "montserrat_16",
+          "line_height": 18
+        }
+      },
+      {
+        "type": "lv_bar",
+        "path": "lv_bar#0",
+        "x": 250,
+        "y": 290,
+        "w": 300,
+        "h": 20,
+        "abs": {
+          "x1": 250,
+          "y1": 290,
+          "x2": 549,
+          "y2": 309
+        },
+        "flags": [
+          "clickable"
+        ],
+        "value": 45,
+        "min": 0,
+        "max": 100,
+        "styles": {
+          "bg_opa": 51,
+          "bg_color": "#e0e0e0",
+          "radius": 32767,
+          "text_color": "#2196f3",
+          "font": "montserrat_14",
+          "line_height": 16
+        },
+        "indicator": {
+          "bg_opa": 255,
+          "bg_color": "#d4af37",
+          "radius": 32767
+        }
+      }
+    ]
+  }
+}

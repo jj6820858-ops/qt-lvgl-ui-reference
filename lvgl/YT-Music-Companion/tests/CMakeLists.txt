@@ -1,0 +1,101 @@
+# Host unit tests — the palette extractor is pure C, so this compiles the module
+# standalone with NO LVGL, SDL, or panel. Build & run:
+#
+#   cmake -B build tests   &&   cmake --build build   &&   ctest --test-dir build
+# or directly:
+#   cc -std=c11 -I../ui tests/test_palette.c ../ui/palette.c -o test_palette && ./test_palette
+cmake_minimum_required(VERSION 3.16)
+project(ytm_tests C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+enable_testing()
+
+add_executable(test_palette
+    test_palette.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/palette.c
+)
+target_include_directories(test_palette PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../ui)
+
+if(NOT MSVC)
+    target_compile_options(test_palette PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME palette COMMAND test_palette)
+
+# Ambient-glow painter: also pure C (no LVGL), compiled standalone with palette.c.
+add_executable(test_ambient
+    test_ambient.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ambient_paint.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/palette.c
+)
+target_include_directories(test_ambient PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../ui)
+
+if(NOT MSVC)
+    target_compile_options(test_ambient PRIVATE -Wall -Wextra)
+    target_link_libraries(test_ambient PRIVATE m)
+endif()
+
+add_test(NAME ambient COMMAND test_ambient)
+
+# AXP2101 decode: pure C (no LVGL/ESP), compiled standalone.
+add_executable(test_battery
+    test_battery.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/main/axp2101_decode.c
+)
+target_include_directories(test_battery PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/main)
+
+if(NOT MSVC)
+    target_compile_options(test_battery PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME battery COMMAND test_battery)
+
+# Idle-dim decision logic: pure C (no LVGL/ESP), compiled standalone.
+add_executable(test_idle
+    test_idle.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/main/idle.c
+)
+target_include_directories(test_idle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/main)
+
+if(NOT MSVC)
+    target_compile_options(test_idle PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME idle COMMAND test_idle)
+
+# Connection-state FSM: pure C (no LVGL/ESP), compiled standalone.
+add_executable(test_conn
+    test_conn.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/main/conn.c
+)
+target_include_directories(test_conn PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/main)
+
+if(NOT MSVC)
+    target_compile_options(test_conn PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME conn COMMAND test_conn)
+
+# Improv-serial codec: pure C (no ESP/LVGL), compiled standalone.
+add_executable(test_improv
+    test_improv.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/main/improv_serial.c
+)
+target_include_directories(test_improv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/main)
+if(NOT MSVC)
+    target_compile_options(test_improv PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME improv COMMAND test_improv)
+
+# Wi-Fi credential predicate: pure C, compiled standalone.
+add_executable(test_wifi_creds
+    test_wifi_creds.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/main/wifi_creds.c
+)
+target_include_directories(test_wifi_creds PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../firmware/main)
+if(NOT MSVC)
+    target_compile_options(test_wifi_creds PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME wifi_creds COMMAND test_wifi_creds)

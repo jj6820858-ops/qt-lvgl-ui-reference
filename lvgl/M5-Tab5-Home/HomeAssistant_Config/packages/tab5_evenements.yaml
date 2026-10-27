@@ -1,0 +1,389 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file packages/tab5_evenements.yaml
+# @role Demandes de la tablette (ADR-0025, 28/09/2026). Le firmware n'appelle plus
+#       aucune action de Home Assistant : il émet des événements `esphome.tab5_*`,
+#       et l'automatisation ci-dessous les traduit en une LISTE BLANCHE d'actions.
+#       Plus d'option « Autoriser l'appareil à effectuer des actions Home Assistant »
+#       à cocher : un événement `esphome.*` n'en a pas besoin (manager.py de
+#       l'intégration ESPHome), une action si.
+# @contract Événement (données) → action :
+#       tab5_reveil_annonce                → script.tab5_reveil_annonce (tab5_reveil.yaml)
+#       tab5_annonce (message)             → assist_satellite.announce, satellite de la tablette
+#       tab5_calendrier_mois (annee, mois) → script.tab5_calendrier_mois (tab5_calendar.yaml)
+#       tab5_calendrier_jour (date)        → script.tab5_calendrier_jour (tab5_calendar.yaml)
+#       tab5_alerte_lue (alert_id)         → script.tab5_dismiss_alert (tab5_alerts.yaml)
+#       tab5_alertes_historique            → script.tab5_push_alertes_historique (tab5_push.yaml)
+#       tab5_voix_stop                     → media_player.media_stop, lecteur de la tablette
+#       tab5_mode_assistant (option)       → select.select_option, select de pipeline de la tablette
+#                                            (Discussion : « Tab5 · chat pipeline »)
+#       tab5_maj_ecran                     → automation.trigger (id tab5_ha_hmi_updater)
+#       tab5_recharger_automatisations     → automation.reload
+#       tab5_redemarrage_ha_confirme       → homeassistant.restart (émis seulement par
+#                                            « Confirmer » de la console système)
+#       tab5_lecteur (action, lecteur,     → script.tab5_lecteur_commande (tab5_lecteur.yaml,
+#                     valeur)                ADR-0050) : n'agit que sur un lecteur de la
+#                                            liste choisie ou sur le lecteur montré ; le
+#                                            blueprint écoute aussi « ouvrir » d'une tuile
+#                                            et « playlist » (ADR-0068, le lien est à
+#                                            lui ; le script l'ignore)
+#       tab5_musique (action, piece,       → script.tab5_musique_commande (tab5_musique.yaml,
+#                     valeur)                ADR-0067) : pages Pièces et Bibliothèque ;
+#                                            n'agit que sur une pièce de la liste (index)
+#                                            ou sur le lecteur montré, répond à la seule
+#                                            tablette qui a demandé
+#       tab5_serveur_ia_action (action)    → script.tab5_serveur_ia_action (tab5_llm.yaml,
+#                                            ADR-0060) : decharger / reveiller / redemarrer,
+#                                            seulement si le package l'offre à cet instant
+#       Les autres événements de la tablette ont leur consommateur ailleurs :
+#       tab5_connected (tab5_push, tab5_reveil, tab5_reglages, blueprint), tab5_zones,
+#       tab5_action et tab5_energie (blueprint « Tab5 — emplacements », qui connaît les
+#       capteurs ; ce dernier lance script.tab5_energie, ADR-0028), tab5_journal (tab5_health) ;
+#       le blueprint écoute aussi tab5_maj_ecran (emplacements, tuiles, zones). Les
+#       tab5_alarm_* sont offerts aux automatisations de l'utilisateur.
+#       tests/test_actions_ha.py compare émetteurs et consommateurs,
+#       tests/test_contrat.py les champs émis et lus.
+# @security Seule une tablette de modèle `tab5-ha-hmi` (bloc `project:` du firmware)
+#       est écoutée, reconnue par le device_id de l'événement, que HA ajoute à tout
+#       événement d'un appareil ESPHome. Aucun nom d'action ni d'entité ne vient de
+#       l'événement : chaque branche appelle une action fixe, sur une entité de LA
+#       tablette qui a parlé (device_entities) ou du projet. Limite : manager.py pose
+#       device_id AVANT les données de l'appareil, qui pourraient donc le remplacer ;
+#       un AUTRE appareil ESPHome, déjà ajouté à HA, pourrait ainsi se faire passer
+#       pour la tablette. Le firmware n'envoie jamais ce champ. C'est toujours bien
+#       moins que l'option « actions HA », qui lui ouvrait toutes les actions.
+# @compat Un firmware 3.1 ou plus ancien appelle encore les actions (option cochée)
+#       et n'émet aucun de ces événements : ce package reste alors inactif, sans
+#       gêner. Un firmware récent SANS ce package : ses demandes n'ont pas de
+#       consommateur, rien ne se passe et rien n'est journalisé (voir
+#       docs/installation.md, « Mise à jour »). Ordre : ce package d'abord, puis le
+#       firmware, puis décocher l'option.
+# @ai_instruction Nouvelle demande de la tablette = un `homeassistant.event` dans le
+#       firmware + un déclencheur (id = nom sans « esphome.tab5_ ») + une branche ici,
+#       avec une action de la liste blanche de tests/test_actions_ha.py. Jamais une
+#       action dont le nom ou l'entité viendrait des données de l'événement.
+# @install Nécessite homeassistant.packages: !include_dir_named packages, et
+#       custom_templates/tab5_tablette.jinja (garde d'origine, 08/10/2026) déployé et
+#       rechargé AVANT. Aucun placeholder : ce fichier est générique.
+# ============================================================================
+
+automation:
+  - id: tab5_evenements
+    alias: "Tab5 — tablet requests (events)"
+    description: >-
+      Traduit les événements esphome.tab5_* du firmware en une liste blanche d'actions
+      (annonces, calendrier, alertes lues, voix, pipeline, console système), pour une
+      tablette M5Stack Tab5 (modèle tab5-ha-hmi) seulement. Remplace l'option
+      « autoriser l'appareil à effectuer des actions Home Assistant » (ADR-0025).
+    # Demandes indépendantes : le calendrier en envoie jusqu'à trois d'affilée (mois
+    # affiché et ses voisins), et une annonce ne doit pas attendre une poussée.
+    mode: parallel
+    max: 20
+    trace:
+      stored_traces: 20
+    triggers:
+      - trigger: event
+        event_type: esphome.tab5_reveil_annonce
+        id: reveil_annonce
+      - trigger: event
+        event_type: esphome.tab5_annonce
+        id: annonce
+      - trigger: event
+        event_type: esphome.tab5_calendrier_mois
+        id: calendrier_mois
+      - trigger: event
+        event_type: esphome.tab5_calendrier_jour
+        id: calendrier_jour
+      - trigger: event
+        event_type: esphome.tab5_alerte_lue
+        id: alerte_lue
+      - trigger: event
+        event_type: esphome.tab5_alertes_historique
+        id: alertes_historique
+      - trigger: event
+        event_type: esphome.tab5_voix_stop
+        id: voix_stop
+      - trigger: event
+        event_type: esphome.tab5_mode_assistant
+        id: mode_assistant
+      - trigger: event
+        event_type: esphome.tab5_maj_ecran
+        id: maj_ecran
+      - trigger: event
+        event_type: esphome.tab5_recharger_automatisations
+        id: recharger_automatisations
+      - trigger: event
+        event_type: esphome.tab5_redemarrage_ha_confirme
+        id: redemarrage_ha_confirme
+      - trigger: event
+        event_type: esphome.tab5_lecteur
+        id: lecteur
+      - trigger: event
+        event_type: esphome.tab5_musique
+        id: musique
+      - trigger: event
+        event_type: esphome.tab5_serveur_ia_action
+        id: serveur_ia_action
+    conditions:
+      # La tablette, reconnue à son modèle comme dans le blueprint et les poussées.
+      # Un événement sans device_id (tiré à la main) ou dont le device_id est une
+      # entité est ignoré. device_attr() refuse autre chose qu'un texte : d'où le
+      # `| string` (device_id vaut None pour un appareil pas encore enregistré).
+      - condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_origine -%}
+          {{ tab5_origine(trigger) == 'oui' }}
+    actions:
+      - variables:
+          # Entités de LA tablette qui a émis l'événement (plusieurs tablettes : chacune
+          # ne pilote que les siennes).
+          entites: "{{ device_entities(trigger.event.data.device_id) }}"
+      - choose:
+          - alias: "Briefing parlé du réveil"
+            conditions:
+              - condition: trigger
+                id: reveil_annonce
+            sequence:
+              # Package tab5_reveil.yaml absent : rien (avant, « Action … not found »).
+              - if: "{{ states['script.tab5_reveil_annonce'] is not none }}"
+                then:
+                  # L'écran qui sonne : le briefing parle sur son satellite, dans sa
+                  # langue (ADR-0071).
+                  - action: script.turn_on
+                    target:
+                      entity_id: script.tab5_reveil_annonce
+                    data:
+                      variables:
+                        appareil: "{{ trigger.event.data.device_id }}"
+
+          - alias: "Annonce sur le satellite de la tablette (rendez-vous, volet arrêté)"
+            conditions:
+              - condition: trigger
+                id: annonce
+            sequence:
+              - variables:
+                  satellite: "{{ entites | select('match', 'assist_satellite[.]') | first | default('') }}"
+                  message: "{{ trigger.event.data.message | default('') | string }}"
+              - if: "{{ satellite != '' and (message | string | length) > 0 }}"
+                then:
+                  - action: assist_satellite.announce
+                    target:
+                      entity_id: "{{ satellite }}"
+                    data:
+                      message: "{{ message }}"
+
+          - alias: "Calendrier : un mois (réponse tab5_maj_calendrier_mois)"
+            conditions:
+              - condition: trigger
+                id: calendrier_mois
+            sequence:
+              # script.turn_on : la demande ne l'attend pas, comme l'appel direct du
+              # firmware d'avant. Le script est en `mode: queued` depuis le 28/09/2026
+              # (tab5_calendar.yaml) : chaque demande a sa réponse, aucune n'en annule une
+              # autre. Année ou mois invalide : il s'arrête sans erreur.
+              - if: "{{ states['script.tab5_calendrier_mois'] is not none }}"
+                then:
+                  - action: script.turn_on
+                    target:
+                      entity_id: script.tab5_calendrier_mois
+                    data:
+                      variables:
+                        annee: "{{ trigger.event.data.annee | default('') | string }}"
+                        mois: "{{ trigger.event.data.mois | default('') | string }}"
+                        appareil: "{{ trigger.event.data.device_id | default('', true) | string }}"
+
+          - alias: "Calendrier : un jour (réponse tab5_maj_calendrier_jour)"
+            conditions:
+              - condition: trigger
+                id: calendrier_jour
+            sequence:
+              - if: "{{ states['script.tab5_calendrier_jour'] is not none }}"
+                then:
+                  - action: script.turn_on
+                    target:
+                      entity_id: script.tab5_calendrier_jour
+                    data:
+                      variables:
+                        date: "{{ trigger.event.data.date | default('') | string }}"
+                        appareil: "{{ trigger.event.data.device_id | default('', true) | string }}"
+
+          - alias: "Alerte lue (bandeau info ou alerte HA touché à l'écran)"
+            conditions:
+              - condition: trigger
+                id: alerte_lue
+            sequence:
+              - if: >-
+                  {{ states['script.tab5_dismiss_alert'] is not none
+                     and (trigger.event.data.alert_id | default('') | string | trim) != '' }}
+                then:
+                  - action: script.turn_on
+                    target:
+                      entity_id: script.tab5_dismiss_alert
+                    data:
+                      variables:
+                        alert_id: "{{ trigger.event.data.alert_id | string }}"
+
+          - alias: "Historique des alertes (popup « Alertes » ouvert)"
+            conditions:
+              - condition: trigger
+                id: alertes_historique
+            sequence:
+              - if: "{{ states['script.tab5_push_alertes_historique'] is not none }}"
+                then:
+                  - action: script.turn_on
+                    target:
+                      entity_id: script.tab5_push_alertes_historique
+
+          - alias: "Voix interrompue : arrêt du lecteur de la tablette"
+            conditions:
+              - condition: trigger
+                id: voix_stop
+            sequence:
+              - variables:
+                  lecteur: "{{ entites | select('match', 'media_player[.]') | first | default('') }}"
+              - if: "{{ lecteur != '' }}"
+                then:
+                  - action: media_player.media_stop
+                    target:
+                      entity_id: "{{ lecteur }}"
+
+          - alias: "Mode Domotique / Discussion : pipeline de la tablette"
+            conditions:
+              - condition: trigger
+                id: mode_assistant
+            sequence:
+              - variables:
+                  # « preferred » (Domotique) ou « Discussion LLM » (Discussion, nom fixé
+                  # par le firmware). Discussion = le pipeline choisi dans « Tab5 · chat
+                  # pipeline » (tab5_reglages.yaml) ; « Not set » (« Aucun » avant le
+                  # 24/10/2026 ; jamais « None », que HA relirait comme le None de
+                  # Python) = le pipeline préféré (les boutons sont alors masqués sur
+                  # un firmware qui le sait). Liste
+                  # absente (tab5_reglages.yaml plus ancien) : le nom tel quel, comme avant
+                  # le 29/09/2026.
+                  demande: "{{ trigger.event.data.option | default('') | string }}"
+                  choisi: "{{ states('select.tab5_pipeline_de_discussion') }}"
+                  option: >-
+                    {%- if demande == 'preferred' or choisi in [none, 'Not set', 'none', 'None', 'Aucun', 'Aucune'] -%}preferred
+                    {%- elif choisi in ['unknown', 'unavailable'] -%}{{ demande }}
+                    {%- else -%}{{ choisi }}
+                    {%- endif -%}
+                  # Select de pipeline : ses options commencent par « preferred »
+                  # (AssistPipelineSelect de HA). Depuis HA 2025.10, un second
+                  # (« Assistant 2 », second mot d'activation) a les mêmes options : le
+                  # premier par ordre d'entity_id est celui que visait le firmware
+                  # (…_assistant avant …_assistant_2, vérifié le 28/09/2026).
+                  pipeline: >-
+                    {%- set ns = namespace(l=[]) -%}
+                    {%- for e in entites | select('match', 'select[.]') -%}
+                      {%- if 'preferred' in (state_attr(e, 'options') or []) -%}
+                        {%- set ns.l = ns.l + [e] -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                    {{ (ns.l | sort | first) if ns.l else '' }}
+              # Option absente de ce HA (pipeline supprimé depuis) : rien, au lieu d'une
+              # erreur dans le journal à chaque démarrage de la tablette.
+              - if: "{{ pipeline != '' and option in (state_attr(pipeline, 'options') or []) }}"
+                then:
+                  - action: select.select_option
+                    target:
+                      entity_id: "{{ pipeline }}"
+                    data:
+                      option: "{{ option }}"
+
+          # Relance la poussée complète, rien d'autre : le garde-fou is_primary_active
+          # qu'elle remettait d'abord à `on` est retiré depuis la 3.8.
+          - alias: "Console système : MAJ Écran (poussée complète)"
+            conditions:
+              - condition: trigger
+                id: maj_ecran
+            sequence:
+              - variables:
+                  # L'automatisation de poussée de tab5_push.yaml, par son id : son
+                  # entity_id suit son nom, qu'un utilisateur peut changer.
+                  poussee: >-
+                    {{ states.automation | selectattr('attributes.id', 'defined')
+                       | selectattr('attributes.id', 'eq', 'tab5_ha_hmi_updater')
+                       | map(attribute='entity_id') | first | default('') }}
+              - if: "{{ poussee != '' }}"
+                then:
+                  - action: automation.trigger
+                    target:
+                      entity_id: "{{ poussee }}"
+
+          - alias: "Console système : recharger les automatisations"
+            conditions:
+              - condition: trigger
+                id: recharger_automatisations
+            sequence:
+              - action: automation.reload
+
+          # Lecteur de musique (ADR-0050) : la commande part au script du package, qui ne
+          # touche qu'un lecteur de la liste « Tab5 · music players » ou le lecteur
+          # montré. Aucune entité ne vient de l'événement (un index, une clé de tuile).
+          - alias: "Lecteur de musique : commande du popup Musique"
+            conditions:
+              - condition: trigger
+                id: lecteur
+            sequence:
+              - if: "{{ states['script.tab5_lecteur_commande'] is not none }}"
+                then:
+                  - action: script.turn_on
+                    target:
+                      entity_id: script.tab5_lecteur_commande
+                    data:
+                      variables:
+                        commande: "{{ trigger.event.data.action | default('') | string }}"
+                        lecteur: "{{ trigger.event.data.lecteur | default('') | string }}"
+                        valeur: "{{ trigger.event.data.valeur | default('') | string }}"
+                        # L'écran qui demande : sa liste de lecteurs (ADR-0072).
+                        appareil: "{{ trigger.event.data.device_id | default('', true) | string }}"
+
+          # Musique de la maison (ADR-0067) : pages Pièces et Bibliothèque. Le script ne
+          # touche qu'une pièce de la liste (un index) ou le lecteur montré, et vérifie
+          # chaque valeur (ref, mode, index de source) ; les listes repartent vers la seule
+          # tablette qui a demandé (device_id).
+          - alias: "Musique de la maison : commande des pages Pièces et Bibliothèque"
+            conditions:
+              - condition: trigger
+                id: musique
+            sequence:
+              - if: "{{ states['script.tab5_musique_commande'] is not none }}"
+                then:
+                  - action: script.turn_on
+                    target:
+                      entity_id: script.tab5_musique_commande
+                    data:
+                      variables:
+                        commande: "{{ trigger.event.data.action | default('') | string }}"
+                        piece: "{{ trigger.event.data.piece | default('') | string }}"
+                        valeur: "{{ trigger.event.data.valeur | default('') | string }}"
+                        appareil: "{{ trigger.event.data.device_id | default('', true) | string }}"
+
+          # Serveur IA (ADR-0060) : un code seulement, jamais un modèle, une adresse ou une
+          # entité ; le script ne fait que ce que sensor.tab5_serveur_ia_actions offre, et
+          # une action par 5 s au plus.
+          - alias: "Serveur IA : action du popup (décharger, réveiller, redémarrer)"
+            conditions:
+              - condition: trigger
+                id: serveur_ia_action
+            sequence:
+              - variables:
+                  demande: "{{ trigger.event.data.action | default('') | string }}"
+              - if: >-
+                  {{ states['script.tab5_serveur_ia_action'] is not none
+                     and demande in ['decharger', 'reveiller', 'redemarrer'] }}
+                then:
+                  - action: script.turn_on
+                    target:
+                      entity_id: script.tab5_serveur_ia_action
+                    data:
+                      variables:
+                        code: "{{ demande }}"
+
+          - alias: "Console système : redémarrer Home Assistant (confirmé à l'écran)"
+            conditions:
+              - condition: trigger
+                id: redemarrage_ha_confirme
+            sequence:
+              - action: homeassistant.restart

@@ -1,0 +1,290 @@
+# -*- coding: utf-8 -*-
+"""Horloge à rouleau : sa géométrie est écrite dans Tab5/paquets/tab5-lvgl.yaml seulement
+(01/10/2026). Avant, layout_clock_roller() la recalculait en C++ 2 s après le boot, et
+les cadres provisoires du YAML (105 px) coupaient le bas des chiffres pendant ~1,5 s.
+
+Ce test refait le calcul depuis les métriques de la police et vérifie les valeurs du
+YAML : chaque cadre contient toute l'encre des chiffres (sinon l'horloge est coupée),
+il a la largeur d'un chiffre, HH:MM est centré dans la tuile et le « : » est à la
+même hauteur que les chiffres. Changer la taille de roboto_130_b ou une valeur de la
+tuile sans refaire le calcul le fait échouer.
+
+Métriques de Roboto 700 (Google Fonts, version 3.015), en unités de police, relevées
+avec fontTools le 01/10/2026 dans le fichier que télécharge ESPHome. Arrondis de
+FreeType, celui d'ESPHome : ascendante au pixel supérieur, haut de l'encre au pixel
+supérieur, bas de l'encre au pixel inférieur, avance au plus proche. Contrôlé sur la
+tablette : son journal de démarrage donnait ligne de base 121, avance 75 et 37.
+
+Depuis le lot 3 du portage 1024×600 (ADR-0061), positions et tailles de la tuile sont des
+jetons `${acc_…}` / `${hor_…}` (Tab5/paquets/tab5-ui-tokens.yaml) qui suivent la police de
+la carte : chaque test est joué pour chaque carte, jetons résolus et police à sa taille.
+Hors du Tab5, chaque valeur est celle du Tab5 réduite et arrondie (police_px), pas
+recalculée des unités de la police : un écart de 1 px (largeur d'un cadre, pas entre deux
+chiffres, centrage) y est admis (`_proche`) ; l'encre, elle, reste dans son cadre.
+"""
+import math
+import os
+import re
+
+import pytest
+import yaml
+from tests.commun import CARTES, BaseChargeur, avec_jetons, taille_police
+
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+UNITES_EM = 2048
+ASCENDANTE = 1900          # hhea.ascent
+AVANCE_CHIFFRE = 1175      # même avance pour 0-9 (chiffres tabulaires)
+AVANCE_DEUX_POINTS = 577
+ENCRE_HAUT = 1477          # yMax le plus haut des chiffres (2, 3, 8, 9)
+ENCRE_BAS = -20            # yMin le plus bas des chiffres (0, 3, 5, 6, 8)
+MARGE_MIN = 2              # px d'air exigés entre l'encre et le bord du cadre
+
+
+class _Chargeur(BaseChargeur):
+    pass
+
+
+class _Inclusion(dict):
+    """Un `!include` laissé tel quel au chargement, déplié par _deplier()."""
+
+
+def _inclusion(chargeur, noeud):
+    if isinstance(noeud, yaml.MappingNode):
+        return _Inclusion(chargeur.construct_mapping(noeud, deep=True))
+    return _Inclusion(file=chargeur.construct_scalar(noeud))
+
+
+_Chargeur.add_constructor("!include", _inclusion)
+_Chargeur.add_multi_constructor("!", lambda chargeur, suffixe, noeud: None)
+
+
+# Carte dont les jetons sont résolus (fixture `_carte`, chaque test pour chaque carte).
+_CARTE = ["tab5"]
+
+
+@pytest.fixture(autouse=True, params=CARTES)
+def _carte(request):
+    _CARTE[0] = request.param
+    yield request.param
+    _CARTE[0] = "tab5"
+
+
+def _resolu(texte):
+    """Jetons résolus pour la carte ; un nombre entre guillemets (`y: "${hor_dp_y}"`)
+    redevient un nombre, comme ESPHome le lit."""
+    return re.sub(r'"(-?\d+)"', r"\1", avec_jetons(texte, _CARTE[0]))
+
+
+def _proche(a, b):
+    """Égaux sur le Tab5 ; à 1 px près sur une autre carte (valeurs réduites, voir l'en-tête)."""
+    return a == b if _CARTE[0] == "tab5" else abs(a - b) <= 1
+
+
+def _charger(*chemin):
+    with open(os.path.join(REPO, *chemin), encoding="utf-8") as f:
+        return yaml.load(_resolu(f.read()), Loader=_Chargeur)
+
+
+def _marquer(noeud, dossier):
+    """Note sur chaque `!include` d'un gabarit le dossier de ce gabarit : ESPHome résout
+    un chemin relatif depuis le fichier qui l'inclut (rangee_panneau.yaml inclut
+    rangee_element.yaml, lot 3)."""
+    if isinstance(noeud, _Inclusion):
+        noeud.dossier = dossier
+    if isinstance(noeud, dict):
+        for v in noeud.values():
+            _marquer(v, dossier)
+    elif isinstance(noeud, list):
+        for v in noeud:
+            _marquer(v, dossier)
+
+
+def _deplier(entree):
+    """Un `!include { file, vars }`, déplié comme ESPHome : le gabarit (chemin relatif au
+    fichier qui l'inclut, Tab5/paquets/ pour tab5-lvgl.yaml) avec chaque ${var} remplacé."""
+    if not isinstance(entree, _Inclusion):
+        return entree
+    dossier = getattr(entree, "dossier", os.path.join(REPO, "Tab5", "paquets"))
+    chemin = os.path.normpath(os.path.join(dossier, entree["file"]))
+    with open(chemin, encoding="utf-8") as f:
+        texte = f.read()
+    for nom, valeur in (entree.get("vars") or {}).items():
+        texte = texte.replace("${%s}" % nom, str(valeur))
+    contenu = yaml.load(_resolu(texte), Loader=_Chargeur)
+    _marquer(contenu, os.path.dirname(chemin))
+    return contenu
+
+
+def _widgets(liste):
+    """Parcourt l'arbre : (type, propriétés) de chaque widget."""
+    for entree in liste or []:
+        entree = _deplier(entree)
+        if not isinstance(entree, dict):
+            continue
+        for type_, props in entree.items():
+            props = props or {}
+            yield type_, props
+            yield from _widgets(props.get("widgets"))
+
+
+def _tuile():
+    page = _charger("Tab5", "paquets", "tab5-lvgl.yaml")["lvgl"]["pages"][0]
+    for _, props in _widgets(page["widgets"]):
+        if props.get("id") == "clock_tile":
+            return props
+    raise AssertionError("clock_tile introuvable dans tab5-lvgl.yaml")
+
+
+def _styles():
+    lvgl = _charger("Tab5", "paquets", "tab5-styles.yaml")
+    polices = {p["id"]: p for p in lvgl["font"]}
+    styles = {s["id"]: s for s in lvgl["lvgl"]["style_definitions"]}
+    return polices, styles
+
+
+def _px():
+    polices, _ = _styles()
+    taille = taille_police(polices["roboto_130_b"]["size"], _CARTE[0])   # ADR-0061
+    e = taille / UNITES_EM
+    asc = math.ceil(ASCENDANTE * e)
+    return {
+        "chiffre": round(AVANCE_CHIFFRE * e),
+        "deux_points": round(AVANCE_DEUX_POINTS * e),
+        "encre_haut": asc - math.ceil(ENCRE_HAUT * e),   # depuis le haut du label
+        "encre_bas": asc - math.floor(ENCRE_BAS * e),
+    }
+
+
+def _enfants(tuile):
+    rouleaux, deux_points, date = {}, None, None
+    for entree in tuile["widgets"]:
+        (type_, props), = _deplier(entree).items()
+        if type_ == "obj" and str(props.get("id", "")).startswith("clock_roll_"):
+            rouleaux[props["id"]] = props
+        elif props.get("id") == "lbl_time_colon":
+            deux_points = props
+        elif props.get("id") == "lbl_date":
+            date = props
+    assert list(rouleaux) == ["clock_roll_h10", "clock_roll_h1", "clock_roll_m10", "clock_roll_m1"]
+    assert deux_points and date
+    return list(rouleaux.values()), deux_points, date
+
+
+def test_un_gabarit_pour_les_quatre_rouleaux():
+    # Règle 5 : les 4 rouleaux viennent de clock_roller.yaml, pas de 4 copies.
+    inclusions = [e for e in _tuile()["widgets"] if isinstance(e, _Inclusion)]
+    assert [e["file"] for e in inclusions] == ["../ui_components/clock_roller.yaml"] * 4
+    assert [e["vars"]["d"] for e in inclusions] == ["h10", "h1", "m10", "m1"]
+
+
+def test_pas_d_heure_factice_avant_l_heure_reelle():
+    # Jusqu'au premier update_clock_date_ui(), le YAML affichait « 19:50 » et
+    # « Jeu 02 Avr », une heure et une date fausses : tout reste vide jusqu'à l'heure réelle.
+    rouleaux, _, date = _enfants(_tuile())
+    assert [l["label"]["text"] for r in rouleaux for l in r["widgets"]] == [""] * 8
+    assert date["text"] == ""
+
+
+def _styles_du(label):
+    s = label.get("styles") or []
+    return [s] if isinstance(s, str) else list(s)
+
+
+def test_police_de_l_horloge():
+    # Par le style partagé style_police_horloge (thèmes, lot 3) : un thème peut changer la
+    # police, theme_polices() repose alors le y des labels (tests/test_polices_themes.py).
+    # Ces calculs-ci valent pour la police de l'état compilé.
+    tuile = _tuile()
+    rouleaux, deux_points, _ = _enfants(tuile)
+    labels = [l["label"] for r in rouleaux for l in r["widgets"]]
+    assert len(labels) == 8
+    for l in labels + [deux_points]:
+        assert "text_font" not in l, "police posée sur le label : un thème ne pourrait plus la changer"
+        assert "style_police_horloge" in _styles_du(l)
+    _, styles = _styles()
+    assert styles["style_police_horloge"]["text_font"] == "roboto_130_b"
+
+
+def test_chaque_cadre_contient_l_encre_des_chiffres():
+    px = _px()
+    for r in _enfants(_tuile())[0]:
+        assert r["align"] == "TOP_LEFT" and r["styles"] == "style_transparent"
+        assert r["scrollable"] is False
+        assert _proche(r["width"], px["chiffre"]), f"{r['id']} : largeur ≠ avance d'un chiffre"
+        ys = {l["label"]["y"] for l in r["widgets"]}
+        assert len(ys) == 1, f"{r['id']} : les deux labels du rouleau à des hauteurs différentes"
+        y_label = ys.pop()
+        haut = y_label + px["encre_haut"]
+        bas = y_label + px["encre_bas"]
+        assert haut >= MARGE_MIN, f"{r['id']} : le haut des chiffres est coupé ({haut} px)"
+        assert r["height"] - bas >= MARGE_MIN, (
+            f"{r['id']} : le bas des chiffres est coupé (encre jusqu'à {bas} px, cadre de {r['height']} px)")
+        assert all(l["label"]["align"] == "TOP_MID" for l in r["widgets"])
+
+
+def test_cadres_alignes_et_au_dessus_de_la_date():
+    rouleaux, _, date = _enfants(_tuile())
+    assert len({(r["y"], r["height"]) for r in rouleaux}) == 1
+    assert rouleaux[0]["y"] + rouleaux[0]["height"] <= date["y"], "les cadres empiètent sur la date"
+
+
+def test_hhmm_centre_dans_la_tuile():
+    px = _px()
+    tuile = _tuile()
+    rouleaux, deux_points, _ = _enfants(tuile)
+    _, styles = _styles()
+    bordure = styles[tuile["styles"]]["border_width"]
+    assert styles[tuile["styles"]]["pad_all"] == 0
+    largeur_utile = tuile["width"] - 2 * bordure
+    x = [r["x"] for r in rouleaux]
+    w = px["chiffre"]
+    assert _proche(x[1], x[0] + w) and _proche(x[3], x[2] + w), "les deux chiffres d'un groupe doivent se toucher"
+    avant = deux_points["x"] - (x[1] + w)
+    apres = x[2] - (deux_points["x"] + px["deux_points"])
+    assert _proche(avant, apres) and min(avant, apres) >= 0, (
+        f"« : » décentré entre les heures et les minutes ({avant} / {apres} px)")
+    gauche, droite = x[0], largeur_utile - (x[3] + w)
+    assert abs(gauche - droite) <= (1 if _CARTE[0] == "tab5" else 2), f"HH:MM décentré dans la tuile ({gauche} / {droite} px)"
+
+
+def test_deux_points_a_la_hauteur_des_chiffres():
+    rouleaux, deux_points, _ = _enfants(_tuile())
+    y_label = rouleaux[0]["widgets"][0]["label"]["y"]
+    assert deux_points["y"] == rouleaux[0]["y"] + y_label
+
+
+ASCENDANTE_45 = 42         # Roboto 700 à 45 px (lbl_date) : ceil(1900 × 45 / 2048)
+# bpp 2 : ESPHome vide les pixels de couverture < 64/255 ; la 1re rangée du haut des
+# chiffres ronds de Roboto 130 en fait partie, l'encre VISIBLE commence 1 px plus bas
+# (FreeType comme ESPHome, `encre` de Tab5/themes/_polices.yaml ; rendu de la CI du
+# 05/10/2026 : 33 px en haut pour 32 en bas avec le cadre à y 27).
+RANGEE_VIDE_HAUT = 1
+# Jambages de la date (g, j, p, q, y) : encre visible jusqu'à 9 px sous la ligne de base
+# en Roboto 700 à 45 px (`date.jambage` de Tab5/themes/_polices.yaml, FreeType en bpp 2).
+JAMBAGE_45 = 9
+CHIFFRE_0_X = (95, 1080)   # xMin, xMax du « 0 » (Tab5/themes/_polices.yaml)
+
+
+def test_marges_egales_dans_la_tuile():
+    # 05/10/2026 (demande d'Axel) : autant d'air au-dessus de l'encre des chiffres que sous
+    # le bas des jambages de la date ; sur les côtés, HH:MM centré (test_hhmm_centre_dans_la_tuile),
+    # plus large que la marge du haut.
+    px = _px()
+    tuile = _tuile()
+    rouleaux, _, date = _enfants(tuile)
+    _, styles = _styles()
+    bordure = styles[tuile["styles"]]["border_width"]
+    y_label = rouleaux[0]["widgets"][0]["label"]["y"]
+    haut = bordure + rouleaux[0]["y"] + y_label + px["encre_haut"] + RANGEE_VIDE_HAUT
+    # Police de la date à la taille de la carte (45 px sur le Tab5) : ascendante calculée,
+    # jambage réduit dans le même rapport.
+    t_date = taille_police(_styles()[0]["roboto_45_b"]["size"], _CARTE[0])
+    ascendante = math.ceil(ASCENDANTE * t_date / UNITES_EM)
+    assert t_date != 45 or ascendante == ASCENDANTE_45
+    bas = tuile["height"] - (bordure + date["y"] + ascendante + round(JAMBAGE_45 * t_date / 45))
+    assert _proche(haut, bas), f"marges inégales : {haut} px en haut, {bas} px en bas"
+    e = taille_police(_styles()[0]["roboto_130_b"]["size"], _CARTE[0]) / UNITES_EM
+    gauche = bordure + rouleaux[0]["x"] + math.floor(CHIFFRE_0_X[0] * e)
+    droite = tuile["width"] - (bordure + rouleaux[3]["x"] + math.ceil(CHIFFRE_0_X[1] * e))
+    assert abs(gauche - droite) <= 1 and gauche >= haut, (gauche, droite, haut)

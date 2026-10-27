@@ -1,0 +1,57 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "host-debug",
+      "displayName": "Host debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ST_BUILD_TESTS": "ON",
+        "ST_BUILD_GALLERY": "ON"
+      }
+    },
+    {
+      "name": "host-release",
+      "displayName": "Host release",
+      "inherits": "host-debug",
+      "binaryDir": "${sourceDir}/build/host-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ST_BUILD_TESTS": "OFF",
+        "ST_BUILD_GALLERY": "OFF"
+      }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI — warnings are errors",
+      "inherits": "host-debug",
+      "binaryDir": "${sourceDir}/build/ci",
+      "cacheVariables": { "ST_WARNINGS_AS_ERRORS": "ON" }
+    },
+    {
+      "name": "rk3328",
+      "displayName": "Rockchip RK3328 — aarch64 Embedded Linux",
+      "inherits": "host-release",
+      "binaryDir": "${sourceDir}/build/rk3328",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/poky-aarch64.cmake",
+        "ST_BUILD_GALLERY": "OFF",
+        "CMAKE_DISABLE_FIND_PACKAGE_Qt6Mqtt": "TRUE",
+        "CMAKE_DISABLE_FIND_PACKAGE_Qt6Quick3D": "TRUE"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "host-debug",   "configurePreset": "host-debug" },
+    { "name": "host-release", "configurePreset": "host-release" },
+    { "name": "ci",           "configurePreset": "ci" },
+    { "name": "rk3328",       "configurePreset": "rk3328" }
+  ],
+  "testPresets": [
+    { "name": "host-debug", "configurePreset": "host-debug",
+      "output": { "outputOnFailure": true } }
+  ]
+}

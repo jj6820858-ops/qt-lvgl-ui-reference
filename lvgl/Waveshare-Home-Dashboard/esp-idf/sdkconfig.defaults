@@ -1,0 +1,71 @@
+# CPU frequency (240 MHz as specified by board)
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+
+# Flash mode and frequency (QIO, 80 MHz as specified by board)
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# PSRAM (Octal mode for ESP32-S3)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+
+# Disable Bluetooth (memory saving, replaces esp_bt_controller_mem_release call)
+CONFIG_BT_ENABLED=n
+
+# USB CDC console (replaces ARDUINO_USB_CDC_ON_BOOT=1)
+CONFIG_ESP_CONSOLE_USB_CDC=y
+
+# Flash size
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# HTTP client
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=n
+
+# Main task stack (needs headroom for HTTP + JSON parsing)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# Logging
+# CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# NTP sync interval (milliseconds). Default is 3600000 (1 hour); 86400000 = 24 hours.
+CONFIG_LWIP_SNTP_UPDATE_DELAY=86400000
+
+# Timezone (POSIX TZ string — see components/ClockTools/Kconfig for examples)
+CONFIG_CLOCK_POSIX_TZ="GMT0BST,M3.5.0/1,M10.5.0"
+
+# Custom partition table (partitions.csv — factory app fills 16 MB flash)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Allow malloc/new to fall back to SPIRAM when internal heap is exhausted.
+# Needed because eez-framework allocates flow states via malloc (through lv_mem_alloc),
+# and internal RAM is tight when the WiFi stack is running.
+CONFIG_SPIRAM_USE_MALLOC=y
+# Prefer internal RAM for small allocs (<= 4KB) to keep latency low
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+
+# LVGL memory: use malloc (not the default 32KB internal TLSF pool).
+# The managed lvgl__lvgl component uses KConfig for its build, not our lv_conf.h,
+# so this KConfig entry is the only way to switch it to malloc.
+# With SPIRAM_USE_MALLOC enabled, malloc falls back to PSRAM when internal RAM is full,
+# giving the LVGL+eez-framework heap effectively unlimited room in the 8MB PSRAM.
+CONFIG_LV_MEM_CUSTOM=y
+
+# Recommended here to fix tearing issues
+# https://docs.espressif.com/projects/esp-faq/en/latest/software-framework/peripherals/lcd.html#why-do-i-get-drift-overall-drift-of-the-display-when-esp32-s3-is-driving-an-rgb-lcd-screen
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# Enable debug symbols
+# https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/kconfig-reference.html#config-compiler-optimization-assertion-level
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=n
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=n
+
+CONFIG_LV_USE_PERF_MONITOR=y

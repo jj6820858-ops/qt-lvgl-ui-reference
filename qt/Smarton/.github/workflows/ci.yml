@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          modules: 'qtshadertools'
+          cache: true
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@master
+
+      - name: Configure
+        run: cmake --preset ci
+
+      - name: Build
+        run: cmake --build --preset ci --parallel
+
+      - name: QML lint (blocking gate)
+        run: cmake --build build/ci --target all_qmllint
+
+      # Regenerates the catalogue from source and fails if it moved. Without
+      # this the .ts file silently rots: strings get added, nobody runs
+      # lupdate, and the first person to translate finds half the UI missing.
+      - name: Translations up to date (blocking gate)
+        if: runner.os == 'Linux'
+        run: |
+          cmake --build build/ci --target update_translations
+          if ! git diff --quiet -- translations/; then
+            echo "::error::translations/ is stale. Run:"
+            echo "  cmake --build build/host-debug --target update_translations"
+            git --no-pager diff --stat -- translations/
+            exit 1
+          fi
+
+      - name: Test
+        working-directory: build/ci
+        run: ctest --output-on-failure
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check C++ formatting
+        run: |
+          find common core domain services infrastructure models backend app gallery tests \
+               \( -name '*.cpp' -o -name '*.h' \) -print0 \
+            | xargs -0 -r clang-format --dry-run --Werror
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          cache: true
+      - name: Configure with coverage
+        run: |
+          cmake -S . -B build/cov -DCMAKE_BUILD_TYPE=Debug \
+                -DCMAKE_CXX_FLAGS="--coverage -O0"
+      - name: Build and test
+        run: |
+          cmake --build build/cov --parallel
+          cd build/cov && ctest --output-on-failure
+      - name: Report
+        run: |
+          sudo apt-get update && sudo apt-get install -y lcov
+          lcov --capture --directory build/cov --output-file coverage.info \
+               --ignore-errors mismatch,gcov
+          lcov --remove coverage.info '/usr/*' '*/build/*' '*/tests/*' \
+               --output-file coverage.info
+          lcov --list coverage.info

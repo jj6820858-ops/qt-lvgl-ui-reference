@@ -1,0 +1,38 @@
+# Build outputs
+simulator/build/
+# scripts/build-prebuilt.sh|.ps1 (release archives ship simulator/prebuilt/)
+simulator/build-prebuilt/
+simulator/prebuilt/
+mcp-server/node_modules/
+mcp-server/dist/
+
+# npm postinstall downloads (simulator inside mcp-server/) and its work dir
+mcp-server/simulator/
+mcp-server/.lvgl-download/
+
+# Copied from the repository root by mcp-server/scripts/prepack.mjs
+mcp-server/README.md
+mcp-server/LICENSE
+
+# Tools (downloaded by setup script)
+.tools/
+
+# Compiled binaries
+*.exe
+*.dll
+*.o
+*.obj
+
+# Test output (generated PNGs and JSONs)
+test-output/
+
+# Environment config
+.env
+build.log
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Editor
+.vscode/settings.json

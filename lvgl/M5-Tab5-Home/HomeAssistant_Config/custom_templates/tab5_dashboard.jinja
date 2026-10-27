@@ -1,0 +1,3582 @@
+{#- ============================================================================
+[AI-CONTEXT]
+@file custom_templates/tab5_dashboard.jinja
+@role Tableau de bord Home Assistant de la tablette (04/10/2026) : une vue « Tab5 » pour
+      l'usage courant (écran, son, réveil, rendez-vous, assistant vocal), une sous-vue
+      « Réglages » (mode d'emploi et liens utiles, ce que l'écran affiche, énergie solaire,
+      langue, météo, agendas, maison, voix, réveil) et une sous-vue « Santé » (diagnostic,
+      poussées, alertes). La macro tab5_dashboard() ÉCRIT ce tableau de bord (YAML) avec
+      les entités de la maison ; on colle le résultat dans un tableau de bord.
+@limite Les choix du blueprint « Tab5 — emplacements » (capteurs, pièces, crête des
+      panneaux…) ne sont lisibles par aucun modèle de HA : la vue Réglages explique chaque
+      section et ouvre l'automatisation, elle ne peut pas montrer ce qui y est choisi
+      (seul le capteur « Zones masquées » de la tablette dit ce qui manque).
+@pourquoi Les entity_id de la tablette changent d'une maison à l'autre : Home Assistant
+      les forme avec la pièce, le nom de l'appareil et le nom de l'entité (vérifié dans
+      le code de HA 2026.9.4, entity_registry.async_generate_entity_id), et une entité
+      ajoutée par une mise à jour du firmware prend la pièce alors que les anciennes ne
+      l'ont pas (`m5stack_…` et `<pièce>_m5stack_…` sur la même tablette). Un tableau de bord
+      écrit en dur ne marcherait que chez son auteur. Ici, la tablette est TROUVÉE par le
+      modèle de son appareil (tab5-ha-hmi), comme dans packages/tab5_reglages.yaml, et
+      chaque entité par la fin de son entity_id.
+@usage Ce fichier est dans config/custom_templates/ (archive tab5_home_assistant.zip),
+      chargé au démarrage de HA (ou action homeassistant.reload_custom_templates).
+      FRANÇAIS — 1. Paramètres → Tableaux de bord → « Ajouter un tableau de bord » →
+      « Nouveau tableau de bord à partir de zéro », titre « Tab5 » (adresse /dashboard-tab5).
+      2. Outils de développement → Modèle : remplacez le contenu de l'éditeur par
+      {% from 'tab5_dashboard.jinja' import tab5_dashboard %}{{ tab5_dashboard() }}
+      (autre adresse : tab5_dashboard('dashboard-xxx') ; plusieurs tablettes : les vues de
+      chacune avec tab5_dashboard_ecrans('dashboard-tab5') à la place, ou une seule avec
+      tab5_dashboard('dashboard-tab5', appareil='<nom de l'appareil>')), copiez le résultat (à droite).
+      3. Ouvrez le tableau de bord Tab5 → crayon → ⋮ → « Éditeur de configuration
+      brute », remplacez tout par le résultat, enregistrez. À refaire après une mise à
+      jour qui ajoute des entités.
+      ENGLISH — 1. Settings → Dashboards → "Add dashboard" → "New dashboard from scratch",
+      title "Tab5" (address /dashboard-tab5). 2. Developer tools → Template: replace the
+      editor content with the line above (other address: tab5_dashboard('dashboard-xxx');
+      several tablets: the views of each with tab5_dashboard_ecrans('dashboard-tab5') instead,
+      or one with tab5_dashboard('dashboard-tab5', appareil='<device name>')),
+      copy the result (right). 3. Open the Tab5 dashboard → pencil → ⋮ → "Raw
+      configuration editor", replace everything with the result, save. Redo after an
+      update that adds entities.
+@langue Libellés dans la langue de l'écran (select « Langue ») : français, anglais,
+      allemand, néerlandais, espagnol, italien ou turc ; une autre langue = l'anglais.
+      tab5_dashboard(langue='English') force la langue. Un texte s'écrit t(français,
+      anglais) et a son entrée dans TRADUCTIONS (fin du fichier) pour les cinq autres
+      langues ; tests/test_tableau_de_bord.py dit ce qui manque. Une traduction n'a ni
+      « ' » ni « " » (’ et les guillemets de la langue) : certaines finissent dans une
+      chaîne Jinja ou YAML ; ses espaces de début et de fin suivent l'anglais (morceaux
+      de phrase).
+@prerequis Les packages de HomeAssistant_Config/packages/ (listes « Tab5 · … », poussées,
+      santé) et la tablette ajoutée dans HA. Ce qui manque (volet, TV, batterie, package
+      optionnel…) n'a simplement pas de carte.
+@ai_instruction Une carte = une entité trouvée : tablette par `T.<clé>` (table ENTITES,
+      motif « domaine[.].*_<fin>$ » sur les entités de l'appareil ; les selects que
+      l'intégration ESPHome de HA ajoute, par leurs options), package par son
+      entity_id fixe testé dans `present`, automatisation de package par son `id`
+      (table A), celle du blueprint par son nom (ns.e). Largeur : une tuile sans
+      commande « en ligne » prend 6 colonnes sur 12 (getGridOptions du frontend) ; on
+      écrit donc `grid_options` sur chacune. tests/test_tableau_de_bord.py rend la macro avec une fausse maison
+      et vérifie que chaque entité citée existe ; le job « Installation dans un HA
+      neuf » la rend dans un vrai HA avec la tablette virtuelle, puis enregistre le
+      tableau de bord.
+@ai_warning Les libellés sont entre guillemets doubles (YAML) : n'y mettez pas de « " »,
+      utilisez « … ». Le contenu de la carte Markdown « En bref » est du Jinja rendu
+      par la carte elle-même, à garder entre {% raw %} et {% endraw %}.
+============================================================================ -#}
+{%- macro tab5_dashboard(adresse='dashboard-tab5', langue='', appareil='', chemin='tab5', titre='', vues_seules=false) -%}
+{%- from 'tab5_tablette.jinja' import tab5_ecran_libelle -%}
+
+{#- ── La tablette, trouvée par le modèle de son appareil ─────────────────────── -#}
+{#- Plusieurs tablettes : appareil = l'identifiant ou le nom de celle à montrer
+    (tab5_dashboard('dashboard-tab5', appareil='Tab5 cuisine')) ; sinon la dernière
+    connectée. -#}
+{%- set ns = namespace(api='', t={}, a={}, p=[], m=[], v=[], e='', e_id='') -%}
+{%- for e in integration_entities('esphome') | select('match', 'binary_sensor[.].*_ha_api_status(_[0-9]+)?$') -%}
+  {%- if device_attr(e, 'model') == 'tab5-ha-hmi'
+        and (appareil == '' or appareil in [device_id(e), device_attr(e, 'name'), device_attr(e, 'name_by_user')])
+        and (ns.api == '' or is_state(e, 'on')) -%}
+    {%- set ns.api = e -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- set present = states | map(attribute='entity_id') | list -%}
+{%- set tab = (device_entities(device_id(ns.api)) | select('in', present) | list) if ns.api else [] -%}
+{%- set ENTITES = [
+  ('api', 'binary_sensor', 'ha_api_status'), ('ecran_courant', 'sensor', '(ecran_courant|current_screen)'),
+  ('retroeclairage', 'light', 'display_backlight'), ('lecteur', 'media_player', ''),
+  ('aller_a', 'select', '(aller_a_l_ecran|go_to_screen)'), ('haut_parleur', 'switch', 'speaker_enable'),
+  ('calendrier', 'button', '(recharger_le_calendrier|reload_calendar)'), ('langue', 'select', '(langue|language)'),
+  ('theme', 'select', 'theme'), ('theme_mode', 'select', '(clair_ou_sombre|light_or_dark)'),
+  ('sens_ecran', 'select', '(sens_de_l_ecran|screen_direction)'),
+  ('theme_nuit', 'switch', '(nuit_theme_auto|night_auto_theme)'),
+  ('tape', 'switch', 'tap_to_wake'), ('batterie_montee', 'switch', '(tab5_batterie_montee|battery_fitted)'),
+  ('appareils_meteo', 'switch', '(tab5_appareils_sur_la_meteo|devices_on_the_weather)'),
+  ('horloge_fond', 'switch', '(tab5_fond_de_l_horloge|clock_background)'),
+  ('okay_nabu', 'switch', '(tab5_rallumer_l_ecran_a_okay_nabu|wake_screen_on_okay_nabu)'),
+  ('extinction', 'select', '(tab5_extinction_auto_de_l_ecran|screen_auto_off)'),
+  ('extinction_batterie', 'switch', '(tab5_extinction_auto_sur_batterie_seulement|screen_auto_off_on_battery_only)'),
+  ('economie', 'select', '(tab5_economie_d_energie|power_saving)'), ('sur_batterie', 'binary_sensor', '(tab5_sur_batterie|on_battery)'),
+  ('courant', 'sensor', '(tab5_courant_batterie|battery_current)'),
+  ('limite_charge', 'select', '(tab5_limite_de_charge|charge_limit)'), ('consommation', 'sensor', '(tab5_consommation|power_draw)'),
+  ('mode_charge', 'select', '(tab5_mode_de_charge|charge_mode)'), ('wifi_eco', 'select', '(tab5_wi_fi_eco|wifi_power_saving)'),
+  ('animations', 'select', '(tab5_animations|animations)'),
+  ('mesure_conso', 'switch', '(tab5_mesure_de_consommation|power_measurement)'),
+  ('dac', 'select', '(tab5_dac_output|dac_output)'), ('antenne', 'select', 'wifi_antenna'),
+  ('zones', 'sensor', '(zones_masquees|hidden_zones)'),
+  ('reveil_en_cours', 'binary_sensor', '(reveil_en_cours|alarm_ringing)'), ('prochain_reveil', 'sensor', '(prochain_reveil|next_alarm)'),
+  ('reveil', 'switch', '(reveil|alarm)'), ('reveil_mode', 'select', '(reveil_mode|alarm_mode)'),
+  ('reveil_heure', 'time', '(reveil_heure|alarm_time)'), ('reveil_jours', 'select', '(reveil_jours|alarm_days)'),
+  ('reveil_tester', 'button', '(reveil_tester|alarm_test)'), ('reveil_arreter', 'button', '(reveil_arreter|alarm_stop)'),
+  ('reveil_repeter', 'button', '(reveil_repeter|alarm_snooze)'), ('reveil_sonnerie', 'select', '(reveil_sonnerie|alarm_ringtone)'),
+  ('reveil_volume', 'number', '(reveil_volume|alarm_volume)'), ('reveil_progressif', 'switch', '(reveil_volume_progressif|alarm_gradual_volume)'),
+  ('reveil_annonce', 'switch', '(reveil_annonce_parlee|alarm_spoken_briefing)'), ('reveil_repetition', 'number', '(reveil_repetition|alarm_snooze_time)'),
+  ('reveil_duree', 'number', '(reveil_duree_max_de_sonnerie|alarm_maximum_ring_time)'),
+  ('reveil_url', 'text', '(reveil_url_de_sonnerie_option|alarm_ringtone_url_optional)'),
+  ('reveil_delai', 'number', '(reveil_delai_avant_l_ouverture|alarm_delay_before_opening)'),
+  ('reveil_avant', 'time', '(reveil_jamais_avant|alarm_never_before)'), ('reveil_apres', 'time', '(reveil_jamais_apres|alarm_never_after)'),
+  ('reveil_repos', 'number', '(reveil_repos_mini_apres_la_fermeture|alarm_minimum_rest_after_closing)'),
+  ('reveil_jours_repos', 'switch', '(reveil_sonner_les_jours_de_repos|alarm_ring_on_days_off)'),
+  ('prochain_rdv', 'sensor', '(prochain_rendez_vous|next_appointment)'), ('annonce_rdv', 'switch', '(annonce_des_rendez_vous|appointment_announcements)'),
+  ('rdv_avant', 'number', '(rendez_vous_annoncer_avant|appointments_announce_before)'),
+  ('satellite', 'assist_satellite', ''), ('micro', 'switch', 'wake_word_active'),
+  ('uptime', 'sensor', '(tab5_uptime|uptime)'), ('raison', 'sensor', '(raison_du_redemarrage|restart_reason)'),
+  ('chronologie', 'sensor', '(tab5_chronologie_du_demarrage|boot_timeline)'),
+  ('chronologie_suite', 'sensor', '(tab5_chronologie_du_demarrage_suite|boot_timeline_continued)'),
+  ('firmware', 'update', 'firmware'), ('c6', 'sensor', '(tab5_c6_version|c6_version)'),
+  ('redemarrer', 'button', '(redemarrage_systeme|restart)'),
+  ('boucle', 'sensor', '(tab5_loop_time|loop_time)'), ('ram', 'sensor', '(tab5_free_ram|free_ram)'),
+  ('temperature', 'sensor', '(tab5_core_temp|core_temp)'), ('pile', 'sensor', '(tab5_stack_free_min|stack_free_min)'),
+  ('wifi', 'sensor', '(tab5_wifi_signal|wifi_signal)'), ('ssid', 'sensor', '(tab5_ssid|ssid)'), ('ip', 'sensor', '(tab5_ip|ip)'),
+  ('casque', 'binary_sensor', 'headphone_detect'), ('batterie', 'sensor', '(tab5_batterie|battery)'),
+  ('tension', 'sensor', '(tab5_tension_batterie|battery_voltage)'), ('en_charge', 'binary_sensor', '(tab5_batterie_en_charge|battery_charging)'),
+  ('batterie_detectee', 'binary_sensor', '(tab5_batterie_detectee|battery_detected)'),
+  ('securite_chargeur', 'binary_sensor', '(tab5_securite_chargeur|charger_safety)'),
+] -%}
+{#- « (_[0-9]+)? » : HA ajoute « _2 », « _3 »… à l'entity_id déjà pris par un autre appareil.
+    Un second écran (ADR-0063), ou un écran qui en remplace un resté dans HA, a des entités
+    « …_tab5_uptime_2 » (Waveshare 7B chez l'auteur, 17/10/2026 : sans lui, ses tuiles de
+    rétroéclairage, micro, Wi-Fi, RAM, température… manquaient). -#}
+{%- for cle, domaine, fin in ENTITES -%}
+  {%- set motif = domaine ~ '[.]' ~ ('.*_' ~ fin ~ '(_[0-9]+)?$' if fin else '') -%}
+  {%- set ns.t = dict(ns.t, **{cle: tab | select('match', motif) | first | default('')}) -%}
+{%- endfor -%}
+{#- Selects créés par l'intégration ESPHome de HA, pas par le firmware : leur entity_id suit la
+    langue de HA (« …_detection_de_fin_de_la_parole » en français), on les reconnaît donc à
+    leurs options. Deux pipelines et deux mots d'activation depuis HA 2025.10 : le premier par
+    ordre d'entity_id, comme packages/tab5_reglages.yaml et tab5_evenements.yaml. -#}
+{%- for e in tab | select('match', 'select[.]') | sort -%}
+  {%- set options = state_attr(e, 'options') or [] -%}
+  {%- if 'preferred' in options -%}{%- set ns.p = ns.p + [e] -%}
+  {%- elif 'no_wake_word' in options -%}{%- set ns.m = ns.m + [e] -%}
+  {%- elif 'relaxed' in options and 'aggressive' in options -%}{%- set ns.v = ns.v + [e] -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- set T = dict(ns.t, pipeline=(ns.p + [''])[0], pipeline_2=(ns.p + ['', ''])[1],
+                 mot=(ns.m + [''])[0], mot_2=(ns.m + ['', ''])[1], fin_parole=(ns.v + [''])[0]) -%}
+
+{#- ── Automatisations des packages, par leur id (leur nom peut changer) ──────── -#}
+{%- set IDS = ['tab5_ha_hmi_updater', 'tab5_ha_hmi_alerts_push', 'tab5_ha_hmi_meteo_push', 'tab5_rdv_push',
+               'tab5_evenements', 'tab5_volet_updater', 'tab5_screen_presence_wifi', 'tab5_micro_absence',
+               'tab5_health_api_off_2min', 'tab5_health_unexpected_reboot',
+               'tab5_health_template_error', 'tab5_health_fichiers_ha', 'tab5_health_journal',
+               'tab5_health_batterie_faible'] -%}
+{#- Chaque id a sa clé, vide si l'automatisation manque : pas d'avertissement dans le journal de HA. -#}
+{%- for id in IDS -%}{%- set ns.a = dict(ns.a, **{id: ''}) -%}{%- endfor -%}
+{%- for a in states.automation -%}
+  {%- if a.attributes.id is defined and a.attributes.id in IDS -%}
+    {%- set ns.a = dict(ns.a, **{a.attributes.id: a.entity_id}) -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- set A = ns.a -%}
+{#- Automatisation du blueprint « Tab5 — emplacements » : par son nom (aucun attribut ne dit de quel
+    blueprint vient une automatisation). Trouvée : lien vers son éditeur ; sinon, vers les blueprints. -#}
+{%- for a in states.automation | sort(attribute='entity_id') -%}
+  {%- if not ns.e and a.attributes.id is defined
+         and ('emplacement' in (a.entity_id ~ ' ' ~ a.name) | lower or 'screen slot' in a.name | lower) -%}
+    {%- set ns.e = a.entity_id -%}
+    {%- set ns.e_id = a.attributes.id -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- set emplacements = '/config/automation/edit/' ~ ns.e_id if ns.e_id else '/config/blueprint/dashboard' -%}
+
+{#- `langue` (« Français », « English », « Deutsch »…) force la langue des libellés ; vide = celle
+    de l'écran. Les autres langues que le français et l'anglais viennent de la table TRADUCTIONS
+    (fin du fichier, clé = le texte français) ; un texte absent de la table s'affiche en anglais. -#}
+{%- set nom_langue = langue or (states(T.langue) if T.langue else 'Français') -%}
+{%- set fr = nom_langue in ['Français', 'unknown', 'unavailable'] -%}
+{%- set code = 'fr' if fr else {'Deutsch': 'de', 'Nederlands': 'nl', 'Español': 'es', 'Italiano': 'it',
+                                 'Türkçe': 'tr'}.get(nom_langue, 'en') -%}
+{%- macro t(francais, anglais) -%}
+{{ francais if code == 'fr' else anglais if code == 'en' else TRADUCTIONS.get(francais, {}).get(code, anglais) }}
+{%- endmacro -%}
+{#- Documentation du dépôt public : un fichier de docs/ et l'ancre d'un de ses titres, en
+    français ou en anglais (vide = le haut du fichier, en anglais) ; chaque ancre est vérifiée
+    par tests/test_tableau_de_bord.py. -#}
+{%- set DOC = 'https://github.com/Axellum/M5-Tab5-ESPHome-LVGL/blob/main/docs/' -%}
+{%- macro doc(fichier, francais, anglais) -%}
+{%- set ancre = francais if fr else anglais -%}{{ DOC ~ fichier ~ ('#' ~ ancre if ancre else '') }}
+{%- endmacro -%}
+{#- Tuile d'un bouton de la tablette : un appui (sur la tuile ou son icône) le presse. -#}
+{%- macro bouton(entite, icone) -%}
+{%- for action in ['tap_action', 'icon_tap_action'] %}
+            {{ action }}:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: {{ entite }}
+{%- endfor %}
+            icon: {{ icone }}
+{%- endmacro -%}
+{#- Case d'un tableau « En bref », rendue par la carte : `oui` si l'entité est allumée, sinon `non`
+    en orange (ni l'un ni l'autre ne contient d'apostrophe droite). -#}
+{%- macro allume(entite, oui, non) -%}
+{% raw %}{{ '{% endraw %}{{ oui }}{% raw %}' if is_state('{% endraw %}{{ entite }}{% raw %}', 'on') else '<font color="#ff9800">{% endraw %}{{ non }}{% raw %}</font>' }}{% endraw %}
+{%- endmacro -%}
+
+{%- if not ns.api -%}
+# {{ t("Tablette introuvable : ajoutez-la dans Home Assistant (intégration ESPHome), puis recommencez.",
+       "Tablet not found: add it to Home Assistant (ESPHome integration), then try again.") }}
+{%- else -%}
+{%- if not vues_seules %}
+views:
+{%- endif %}
+  # ─── Vue principale : l'usage courant ───
+  - title: "{{ titre or 'Tab5' }}"
+    path: {{ chemin }}
+    icon: mdi:tablet-dashboard
+    type: sections
+    max_columns: 4
+    # Pastilles d'alerte seulement : elles n'apparaissent que si quelque chose cloche.
+    badges:
+      - type: entity
+        entity: {{ T.api }}
+        name: "{{ t('Tablette déconnectée', 'Tablet disconnected') }}"
+        show_name: true
+        show_state: false
+        color: red
+        visibility:
+          - condition: state
+            entity: {{ T.api }}
+            state: "off"
+{%- if 'binary_sensor.tab5_fichiers_ha_en_retard' in present %}
+      - type: entity
+        entity: binary_sensor.tab5_fichiers_ha_en_retard
+        name: "{{ t('Fichiers HA en retard', 'HA files out of date') }}"
+        show_name: true
+        show_state: false
+        color: orange
+        visibility:
+          - condition: state
+            entity: binary_sensor.tab5_fichiers_ha_en_retard
+            state: "on"
+{%- endif %}
+{%- if T.firmware %}
+      - type: entity
+        entity: {{ T.firmware }}
+        name: "{{ t('Mise à jour du firmware', 'Firmware update') }}"
+        show_name: true
+        show_state: true
+        state_content: latest_version
+        color: amber
+        visibility:
+          - condition: state
+            entity: {{ T.firmware }}
+            state: "on"
+{%- endif %}
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Tablette', 'Tablet') }}"
+            icon: mdi:tablet
+            badges:
+              - type: entity
+                entity: {{ T.api }}
+                show_state: true
+{%- if T.ecran_courant %}
+              - type: entity
+                entity: {{ T.ecran_courant }}
+                show_state: true
+                icon: mdi:monitor-dashboard
+{%- endif %}
+          - type: shortcut
+            label: "{{ t('Réglages', 'Settings') }}"
+            description: "{{ t('Écran, capteurs, énergie, météo, agendas, voix', 'Screen, sensors, energy, weather, calendars, voice') }}"
+            icon: mdi:cog
+            tap_action:
+              action: navigate
+              navigation_path: /{{ adresse }}/{{ chemin }}-reglages
+            grid_options:
+              columns: 6
+          - type: shortcut
+            label: "{{ t('Santé', 'Health') }}"
+            description: "{{ t('Dépannage, diagnostic, alertes', 'Troubleshooting, diagnostics, alerts') }}"
+            icon: mdi:heart-pulse
+            color: red
+            tap_action:
+              action: navigate
+              navigation_path: /{{ adresse }}/{{ chemin }}-sante
+            grid_options:
+              columns: 6
+{%- if T.retroeclairage %}
+          - type: tile
+            entity: {{ T.retroeclairage }}
+            name: "{{ t('Luminosité', 'Brightness') }}"
+            icon: mdi:brightness-6
+            features:
+              - type: light-brightness
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- if T.lecteur %}
+          - type: tile
+            entity: {{ T.lecteur }}
+            name: Volume
+            icon: mdi:volume-high
+            features:
+              - type: media-player-volume-slider
+                show_mute_button: true
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- if T.aller_a %}
+          - type: tile
+            entity: {{ T.aller_a }}
+            name: "{{ t('Afficher', 'Show') }}"
+            icon: mdi:gesture-tap-button
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+{%- endif %}
+{%- if T.haut_parleur %}
+          - type: tile
+            entity: {{ T.haut_parleur }}
+            name: "{{ t('Haut-parleur', 'Speaker') }}"
+            icon: mdi:speaker
+            features_position: inline
+            features:
+              - type: toggle
+{%- endif %}
+{%- if T.calendrier %}
+          - type: tile
+            entity: {{ T.calendrier }}
+            name: "{{ t('Recharger le calendrier', 'Reload the calendar') }}"
+{{- bouton(T.calendrier, 'mdi:calendar-refresh') }}
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- if T.reveil %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Réveil', 'Alarm') }}"
+            icon: mdi:alarm
+{%- if T.reveil_en_cours %}
+            badges:
+              - type: entity
+                entity: {{ T.reveil_en_cours }}
+                show_state: true
+                visibility:
+                  - condition: state
+                    entity: {{ T.reveil_en_cours }}
+                    state: "on"
+{%- endif %}
+{%- if T.prochain_reveil %}
+          - type: tile
+            entity: {{ T.prochain_reveil }}
+            name: "{{ t('Prochaine sonnerie', 'Next alarm') }}"
+            icon: mdi:alarm-check
+            grid_options:
+              columns: 12
+{%- endif %}
+          - type: tile
+            entity: {{ T.reveil }}
+            name: "{{ t('Réveil armé', 'Alarm on') }}"
+            icon: mdi:alarm
+            features_position: inline
+            features:
+              - type: toggle
+{%- if T.reveil_mode %}
+          - type: tile
+            entity: {{ T.reveil_mode }}
+            name: Mode
+            icon: mdi:tune
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+{%- endif %}
+{%- if T.reveil_heure %}
+          - type: tile
+            entity: {{ T.reveil_heure }}
+            name: "{{ t('Heure fixe', 'Fixed time') }}"
+            icon: mdi:clock-outline
+            grid_options:
+              columns: 6
+{%- endif %}
+{%- if T.reveil_jours %}
+          - type: tile
+            entity: {{ T.reveil_jours }}
+            name: "{{ t('Jours', 'Days') }}"
+            icon: mdi:calendar-week
+            features:
+              - type: select-options
+                style: dropdown
+            grid_options:
+              columns: 6
+{%- endif %}
+{%- for cle, fr_, en_, icone in [('reveil_tester', 'Tester', 'Test', 'mdi:play-circle'),
+                                  ('reveil_arreter', 'Arrêter', 'Stop', 'mdi:alarm-off'),
+                                  ('reveil_repeter', 'Répéter', 'Snooze', 'mdi:alarm-snooze')] %}
+{%- if T[cle] %}
+          - type: tile
+            entity: {{ T[cle] }}
+            name: "{{ t(fr_, en_) }}"
+            grid_options:
+              columns: 4
+{{- bouton(T[cle], icone) }}
+{%- endif %}
+{%- endfor %}
+          - type: heading
+            heading: "{{ t("Sonnerie, volume et mode « avant l'ouverture » : page Réglages", 'Ringtone, volume and before-opening mode: Settings page') }}"
+            heading_style: subtitle
+{%- endif %}
+{%- if T.prochain_rdv %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Rendez-vous', 'Appointments') }}"
+            icon: mdi:calendar-clock
+          - type: tile
+            entity: {{ T.prochain_rdv }}
+            name: "{{ t('Prochain rendez-vous', 'Next appointment') }}"
+            icon: mdi:calendar-clock
+            grid_options:
+              columns: 12
+{%- if T.annonce_rdv %}
+          - type: tile
+            entity: {{ T.annonce_rdv }}
+            name: "{{ t('Annonce vocale', 'Spoken reminder') }}"
+            icon: mdi:bullhorn
+            features_position: inline
+            features:
+              - type: toggle
+{%- endif %}
+{%- if T.rdv_avant %}
+          - type: tile
+            entity: {{ T.rdv_avant }}
+            name: "{{ t('Annoncer avant', 'Remind before') }}"
+            icon: mdi:timer-sand
+            features_position: inline
+            features:
+              - type: numeric-input
+                style: buttons
+{%- endif %}
+{%- if 'script.tab5_rdv_prochains' in present %}
+          - type: shortcut
+            label: "{{ t('Pousser la liste', 'Push the list') }}"
+            description: "{{ t('Envoie les rendez-vous à la tablette', 'Sends the appointments to the tablet') }}"
+            icon: mdi:calendar-sync
+            tap_action:
+              action: perform-action
+              perform_action: script.tab5_rdv_prochains
+            grid_options:
+              columns: 6
+{%- endif %}
+{%- if 'script.tab5_reveil_annonce' in present %}
+          - type: shortcut
+            label: "{{ t('Briefing parlé', 'Spoken briefing') }}"
+            description: "{{ t("Teste l'annonce du matin", 'Tests the morning briefing') }}"
+            icon: mdi:account-voice
+            tap_action:
+              action: perform-action
+              perform_action: script.tab5_reveil_annonce
+            grid_options:
+              columns: 6
+{%- endif %}
+{%- endif %}
+{%- if T.satellite %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Assistant vocal', 'Voice assistant') }}"
+            icon: mdi:microphone
+          - type: tile
+            entity: {{ T.satellite }}
+            name: "{{ t('Assistant', 'Assistant') }}"
+            icon: mdi:account-voice
+            grid_options:
+              columns: 12
+{%- if T.micro %}
+          - type: tile
+            entity: {{ T.micro }}
+            name: "{{ t("« Ok Nabu » à l'écoute", 'Ok Nabu listening') }}"
+            icon: mdi:microphone
+            features_position: inline
+            features:
+              - type: toggle
+{%- endif %}
+{%- if 'input_boolean.tab5_micro_coupe_absence' in present %}
+          - type: tile
+            entity: input_boolean.tab5_micro_coupe_absence
+            name: "{{ t('Micro coupé (absence)', 'Mic off (away)') }}"
+            icon: mdi:microphone-off
+            grid_options:
+              columns: 12
+{%- endif %}
+{#- Annonce d'un texte libre : helpers de l'utilisateur, hors packages (carte seulement s'ils existent). #}
+{%- if 'input_text.tab5_annonce_vocale' in present and 'script.tab5_annonce_vocale' in present %}
+          - type: tile
+            entity: input_text.tab5_annonce_vocale
+            name: "{{ t('Texte à annoncer', 'Text to announce') }}"
+            icon: mdi:text
+            grid_options:
+              columns: 12
+          - type: shortcut
+            label: "{{ t('Faire parler la tablette', 'Make the tablet speak') }}"
+            description: "{{ t('Lit le texte ci-dessus', 'Reads the text above') }}"
+            icon: mdi:bullhorn
+            tap_action:
+              action: perform-action
+              perform_action: script.tab5_annonce_vocale
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- endif %}
+
+  # ─── Sous-vue Réglages : ce qu'on règle une fois ───
+  - title: "{{ t('Réglages Tab5', 'Tab5 settings') }}{{ (' · ' ~ titre) if titre else '' }}"
+    path: {{ chemin }}-reglages
+    icon: mdi:cog
+    type: sections
+    max_columns: 4
+    subview: true
+    back_path: /{{ adresse }}/{{ chemin }}
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Régler la tablette', 'Setting up the tablet') }}"
+            icon: mdi:tune-variant
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t('Tout se règle depuis Home Assistant, sans recompiler la tablette, à trois endroits :', 'Everything is set from Home Assistant, without rebuilding the tablet, in three places:') }}
+              1. **{{ t('Cette page', 'This page') }}**{{ t(' : ce qui vaut pour toute la maison (météo, agendas, téléphone, présence, voix) et les réglages de la tablette.', ': what applies to the whole home (weather, calendars, phone, presence, voice) and the tablet settings.') }}
+              2. **{{ t("Les emplacements de l'écran", 'The screen slots') }}**{{ t(" : ce que l'écran montre, appareil par appareil et capteur par capteur (pièces, températures, clim, plantes, énergie solaire, planning).", ': what the screen shows, device by device and sensor by sensor (rooms, temperatures, climate, plants, solar energy, schedule).') }}
+              3. **{{ t('La page de la tablette', 'The tablet page') }}**{{ t(" : toutes ses entités dans l'intégration ESPHome, son diagnostic et ses mises à jour.", ': all its entities in the ESPHome integration, its diagnostics and updates.') }}
+          - type: shortcut
+            label: "{{ t('Page de la tablette', 'Tablet page') }}"
+            description: "{{ t('ESPHome : réglages, diagnostic, mises à jour', 'ESPHome: settings, diagnostics, updates') }}"
+            icon: mdi:tablet-cellphone
+            tap_action:
+              action: navigate
+              navigation_path: /config/devices/device/{{ device_id(ns.api) }}
+            grid_options:
+              columns: 12
+          - type: shortcut
+            label: "{{ t("Emplacements de l'écran", 'Screen slots') if ns.e_id else t('Créer les emplacements', 'Create the screen slots') }}"
+            description: "{{ t('Pièces, capteurs, clim, plantes, énergie', 'Rooms, sensors, climate, plants, energy') if ns.e_id else "Blueprint « Tab5 — emplacements de l'écran »" }}"
+            icon: mdi:view-dashboard-edit
+            tap_action:
+              action: navigate
+              navigation_path: {{ emplacements }}
+            grid_options:
+              columns: 12
+          - type: shortcut
+            label: "{{ t('Connexion ESPHome', 'ESPHome connection') }}"
+            description: "{{ t('Adresse, clé, options', 'Address, key, options') }}"
+            icon: mdi:lan-connect
+            tap_action:
+              action: navigate
+              navigation_path: /config/integrations/integration/esphome{{ ('#config_entry=' ~ config_entry_id(ns.api)) if config_entry_id(ns.api) else '' }}
+            grid_options:
+              columns: 6
+          - type: shortcut
+            label: Documentation
+            description: "{{ t('Réglages et options', 'Settings and options') }}"
+            icon: mdi:book-open-variant
+            tap_action:
+              action: url
+              url_path: {{ doc('installation.md', 'réglages-et-options-de-la-tablette', 'tablet-settings-and-options') }}
+            grid_options:
+              columns: 6
+          - type: heading
+            heading: "{{ t('En bref', 'At a glance') }}"
+            icon: mdi:clipboard-text-outline
+          - type: heading
+            heading: "{{ t('Ce que la tablette utilise en ce moment', 'What the tablet uses right now') }}"
+            heading_style: subtitle
+          - type: markdown
+            content: |-
+{%- raw %}
+              {%- macro choix(e) -%}
+              {%- set v = states(e) -%}
+              {%- if v | lower in ['not set', 'none', 'aucun', 'aucune', 'unknown', 'unavailable', ''] -%}<font color="#ff9800">{% endraw %}{{ t('non choisi', 'not set') }}{% raw %}</font>
+              {%- elif v.startswith('weather.') and expand(v) | count > 0 -%}
+              {%- set n = state_attr(v, 'friendly_name') or v -%}
+              {{ device_attr(device_id(v), 'manufacturer') or '' }} · {{ n.split('for city ')[1].split(' - ')[0] if 'for city ' in n else n }}
+              {%- elif '.' in v and expand(v) | count > 0 -%}{{ state_attr(v, 'friendly_name') or v }}
+              {%- else -%}{{ v }}{%- endif -%}
+              {%- endmacro %}{% endraw %}
+              | {{ t('Réglage', 'Setting') }} | {{ t('Choix', 'Choice') }} |
+              |:--|:--|
+{%- if T.langue %}
+              | {{ t("Langue de l'écran", 'Screen language') }} | {% raw %}{{ states('{% endraw %}{{ T.langue }}{% raw %}') }}{% endraw %} |
+{%- endif %}
+{%- for e, fr_, en_ in [('select.tab5_source_des_previsions', 'Prévisions', 'Forecasts'),
+                        ('input_select.tab5_source_pluie', "Pluie dans l'heure", 'Next-hour rain'),
+                        ('input_select.tab5_source_vigilance', 'Vigilances', 'Weather warnings'),
+                        ('select.tab5_agenda_de_travail', 'Agenda de travail', 'Work calendar'),
+                        ('select.tab5_agenda_des_rendez_vous', 'Rendez-vous', 'Appointments'),
+                        ('select.tab5_agenda_des_anniversaires', 'Anniversaires', 'Birthdays'),
+                        ('select.tab5_agenda_des_jours_feries', 'Jours fériés', 'Public holidays'),
+                        ('select.tab5_agenda_des_vacances_scolaires', 'Vacances scolaires', 'School holidays'),
+                        ('select.tab5_telephone', 'Téléphone', 'Phone'),
+                        ('select.tab5_capteur_de_presence', 'Capteur de présence', 'Presence sensor'),
+                        ('select.tab5_extinction_de_nuit', 'Extinction de nuit', 'Night screen off'),
+                        ('select.tab5_tv_samsung', 'TV Samsung', 'Samsung TV'),
+                        ('select.tab5_volet_a_course_simulee', 'Volet', 'Shutter'),
+                        ('select.tab5_pipeline_de_discussion', 'Mode « Discu »', 'Discu mode')] %}
+{%- if e in present %}
+              | {{ t(fr_, en_) }} | {% raw %}{{ choix('{% endraw %}{{ e }}{% raw %}') }}{% endraw %}{%- if e == 'select.tab5_agenda_de_travail' and 'input_text.tab5_mot_travail' in present %} ({{ t('mot « ', 'keyword: ') }}{% raw %}{{ states('input_text.tab5_mot_travail') or '{% endraw %}{{ t('tous', 'all') }}{% raw %}' }}{% endraw %}{{ t(' »', '') }}){%- endif %} |
+{%- endif %}
+{%- endfor %}
+{%- if ns.e %}
+              | {{ t("Emplacements de l'écran", 'Screen slots') }} | {{ allume(ns.e, t('automatisation active', 'automation on'), t('automatisation désactivée', 'automation off')) }} |
+{%- else %}
+              | {{ t("Emplacements de l'écran", 'Screen slots') }} | <font color="#ff9800">{{ t('pas encore créés (bouton ci-dessus)', 'not created yet (button above)') }}</font> |
+{%- endif %}
+{%- if T.zones %}
+              | {{ t('Zones masquées', 'Hidden zones') }} | {% raw %}{{ states('{% endraw %}{{ T.zones }}{% raw %}') }}{% endraw %} |
+{%- endif %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t("Ce que l'écran affiche", 'What the screen shows') }}"
+            icon: mdi:view-grid-plus
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("Appareils et capteurs se choisissent dans l'automatisation des emplacements, section par section :", 'Devices and sensors are picked in the screen slots automation, section by section:') }}
+              - **{{ t('Pièce 1 à 5', 'Room 1 to 5') }}**{{ t(' : cinq appareils par pièce au plus (lumières, prises, volets, clim, scènes, capteurs…), les tuiles du bas, une pièce par page.', ': up to five devices per room (lights, plugs, shutters, climate, scenes, sensors…), the bottom tiles, one room per page.') }}
+              - **{{ t('TV, téléphone', 'TV, phone') }}**{{ t(" : la TV et sa télécommande, la batterie du téléphone (icône d'état).", ': the TV and its remote, the phone battery (status icon).') }}
+              - **{{ t('Températures', 'Temperatures') }}**{{ t(" : température et humidité de la pièce, une seconde température (serre), sur l'accueil.", ': room temperature and humidity, a second temperature (greenhouse), on the home page.') }}
+              - **{{ t('Climatisation', 'Climate') }}**{{ t(" : − / consigne / + de l'accueil et le popup clim.", ': − / setpoint / + on the home page and the climate popup.') }}
+              - **{{ t('Plantes', 'Plants') }}**{{ t(" : le capteur d'humidité de chaque pot (Flower Care et semblables) ; le reste est lu sur le même appareil.",': the moisture sensor of each pot (Flower Care and the like); the rest is read from the same device.') }}
+              - **{{ t('Planning de travail', 'Work schedule') }}**{{ t(' : un agenda ; vide, celui de la liste « Agenda de travail » plus bas.', ': a calendar; empty, the one of the « Work » list below.') }}
+              - **{{ t('Météo', 'Weather') }}**{{ t(' : facultatif, prime sur les listes « Météo » plus bas.', ': optional, wins over the « Weather » lists below.') }}
+              - **{{ t('Énergie', 'Energy') }}**{{ t(' : voir « Énergie solaire ».', ': see « Solar energy ».') }}
+
+              {{ t("Un champ vide disparaît de l'écran avec ses boutons, et « Zones masquées » le dit. Un changement part tout de suite, sans redémarrer.", 'An empty field leaves the screen with its buttons, and « Hidden zones » says so. A change is sent at once, without restarting.') }} [{{ t('Adapter à sa maison', 'Adapt to your home') }}]({{ doc('installation.md', 'adapter-à-sa-maison', 'adapt-to-your-home') }})
+          - type: shortcut
+            label: "{{ t('Choisir appareils et capteurs', 'Pick devices and sensors') if ns.e_id else t('Créer les emplacements', 'Create the screen slots') }}"
+            description: "{{ t("Tab5 — emplacements de l'écran", "Tab5 — emplacements de l'écran (screen slots)") }}"
+            icon: mdi:pencil
+            tap_action:
+              action: navigate
+              navigation_path: {{ emplacements }}
+            grid_options:
+              columns: 12
+{%- if T.zones %}
+          - type: tile
+            entity: {{ T.zones }}
+            name: "{{ t('Zones masquées', 'Hidden zones') }}"
+            icon: mdi:eye-off-outline
+            grid_options:
+              columns: 12
+{%- endif %}
+          - type: heading
+            heading: "{{ t('Énergie solaire', 'Solar energy') }}"
+            icon: mdi:solar-power
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("Facultatif. Dans l'automatisation des emplacements, ouvrez les sections repliées **« Énergie : … »** (solaire, réseau et maison, batterie) :", 'Optional. In the screen slots automation, open the collapsed **« Énergie : … · Energy: … »** sections (solar, grid and home, battery):') }}
+              1. **{{ t('Puissance solaire', 'Solar power') }}**{{ t(' : ce que produisent les panneaux en ce moment (W ou kW).', ': what the panels produce right now (W or kW).') }}
+              2. **{{ t('Puissance crête des panneaux', 'Panel peak power') }}**{{ t(" (kWc, sur la facture ou l'onduleur) : avec la puissance solaire, une icône du bandeau d'état, en haut à gauche, montre la production par sa couleur (gris la nuit, puis rouge, ambre, bleu, vert). 0 : pas d'icône.", ' (kWp, on the invoice or the inverter): with the solar power, an icon of the status strip, top left, shows the production by its colour (grey at night, then red, amber, blue, green). 0: no icon.') }}
+              3. **{{ t('Popup Énergie', 'Energy popup') }}**{{ t(' : énergie produite (le compteur en kWh du tableau Énergie de Home Assistant), réseau, maison, batterie, tous facultatifs.', ': energy produced (the kWh meter of the Home Assistant Energy dashboard), grid, home, battery, all optional.') }}
+              4. {{ t('Placez la puissance solaire dans une pièce : sa tuile ouvre le popup au toucher.', 'Put the solar power in a room: its tile opens the popup on tap.') }}
+{%- if 'script.tab5_energie' not in present %}
+
+              <font color="#ff9800">{{ t('Package tab5_energie absent : le popup reste « En attente de Home Assistant ».', 'tab5_energie package missing: the popup stays on « Waiting for Home Assistant ».') }}</font>
+{%- endif %}
+
+              [{{ t('Énergie solaire, pas à pas', 'Solar energy, step by step') }}]({{ doc('installation.md', 'énergie-solaire-facultatif', 'solar-energy-optional') }})
+          - type: shortcut
+            label: "{{ t('Régler les panneaux', 'Set up the panels') }}"
+            description: "{{ t('Sections « Énergie »', 'Energy sections') }}"
+            icon: mdi:solar-panel
+            tap_action:
+              action: navigate
+              navigation_path: {{ emplacements }}
+            grid_options:
+              columns: 6
+          - type: shortcut
+            label: "{{ t('Tableau Énergie', 'Energy dashboard') }}"
+            description: "{{ t('Compteur de production', 'Production meter') }}"
+            icon: mdi:lightning-bolt
+            tap_action:
+              action: navigate
+              navigation_path: /config/energy
+            grid_options:
+              columns: 6
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Tablette', 'Tablet') }}"
+            icon: mdi:tablet
+{%- for cle, fr_, en_, icone in [('langue', "Langue de l'écran", 'Screen language', 'mdi:translate'),
+                                  ('theme', 'Thème', 'Theme', 'mdi:palette'),
+                                  ('theme_mode', 'Clair ou sombre', 'Light or dark', 'mdi:theme-light-dark'),
+                                  ('extinction', "Extinction auto de l'écran", 'Screen auto-off', 'mdi:monitor-off')] %}
+{%- if T[cle] %}
+          - type: tile
+            entity: {{ T[cle] }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+{%- endif %}
+{%- endfor %}
+{#- Extinction auto (firmware du 06/10/2026, discussion #278) : juste avant la tape, qui rallume. #}
+{%- if T.extinction %}
+          - type: heading
+            heading: "{{ t('Délai sans toucher ; jamais pendant le réveil, la voix ou un jeu', 'Time without a touch; never while the alarm rings, during voice or a game') }}"
+            heading_style: subtitle
+{%- endif %}
+{#- Extinction de nuit (16/10/2026, packages/tab5_reglages.yaml) : plage choisie dans HA,
+    appliquée par « Tab5 Nuit (écran éteint) » du firmware (tab5_push.yaml). #}
+{%- if 'select.tab5_extinction_de_nuit' in present %}
+          - type: tile
+            entity: select.tab5_extinction_de_nuit
+            name: "{{ t('Extinction de nuit', 'Night screen off') }}"
+            icon: mdi:weather-night
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+          - type: heading
+            heading: "{{ t('Pendant la plage : éteint après 1 min sans toucher, rallumé à la fin ; « Not set » : jamais', 'During the window: off after 1 min without a touch, back on at the end; « Not set »: never') }}"
+            heading_style: subtitle
+{%- endif %}
+{#- Réglages par écran (ADR-0072, 25/10/2026) : présence, nuit et lecteurs de l'écran choisi
+    dans « Tab5 · screen to set » ; « Régler cet écran » choisit celui de cette page. -#}
+{%- if 'select.tab5_ecran_a_regler' in present %}
+          - type: heading
+            heading: "{{ t('Réglages propres à un écran', 'Settings of one screen') }}"
+            icon: mdi:tablet-cellphone
+          - type: tile
+            entity: select.tab5_ecran_a_regler
+            name: "{{ t('Écran à régler', 'Screen to set') }}"
+            icon: mdi:tablet-cellphone
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+{%- if ns.api %}
+          - type: button
+            name: "{{ t('Régler cet écran', 'Set this screen') }}"
+            icon: mdi:target
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: select.select_option
+              target:
+                entity_id: select.tab5_ecran_a_regler
+              data:
+                option: "{{ tab5_ecran_libelle(device_id(ns.api)) | replace('"', '') }}"
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- for e, fr_, en_, icone in [('select.tab5_ecran_capteur_de_presence', 'Capteur de présence de cet écran', 'Presence sensor of this screen', 'mdi:motion-sensor'),
+                               ('select.tab5_ecran_extinction_de_nuit', 'Extinction de nuit de cet écran', 'Night screen off of this screen', 'mdi:weather-night'),
+                               ('select.tab5_ecran_lecteurs_de_musique', 'Lecteurs de musique de cet écran', 'Music players of this screen', 'mdi:music-box-multiple')] %}
+{%- if e in present %}
+          - type: tile
+            entity: {{ e }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+{%- endif %}
+{%- endfor %}
+          - type: heading
+            heading: "{{ t('« Same as home » : la liste de la maison ; le pipeline, les agendas et le téléphone restent ceux de la maison', '« Same as home »: the home list; the pipeline, calendars and phone stay those of the home') }}"
+            heading_style: subtitle
+{%- endif %}
+{%- for cle, fr_, en_, icone in [('extinction_batterie', 'Extinction sur batterie seulement', 'Auto-off on battery only', 'mdi:battery-clock'),
+                                  ('tape', "Rallumer l'écran d'une tape", 'Wake the screen with a tap', 'mdi:gesture-tap'),
+                                  ('okay_nabu', "Rallumer l'écran à Okay Nabu", 'Wake the screen with Okay Nabu', 'mdi:account-voice'),
+                                  ('batterie_montee', 'Batterie montée', 'Battery fitted', 'mdi:battery'),
+                                  ('appareils_meteo', 'Appareils sur la météo', 'Devices on the forecast', 'mdi:lightbulb-outline'),
+                                  ('horloge_fond', "Fond de l'horloge", 'Clock background', 'mdi:clock-outline')] %}
+{%- if T[cle] %}
+          - type: tile
+            entity: {{ T[cle] }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+            features_position: inline
+            features:
+              - type: toggle
+{%- endif %}
+{%- endfor %}
+{%- if T.batterie_montee %}
+          - type: heading
+            heading: "{{ t("Allumée, l'icône de batterie apparaît dans le bandeau", 'On: the battery icon shows in the status strip') }}"
+            heading_style: subtitle
+{%- endif %}
+{%- if T.appareils_meteo %}
+          - type: heading
+            heading: "{{ t('Éteint, les prévisions montrent la météo seule ; le bouton HA garde les appareils', 'Off: the forecast cards show the weather only; the HA button still shows the devices') }}"
+            heading_style: subtitle
+{%- endif %}
+{#- Sens de l'écran (ADR-0069, 19/10/2026) : la Waveshare 7B seule (le Tab5 n'a pas l'entité). #}
+{%- if T.sens_ecran %}
+          - type: tile
+            entity: {{ T.sens_ecran }}
+            name: "{{ t("Sens de l'écran", 'Screen direction') }}"
+            icon: mdi:screen-rotation
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+          - type: heading
+            heading: "{{ t("Upside down : carte montée à l'envers ; l'image et le tactile tournent aussitôt", 'Upside down: board mounted upside down; the picture and the touch turn at once') }}"
+            heading_style: subtitle
+{%- endif %}
+{#- Économie d'énergie (firmware du 06/10/2026) : « Sur batterie » d'après le courant de l'INA226. #}
+{%- if T.economie %}
+          - type: tile
+            entity: {{ T.economie }}
+            name: "{{ t("Économie d'énergie", 'Energy saving') }}"
+            icon: mdi:leaf
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+          - type: heading
+            heading: "{{ t('Luminosité plafonnée à 50 %, au plus bas après 30 s sans toucher ou sous 35 % de batterie ; sans animation', 'Brightness capped at 50%, lowest after 30 s without a touch or below 35% battery; no animation') }}"
+            heading_style: subtitle
+{%- endif %}
+{#- Animations (firmware du 09/10/2026, ADR-0045) : l'économie d'énergie active les coupe toutes. #}
+{%- if T.animations %}
+          - type: tile
+            entity: {{ T.animations }}
+            name: "{{ t('Animations', 'Animations') }}"
+            icon: mdi:animation-play
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+          - type: heading
+            heading: "{{ t('Essential : seule la carte du centre tourne ; « None » : tout est instantané', 'Essential: only the centre card turns; « None »: everything is instant') }}"
+            heading_style: subtitle
+{%- endif %}
+{#- Limite de charge (firmware du 08/10/2026) : « 100 % » ou « 80 % », pour une tablette toujours branchée. #}
+{%- if T.limite_charge %}
+          - type: tile
+            entity: {{ T.limite_charge }}
+            name: "{{ t('Limite de charge', 'Charge limit') }}"
+            icon: mdi:battery-charging-80
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+          - type: heading
+            heading: "{{ t('80 % : la charge s’arrête à 80 % et reprend à 70 %, pour une tablette toujours branchée', '80%: charging stops at 80% and resumes at 70%, for a tablet that stays plugged in') }}"
+            heading_style: subtitle
+{%- endif %}
+{#- Mode de charge et Wi-Fi éco (firmware du 09/10/2026, ADR-0045). #}
+{%- if T.mode_charge %}
+          - type: tile
+            entity: {{ T.mode_charge }}
+            name: "{{ t('Mode de charge', 'Charging mode') }}"
+            icon: mdi:battery-charging-high
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+          - type: heading
+            heading: "{{ t('Fast : la charge rapide du chargeur, seulement quand il est allumé', 'Fast: the charger’s quick charge, only while it is on') }}"
+            heading_style: subtitle
+{%- endif %}
+{%- if T.wifi_eco %}
+          - type: tile
+            entity: {{ T.wifi_eco }}
+            name: "{{ t('Wi-Fi éco', 'Eco Wi-Fi') }}"
+            icon: mdi:wifi-cog
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+          - type: heading
+            heading: "{{ t('Le Wi-Fi somnole entre deux balises : réponses parfois plus lentes ; jamais pendant la voix, un son ou une mise à jour', 'Wi-Fi dozes between beacons: answers may come later; never during voice, sound or an update') }}"
+            heading_style: subtitle
+{%- endif %}
+{%- if T.theme_nuit %}
+          - type: tile
+            entity: {{ T.theme_nuit }}
+            name: "{{ t('Nuit (thème auto)', 'Night (auto theme)') }}"
+            icon: mdi:weather-night
+            grid_options:
+              columns: 12
+          - type: heading
+            heading: "{{ t('En mode Auto, Home Assistant l’allume au coucher du soleil', 'In Auto mode, Home Assistant turns it on at sunset') }}"
+            heading_style: subtitle
+{%- endif %}
+{%- for cle, fr_, en_, icone in [('dac', 'Sortie audio', 'Audio output', 'mdi:audio-input-stereo-minijack'),
+                                  ('antenne', 'Antenne Wi-Fi', 'Wi-Fi antenna', 'mdi:antenna')] %}
+{%- if T[cle] %}
+          - type: tile
+            entity: {{ T[cle] }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+{%- endif %}
+{%- endfor %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Météo', 'Weather') }}"
+            icon: mdi:weather-partly-cloudy
+          - type: heading
+            heading: "{{ t('La section « Météo » du blueprint prime si elle est remplie', 'The blueprint Weather section wins when it is filled') }}"
+            heading_style: subtitle
+{%- for e, fr_, en_, icone, ligne in [('select.tab5_source_des_previsions', 'Prévisions', 'Forecasts', 'mdi:weather-partly-cloudy', false),
+                                     ('input_select.tab5_source_pluie', "Pluie dans l'heure", 'Next-hour rain', 'mdi:weather-pouring', true),
+                                     ('input_select.tab5_source_vigilance', 'Vigilances', 'Weather warnings', 'mdi:alert-outline', true)] %}
+{%- if e in present %}
+          - type: tile
+            entity: {{ e }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+{%- if ligne %}
+            features_position: inline
+{%- endif %}
+            features:
+              - type: select-options
+                style: dropdown
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- endfor %}
+{%- if 'sensor.tab5_sources_meteo' in present %}
+          - type: tile
+            entity: sensor.tab5_sources_meteo
+            name: "{{ t('Sources trouvées', 'Sources found') }}"
+            icon: mdi:magnify
+            grid_options:
+              columns: 12
+{%- endif %}
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("Prévisions : n'importe quelle entité météo (Met.no vient avec Home Assistant). Pluie dans l'heure et vigilances : facultatives, la source dépend du pays.", 'Forecasts: any weather entity (Met.no comes with Home Assistant). Next-hour rain and weather warnings: optional, the source depends on the country.') }} [{{ t('Fournisseurs météo', 'Weather providers') }}]({{ doc('installation.md', 'fournisseurs-météo', 'weather-providers') }})
+          - type: heading
+            heading: "{{ t('Maison', 'Home') }}"
+            icon: mdi:home-account
+          - type: heading
+            heading: "{{ t("Le téléphone et la présence allument ou éteignent l'écran", 'The phone and presence turn the screen on or off') }}"
+            heading_style: subtitle
+{%- for e, fr_, en_, icone in [('select.tab5_telephone', 'Téléphone', 'Phone', 'mdi:cellphone-marker'),
+                               ('select.tab5_capteur_de_presence', 'Capteur de présence', 'Presence sensor', 'mdi:motion-sensor'),
+                               ('select.tab5_tv_samsung', 'TV Samsung', 'Samsung TV', 'mdi:television'),
+                               ('input_text.tab5_tv_adresse', 'Adresse de la TV', 'TV address', 'mdi:ip-network'),
+                               ('select.tab5_volet_a_course_simulee', 'Volet à course simulée', 'Shutter with simulated travel', 'mdi:window-shutter'),
+                               ('select.tab5_lecteurs_de_musique', 'Lecteurs de musique (popup Musique)', 'Music players (Music popup)', 'mdi:music-box-multiple'),
+                               ('select.tab5_capteurs_suivis', 'Capteurs suivis (popup Suivi)', 'Tracked sensors (Tracking popup)', 'mdi:chart-line'),
+                               ('select.tab5_refrigerateurs', 'Réfrigérateurs (popup Froid)', 'Fridges (Cold popup)', 'mdi:fridge-outline'),
+                               ('select.tab5_congelateurs', 'Congélateurs (popup Froid)', 'Freezers (Cold popup)', 'mdi:snowflake-thermometer'),
+                               ('input_select.tab5_serveur_ia_type', 'Serveur IA local', 'Local AI server', 'mdi:brain'),
+                               ('input_text.tab5_serveur_ia_adresse', 'Adresse du serveur IA', 'AI server address', 'mdi:server-network'),
+                               ('input_text.tab5_serveur_ia_mac', 'Adresse MAC du serveur IA (Réveiller)', 'AI server MAC address (Wake up)', 'mdi:power'),
+                               ('select.tab5_serveur_ia_redemarrage', 'Redémarrage du serveur IA (script ou bouton)', 'AI server restart (script or button)', 'mdi:restart')] %}
+{%- if e in present %}
+          - type: tile
+            entity: {{ e }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+{%- if e.startswith('select.') or e.startswith('input_select.') %}
+            features:
+              - type: select-options
+                style: dropdown
+{%- endif %}
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- endfor %}
+{%- if 'select.tab5_telephone' in present or 'select.tab5_capteur_de_presence' in present %}
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("**Téléphone** (application mobile de Home Assistant) : son retour allume l'écran, son départ l'éteint. **Capteur de présence** : une présence allume l'écran, 15 min sans présence l'éteignent, sauf pendant le réveil.", "**Phone** (Home Assistant mobile app): its return turns the screen on, its departure turns it off. **Presence sensor**: presence turns the screen on, 15 min without presence turn it off, except while the alarm rings.") }}
+{%- endif %}
+{%- if 'select.tab5_capteurs_suivis' in present %}
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("**Capteurs suivis** : ouvrez la liste, choisissez un capteur (« ○ » devient « ✓ »), puis le suivant. Six au plus ; le premier est celui montré à gauche de l'horloge. Un cours de bourse, une température, une puissance : tout capteur qui a des statistiques.", "**Tracked sensors**: open the list, pick a sensor (« ○ » becomes « ✓ »), then the next one. Six at most; the first one is shown left of the clock. A share price, a temperature, a power: any sensor that has statistics.") }} [{{ t("Le popup Suivi, pas à pas", "The Tracking popup, step by step") }}]({{ doc("notice/tracking.md", "", "") }})
+{%- endif %}
+{#- Popup Serveur IA (ADR-0059, packages/tab5_serveur_ia.yaml) : dix listes, un capteur chacune. -#}
+{%- if 'select.tab5_ia_etat' in present %}
+          - type: heading
+            heading: "{{ t('Popup Serveur IA : un capteur par mesure', 'AI server popup: one sensor per measure') }}"
+            heading_style: subtitle
+{%- for e, fr_, en_, icone in [('select.tab5_ia_etat', 'État', 'State', 'mdi:lan-connect'),
+                               ('select.tab5_ia_modele', 'Modèle chargé', 'Loaded model', 'mdi:brain'),
+                               ('select.tab5_ia_tokens', 'Tokens par seconde', 'Tokens per second', 'mdi:speedometer'),
+                               ('select.tab5_ia_en_cours', 'Requêtes en cours', 'Requests running', 'mdi:progress-clock'),
+                               ('select.tab5_ia_en_file', 'Requêtes en file', 'Requests queued', 'mdi:tray-full'),
+                               ('select.tab5_ia_vram', 'VRAM utilisée', 'VRAM used', 'mdi:expansion-card'),
+                               ('select.tab5_ia_vram_totale', 'VRAM totale', 'VRAM total', 'mdi:expansion-card'),
+                               ('select.tab5_ia_temperature', 'Température du GPU', 'GPU temperature', 'mdi:thermometer'),
+                               ('select.tab5_ia_ram', 'RAM utilisée', 'RAM used', 'mdi:memory'),
+                               ('select.tab5_ia_puissance', 'Puissance de la machine', 'Machine power', 'mdi:flash')] %}
+{%- if e in present %}
+          - type: tile
+            entity: {{ e }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+            features:
+              - type: select-options
+                style: dropdown
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- endfor %}
+{%- endif %}
+{%- if 'input_select.tab5_alertes_maj' in present %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Alertes', 'Alerts') }}"
+            icon: mdi:bell-alert-outline
+          - type: heading
+            heading: "{{ t("Ce qui s'affiche en alerte sur la carte centrale", 'What shows as an alert on the central card') }}"
+            heading_style: subtitle
+{%- for e, fr_, en_, icone in [('input_select.tab5_alertes_maj', 'Mises à jour', 'Updates', 'mdi:package-up'),
+                               ('input_select.tab5_alertes_vigilance', 'Vigilance à partir de', 'Weather warnings from', 'mdi:alert-outline'),
+                               ('input_select.tab5_alertes_problemes', 'Capteurs « problème »', 'Problem sensors', 'mdi:alert-circle-outline'),
+                               ('input_select.tab5_alertes_indisponibles', 'Entités indisponibles', 'Unavailable entities', 'mdi:help-network-outline'),
+                               ('input_select.tab5_alertes_etiquette', 'Étiquette « Tab5 · alerte »', '« Tab5 · alerte » label', 'mdi:label-outline'),
+                               ('input_select.tab5_alertes_piles', 'Piles sous', 'Batteries below', 'mdi:battery-alert-variant-outline'),
+                               ('input_select.tab5_alertes_froid', 'Réfrigérateurs et congélateurs', 'Fridges and freezers', 'mdi:fridge-alert-outline')] %}
+{%- if e in present %}
+          - type: tile
+            entity: {{ e }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+            features_position: inline
+            features:
+              - type: select-options
+                style: dropdown
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- endfor %}
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("Une alerte reste sur la carte centrale jusqu'au tap. Lue, elle ne revient que si elle change (nouvelle version, autre vigilance, nouvelle entité indisponible) ou si elle s'arrête puis recommence. Pour suivre une porte, une fuite ou une serrure : créez l'étiquette « Tab5 · alerte » et posez-la sur l'entité. Les téléphones de l'application mobile ne comptent pas dans les piles.", "An alert stays on the central card until you tap it. Once read, it only comes back if it changes (new version, other warning, newly unavailable entity) or if it ends and starts again. To follow a door, a leak or a lock: create the « Tab5 · alerte » label and put it on the entity. Phones of the mobile app don't count as batteries.") }}
+{%- endif %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Agendas', 'Calendars') }}"
+            icon: mdi:calendar-multiple
+          - type: heading
+            heading: "{{ t('Travail : planning, jours de repos, heure du réveil', 'Work: schedule, days off, alarm time') }}"
+            heading_style: subtitle
+{%- for e, fr_, en_, icone in [('select.tab5_agenda_de_travail', 'Travail', 'Work', 'mdi:briefcase-clock'),
+                               ('input_text.tab5_mot_travail', 'Mot des événements de travail (vide = tous)', 'Work event keyword (empty = all)', 'mdi:briefcase-search')] %}
+{%- if e in present %}
+          - type: tile
+            entity: {{ e }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+{%- if e.startswith('select.') %}
+            features:
+              - type: select-options
+                style: dropdown
+{%- endif %}
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- endfor %}
+          - type: heading
+            heading: "{{ t('Popup calendrier, rappels, briefing du matin', 'Calendar popup, reminders, morning briefing') }}"
+            heading_style: subtitle
+{%- for e, fr_, en_, icone in [('select.tab5_agenda_des_rendez_vous', 'Rendez-vous', 'Appointments', 'mdi:calendar-account'),
+                               ('select.tab5_agenda_des_anniversaires', 'Anniversaires', 'Birthdays', 'mdi:cake-variant'),
+                               ('select.tab5_agenda_des_jours_feries', 'Jours fériés', 'Public holidays', 'mdi:calendar-star'),
+                               ('select.tab5_agenda_des_vacances_scolaires', 'Vacances scolaires', 'School holidays', 'mdi:school-outline')] %}
+{%- if e in present %}
+          - type: tile
+            entity: {{ e }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+            features:
+              - type: select-options
+                style: dropdown
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- endfor %}
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("Un agenda vient d'une intégration de Home Assistant (Google Agenda, CalDAV, calendrier local…). Une liste vide n'affiche rien.", 'A calendar comes from a Home Assistant integration (Google Calendar, CalDAV, local calendar…). An empty list shows nothing.') }}
+          - type: shortcut
+            label: "{{ t('Ajouter une intégration', 'Add an integration') }}"
+            description: "{{ t('Agenda, météo, capteurs…', 'Calendar, weather, sensors…') }}"
+            icon: mdi:puzzle-plus-outline
+            tap_action:
+              action: navigate
+              navigation_path: /config/integrations/dashboard
+            grid_options:
+              columns: 12
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Assistant vocal', 'Voice assistant') }}"
+            icon: mdi:account-voice
+          - type: shortcut
+            label: "{{ t('Assistants vocaux de HA', 'HA voice assistants') }}"
+            description: "{{ t('Pipelines : reconnaissance, agent, voix', 'Pipelines: speech-to-text, agent, voice') }}"
+            icon: mdi:microphone-settings
+            tap_action:
+              action: navigate
+              navigation_path: /config/voice-assistants/assistants
+            grid_options:
+              columns: 12
+{%- for cle, e, fr_, en_, icone, ligne in [('pipeline', '', 'Mode en cours', 'Current mode', 'mdi:robot', false),
+                                           ('', 'select.tab5_pipeline_de_discussion', 'Pipeline du mode « Discu » (Not set = boutons masqués)', 'Discu mode pipeline (Not set = buttons hidden)', 'mdi:chat-processing-outline', false),
+                                           ('mot', '', "Mot d'activation", 'Wake word', 'mdi:account-voice', false),
+                                           ('mot_2', '', "2ᵉ mot d'activation", 'Second wake word', 'mdi:account-voice', false),
+                                           ('pipeline_2', '', 'Pipeline du 2ᵉ mot', 'Second wake word pipeline', 'mdi:robot-outline', false),
+                                           ('fin_parole', '', 'Fin de la parole', 'End of speech', 'mdi:timer-sand-complete', true)] %}
+{%- set ent = T[cle] if cle else (e if e in present else '') %}
+{%- if ent %}
+          - type: tile
+            entity: {{ ent }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+{%- if ligne %}
+            features_position: inline
+{%- endif %}
+            features:
+              - type: select-options
+                style: dropdown
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- endfor %}
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("**Domo** : l'assistant préféré de Home Assistant (agent « Home Assistant » pour commander la maison). **Discu** : l'assistant choisi dans la liste ci-dessus, avec n'importe quel agent de conversation (IA en ligne, Ollama en local…). « Mode en cours » suit les boutons de l'écran : ne le changez pas à la main.", '**Domo**: the preferred assistant of Home Assistant (the « Home Assistant » agent to control the home). **Discu**: the assistant picked in the list above, with any conversation agent (online AI, local Ollama…). « Current mode » follows the screen buttons: do not change it by hand.') }} [{{ t('Les deux modes vocaux', 'The two voice modes') }}]({{ doc('installation/settings.md', 'assistant-vocal--les-deux-modes', 'voice-assistant-the-two-modes') }})
+{%- if T.reveil %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Réveil', 'Alarm') }}"
+            icon: mdi:alarm
+          - type: heading
+            heading: "{{ t('Sonnerie', 'Ringtone') }}"
+            heading_style: subtitle
+{%- for cle, genre, fr_, en_, icone, largeur in [
+      ('reveil_sonnerie', 'liste', 'Mélodie', 'Melody', 'mdi:music-note', 12),
+      ('reveil_volume', 'curseur', 'Volume du réveil', 'Alarm volume', 'mdi:volume-high', 12),
+      ('reveil_progressif', 'bascule', 'Volume progressif', 'Gradual volume', 'mdi:volume-plus', 12),
+      ('reveil_annonce', 'bascule', 'Annonce parlée', 'Spoken briefing', 'mdi:account-voice', 12),
+      ('reveil_repetition', 'boutons', 'Répétition', 'Snooze', 'mdi:alarm-snooze', 12),
+      ('reveil_duree', 'boutons', 'Durée max', 'Max duration', 'mdi:timer-outline', 12),
+      ('reveil_url', '', 'URL de sonnerie (option)', 'Ringtone URL (optional)', 'mdi:link-variant', 12),
+      ('', 'titre', "Mode « avant l'ouverture »", 'Before-opening mode', '', 12),
+      ('reveil_delai', 'curseur', "Délai avant l'embauche", 'Lead time before work', 'mdi:timer-sand', 12),
+      ('reveil_avant', '', 'Jamais avant', 'Never before', 'mdi:clock-start', 6),
+      ('reveil_apres', '', 'Jamais après', 'Never after', 'mdi:clock-end', 6),
+      ('reveil_repos', 'boutons', 'Repos mini après la fermeture', 'Minimum rest after closing', 'mdi:sleep', 12),
+      ('reveil_jours_repos', 'bascule', 'Sonner aussi les jours de repos', 'Ring on days off too', 'mdi:calendar-remove', 12)] %}
+{%- if genre == 'titre' %}
+          - type: heading
+            heading: "{{ t(fr_, en_) }}"
+            heading_style: subtitle
+{%- elif T[cle] %}
+          - type: tile
+            entity: {{ T[cle] }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+{%- if genre in ['liste', 'bascule', 'boutons'] %}
+            features_position: inline
+{%- endif %}
+{%- if genre == 'liste' %}
+            features:
+              - type: select-options
+                style: dropdown
+{%- elif genre == 'bascule' %}
+            features:
+              - type: toggle
+{%- elif genre in ['curseur', 'boutons'] %}
+            features:
+              - type: numeric-input
+                style: {{ 'slider' if genre == 'curseur' else 'buttons' }}
+{%- endif %}
+            grid_options:
+              columns: {{ largeur }}
+{%- endif %}
+{%- endfor %}
+{%- endif %}
+
+  # ─── Sous-vue Santé : quand quelque chose cloche ───
+  - title: "{{ t('Santé Tab5', 'Tab5 health') }}{{ (' · ' ~ titre) if titre else '' }}"
+    path: {{ chemin }}-sante
+    icon: mdi:heart-pulse
+    type: sections
+    max_columns: 4
+    subview: true
+    back_path: /{{ adresse }}/{{ chemin }}
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Quand quelque chose cloche', 'When something is wrong') }}"
+            icon: mdi:stethoscope
+          - type: markdown
+            text_only: true
+            content: |-
+              - **{{ t('Écran figé, données anciennes', 'Frozen screen, old data') }}**{{ t(" : « MAJ écran » renvoie tout d'un coup ; si rien ne change, regardez si une automatisation de poussée est coupée.", ': « Refresh screen » sends everything at once; if nothing changes, check whether a push automation is off.') }} [{{ t('Cas déjà vu', 'Known case') }}]({{ doc('troubleshooting.md', 'météo--planning--clim-absents-alors-que-lappareil-est-en-ligne', 'weather--planning--climate-data-missing-but-the-device-is-online') }})
+              - **{{ t('Tablette déconnectée', 'Tablet disconnected') }}**{{ t(" : alimentation et Wi-Fi. Écran noir et tablette absente du réseau après une mise à jour : une vraie coupure (USB débranché 15 s, et appui long avec une batterie).", ': power and Wi-Fi. Black screen and tablet off the network after an update: a real power cut (USB unplugged for 15 s, plus a long press with a battery).') }} [{{ t('Détail', 'Details') }}]({{ doc('troubleshooting.md', 'écran-noir--appareil-absent-du-réseau-après-une-ota--le-co-processeur-wifi-nest-pas-remonté', 'black-screen--device-off-the-network-after-an-ota--the-wi-fi-co-processor-never-came-up') }})
+              - **{{ t('Redémarrages', 'Restarts') }}**{{ t(' : « Raison du dernier démarrage » ci-dessous ; un redémarrage inattendu et le journal envoyé par la tablette arrivent en notification.', ': « Last start reason » below; an unexpected restart and the log sent by the tablet arrive as notifications.') }}
+              - **{{ t('Fichiers HA en retard', 'HA files out of date') }}**{{ t(" : remplacez-les par ceux de l'archive tab5_home_assistant.zip de la même version que la tablette.", ': replace them with those of the tab5_home_assistant.zip archive of the same version as the tablet.') }}
+              - **{{ t("Une zone manque à l'écran", 'A zone is missing on screen') }}**{{ t(' : « Zones masquées », vue Réglages.', ': « Hidden zones », Settings view.') }}
+          - type: shortcut
+            label: "{{ t('Page de la tablette', 'Tablet page') }}"
+            description: "{{ t('Capteurs et diagnostic', 'Sensors and diagnostics') }}"
+            icon: mdi:tablet-cellphone
+            tap_action:
+              action: navigate
+              navigation_path: /config/devices/device/{{ device_id(ns.api) }}
+            grid_options:
+              columns: 12
+          - type: shortcut
+            label: "{{ t('Journal de HA', 'HA logs') }}"
+            description: "{{ t('Erreurs et avertissements', 'Errors and warnings') }}"
+            icon: mdi:math-log
+            tap_action:
+              action: navigate
+              navigation_path: /config/logs
+            grid_options:
+              columns: 6
+          - type: shortcut
+            label: "{{ t('Corrections', 'Repairs') }}"
+            description: "{{ t('Ce que HA signale', 'What HA reports') }}"
+            icon: mdi:wrench-outline
+            tap_action:
+              action: navigate
+              navigation_path: /config/repairs
+            grid_options:
+              columns: 6
+          - type: shortcut
+            label: "{{ t('Dépannage', 'Troubleshooting') }}"
+            description: "{{ t('Pannes déjà diagnostiquées', 'Incidents already diagnosed') }}"
+            icon: mdi:book-open-variant
+            tap_action:
+              action: url
+              url_path: {{ doc('troubleshooting.md', 'version-française', '') }}
+            grid_options:
+              columns: 12
+          - type: heading
+            heading: "{{ t('En bref', 'At a glance') }}"
+            icon: mdi:clipboard-pulse-outline
+          - type: markdown
+            content: |-
+              | {{ t('Point', 'Item') }} | {{ t('État', 'Status') }} |
+              |:--|:--|
+              | {{ t('Liaison avec HA', 'Link with HA') }} | {{ allume(T.api, t('connectée', 'connected'), t('coupée', 'lost')) }} |
+{%- if T.uptime %}
+              | {{ t('Démarrée le', 'Started on') }} | {% raw %}{% set d = as_timestamp(states('{% endraw %}{{ T.uptime }}{% raw %}'), none) %}{{ d | timestamp_custom('%d/%m %H:%M') if d else '—' }}{% endraw %} |
+{%- endif %}
+{%- if T.raison %}
+              | {{ t('Raison du démarrage', 'Start reason') }} | {% raw %}{{ states('{% endraw %}{{ T.raison }}{% raw %}') }}{% endraw %} |
+{%- endif %}
+{%- if T.firmware %}
+              | Firmware | {% raw %}{{ state_attr('{% endraw %}{{ T.firmware }}{% raw %}', 'installed_version') }}{{ (' · <font color="#ff9800">' ~ state_attr('{% endraw %}{{ T.firmware }}{% raw %}', 'latest_version') ~ ' {% endraw %}{{ t('disponible', 'available') }}{% raw %}</font>') if is_state('{% endraw %}{{ T.firmware }}{% raw %}', 'on') else '' }}{% endraw %} |
+{%- endif %}
+{%- if 'sensor.tab5_version_des_fichiers_ha' in present %}
+              | {{ t('Fichiers HA', 'HA files') }} | {% raw %}{{ states('sensor.tab5_version_des_fichiers_ha') }}{% endraw %}
+{%- if 'binary_sensor.tab5_fichiers_ha_en_retard' in present %}{% raw %}{{ ' · <font color="#ff9800">{% endraw %}{{ t('en retard', 'out of date') }}{% raw %}</font>' if is_state('binary_sensor.tab5_fichiers_ha_en_retard', 'on') else '' }}{% endraw %}{%- endif %} |
+{%- endif %}
+{%- if 'sensor.tab5_unavailable_count' in present %}
+              | {{ t('Entités HA indisponibles', 'Unavailable HA entities') }} | {% raw %}{{ states('sensor.tab5_unavailable_count') }}{% endraw %} |
+{%- endif %}
+{%- if 'sensor.tab5_meteo' in present %}
+              | {{ t('Source météo', 'Weather source') }} | {% raw %}{{ state_attr('sensor.tab5_meteo', 'nom_effectif') or '—' }}{{ (' · <font color="#ff9800">{% endraw %}{{ t('choisie :', 'selected:') }}{% raw %} ' ~ state_attr('sensor.tab5_meteo', 'nom_choisi') ~ '</font>') if state_attr('sensor.tab5_meteo', 'repli') else '' }}{% endraw %} |
+{%- endif %}
+{%- if T.wifi %}
+              | {{ t('Signal Wi-Fi', 'Wi-Fi signal') }} | {% raw %}{% set w = states('{% endraw %}{{ T.wifi }}{% raw %}') %}{{ (w | float | round | int) ~ ' dBm' if is_number(w) else '—' }}{% endraw %} |
+{%- endif %}
+{#- Gardes de santé présentes ; « coupées » = interrupteur sur off (normal pendant une OTA). #}
+{%- set gardes = [A.tab5_health_api_off_2min, A.tab5_health_unexpected_reboot,
+                  A.tab5_health_template_error, A.tab5_health_fichiers_ha, A.tab5_health_journal,
+                  A.tab5_health_batterie_faible] | select | list %}
+{%- if gardes %}
+              | {{ t('Alertes de santé', 'Health alerts') }} | {% raw %}{% set n = {% endraw %}{{ gardes }}{% raw %} | select('is_state', 'off') | list | count %}{{ '{% endraw %}{{ t('toutes actives', 'all on') }}{% raw %}' if n == 0 else '<font color="#ff9800">' ~ n ~ ' {% endraw %}{{ t('coupée(s)', 'off') }}{% raw %}</font>' }}{% endraw %} |
+{%- endif %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('État', 'Status') }}"
+            icon: mdi:heart-pulse
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("« Raison du dernier démarrage » dit si c'était une mise à jour, une coupure ou un plantage. « Fichiers HA » vaut « dépôt » pour des fichiers pris dans le dépôt plutôt que dans une archive de version. « Entités HA indispo » compte toute la maison, pas seulement la tablette.", '« Last start reason » tells an update, a power cut or a crash apart. « HA files » reads « dépôt » for files taken from the repository rather than from a release archive. « Unavailable HA entities » counts the whole home, not only the tablet.') }}
+{%- for ent, fr_, en_, icone, largeur in [
+      (T.api, 'Liaison avec HA', 'Link with HA', '', 6),
+      (T.uptime, 'Démarrée', 'Started', 'mdi:timer-outline', 6),
+      (T.raison, 'Raison du dernier démarrage', 'Last start reason', 'mdi:restart-alert', 12),
+      (T.chronologie, 'Chronologie du démarrage (ms)', 'Boot timeline (ms)', 'mdi:timer-outline', 12),
+      (T.chronologie_suite, 'Chronologie du démarrage, suite (ms)', 'Boot timeline, continued (ms)', 'mdi:timer-outline', 12),
+      (T.firmware, 'Firmware', 'Firmware', 'mdi:package-up', 12),
+      ('sensor.tab5_version_des_fichiers_ha' if 'sensor.tab5_version_des_fichiers_ha' in present else '', 'Fichiers HA', 'HA files', 'mdi:file-cog', 6),
+      ('binary_sensor.tab5_fichiers_ha_en_retard' if 'binary_sensor.tab5_fichiers_ha_en_retard' in present else '', 'En retard ?', 'Out of date?', 'mdi:file-alert', 6),
+      (T.c6, 'Puce Wi-Fi (C6)', 'Wi-Fi chip (C6)', 'mdi:chip', 6),
+      ('sensor.tab5_unavailable_count' if 'sensor.tab5_unavailable_count' in present else '', 'Entités HA indispo', 'Unavailable HA entities', 'mdi:alert-circle-outline', 6)] %}
+{%- if ent %}
+          - type: tile
+            entity: {{ ent }}
+            name: "{{ t(fr_, en_) }}"
+{%- if icone %}
+            icon: {{ icone }}
+{%- endif %}
+            grid_options:
+              columns: {{ largeur }}
+{%- endif %}
+{%- endfor %}
+{%- if T.redemarrer %}
+          - type: tile
+            entity: {{ T.redemarrer }}
+            name: "{{ t('Redémarrer la tablette', 'Restart the tablet') }}"
+            icon: mdi:restart
+            grid_options:
+              columns: 12
+{%- for action in ['tap_action', 'icon_tap_action'] %}
+            {{ action }}:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: {{ T.redemarrer }}
+              confirmation:
+                text: "{{ t('Redémarrer la tablette Tab5 ?', 'Restart the Tab5 tablet?') }}"
+{%- endfor %}
+{%- endif %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Performances (24 h)', 'Performance (24 h)') }}"
+            icon: mdi:speedometer
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("Ce qui compte, c'est la forme des courbes : plates sur 24 h. Une mémoire libre qui descend sans remonter ou une pile qui fond annoncent un redémarrage ; un temps de boucle qui grimpe, un écran qui rame.", 'What matters is the shape of the curves: flat over 24 h. Free memory that goes down and never comes back, or a shrinking stack, announce a restart; a rising loop time, a sluggish screen.') }} [{{ t('Mesures de référence', 'Reference measurements') }}]({{ doc('performance.md', 'résultats', 'results') }})
+{%- for ent, fr_, en_, icone in [(T.boucle, 'Temps de boucle', 'Loop time', 'mdi:speedometer'),
+                                 (T.ram, 'Mémoire libre', 'Free memory', 'mdi:memory'),
+                                 (T.temperature, 'Température du processeur', 'Processor temperature', 'mdi:thermometer'),
+                                 (T.pile, 'Pile libre (minimum)', 'Free stack (minimum)', 'mdi:layers-outline')] %}
+{%- if ent %}
+          - type: tile
+            entity: {{ ent }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+            features:
+              - type: trend-graph
+                hours_to_show: 24
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- endfor %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Réseau', 'Network') }}"
+            icon: mdi:wifi
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("Le signal est en dBm : plus il est proche de 0, mieux c'est (−40 excellent, −80 faible).", 'The signal is in dBm: the closer to 0, the better (−40 excellent, −80 weak).') }}
+{%- if T.antenne %}{{ t(' Une antenne externe se choisit dans « Antenne Wi-Fi », vue Réglages.', ' An external antenna is chosen in « Wi-Fi antenna », Settings view.') }}{%- endif %}
+{%- if T.wifi %}
+          - type: tile
+            entity: {{ T.wifi }}
+            name: "{{ t('Signal Wi-Fi', 'Wi-Fi signal') }}"
+            icon: mdi:wifi
+            features:
+              - type: trend-graph
+                hours_to_show: 24
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- for ent, fr_, en_, icone in [(T.ssid, 'Réseau', 'Network', 'mdi:wifi'), (T.ip, 'Adresse IP', 'IP address', 'mdi:ip-network')] %}
+{%- if ent %}
+          - type: tile
+            entity: {{ ent }}
+            name: "{{ t(fr_, en_) }}"
+            icon: {{ icone }}
+            grid_options:
+              columns: 6
+{%- endif %}
+{%- endfor %}
+          - type: heading
+            heading: "{{ t('Matériel', 'Hardware') }}"
+            icon: mdi:chip
+{%- if T.casque %}
+          - type: tile
+            entity: {{ T.casque }}
+            name: "{{ t('Jack casque', 'Headphone jack') }}"
+            icon: mdi:headphones
+            grid_options:
+              columns: 6
+{%- endif %}
+{#- Batterie détectée (firmware du 05/10/2026, d'après la tension) : toujours montrée, c'est
+    elle qui dit s'il vaut la peine d'allumer « Batterie montée ». #}
+{%- if T.batterie_detectee %}
+          - type: tile
+            entity: {{ T.batterie_detectee }}
+            name: "{{ t('Batterie détectée', 'Battery detected') }}"
+            grid_options:
+              columns: 6
+{%- endif %}
+{#- Sécurité du chargeur (firmware du 16/10/2026) : toujours montrée, allumée quand un verrou
+    (surchauffe, tension, charge sans batterie) coupe le chargeur. #}
+{%- if T.securite_chargeur %}
+          - type: tile
+            entity: {{ T.securite_chargeur }}
+            name: "{{ t('Sécurité chargeur', 'Charger safety') }}"
+            grid_options:
+              columns: 6
+{%- endif %}
+{#- Batterie: entités désactivées par défaut dans HA (à activer), cartes visibles seulement
+    quand « Batterie montée » est allumé. #}
+{%- for ent, fr_, en_ in [(T.batterie, 'Batterie', 'Battery'), (T.tension, 'Tension', 'Voltage'), (T.en_charge, 'En charge', 'Charging'),
+                          (T.sur_batterie, 'Sur batterie', 'On battery'), (T.courant, 'Courant', 'Current'),
+                          (T.consommation, 'Consommation', 'Power draw'),
+                          (T.mesure_conso, 'Mesure de consommation', 'Power measurement')] %}
+{%- if ent %}
+          - type: tile
+            entity: {{ ent }}
+            name: "{{ t(fr_, en_) }}"
+            grid_options:
+              columns: 6
+{%- if T.batterie_montee %}
+            visibility:
+              - condition: state
+                entity: {{ T.batterie_montee }}
+                state: "on"
+{%- endif %}
+{%- endif %}
+{%- endfor %}
+{#- Test de consommation sur batterie (packages/tab5_mesure_conso.yaml, 08/10/2026) : ~1 h,
+    confirmation avant de le lancer. #}
+{%- if 'script.tab5_mesure_consommation' in present %}
+          - type: shortcut
+            label: "{{ t('Test de consommation', 'Consumption test') }}"
+            description: "{{ t('Sur batterie, environ 1 h ; résultat en notification', 'On battery, about 1 h; result in a notification') }}"
+            icon: mdi:battery-clock
+            tap_action:
+              action: perform-action
+              perform_action: script.tab5_mesure_consommation
+              confirmation:
+                text: "{{ t('Débrancher l’USB et ne plus toucher la tablette pendant environ 1 h. Lancer le test ?', 'Unplug the USB cable and leave the tablet alone for about 1 h. Start the test?') }}"
+            grid_options:
+              columns: 12
+{%- if T.batterie_montee %}
+            visibility:
+              - condition: state
+                entity: {{ T.batterie_montee }}
+                state: "on"
+{%- endif %}
+{%- endif %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Poussées HA → tablette', 'HA → tablet pushes') }}"
+            icon: mdi:upload-network
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("La tablette ne demande rien : Home Assistant lui envoie tout. Une automatisation coupée ici laisse son morceau d'écran figé, sans message d'erreur. « MAJ écran » renvoie tout d'un coup.", 'The tablet asks for nothing: Home Assistant sends it everything. An automation turned off here leaves its part of the screen frozen, with no error message. « Refresh screen » sends everything at once.') }}
+{%- if A.tab5_ha_hmi_updater %}
+          - type: shortcut
+            label: "{{ t('MAJ écran', 'Refresh screen') }}"
+            description: "{{ t("Pousse tout l'écran maintenant", 'Pushes the whole screen now') }}"
+            icon: mdi:refresh
+            tap_action:
+              action: perform-action
+              perform_action: automation.trigger
+              target:
+                entity_id: {{ A.tab5_ha_hmi_updater }}
+            grid_options:
+              columns: 12
+{%- endif %}
+          - type: heading
+            heading: "{{ t('Automatisations', 'Automations') }}"
+            heading_style: subtitle
+{%- for id, fr_, en_ in [('tab5_ha_hmi_updater', 'Poussée complète', 'Full push'),
+                         ('tab5_ha_hmi_alerts_push', 'Alertes et santé (léger)', 'Alerts and health (light)'),
+                         ('tab5_ha_hmi_meteo_push', 'Météo actuelle', 'Current weather'),
+                         ('tab5_rdv_push', 'Rendez-vous (5 min)', 'Appointments (5 min)'),
+                         ('tab5_evenements', 'Demandes de la tablette', 'Tablet requests'),
+                         ('tab5_volet_updater', 'Volet', 'Shutter'),
+                         ('tab5_screen_presence_wifi', 'Écran selon le téléphone', 'Screen by phone'),
+                         ('tab5_micro_absence', 'Micro coupé en absence', 'Mic off when away')] %}
+{%- if A[id] %}
+          - type: tile
+            entity: {{ A[id] }}
+            name: "{{ t(fr_, en_) }}"
+            features_position: inline
+            features:
+              - type: toggle
+{%- endif %}
+{%- endfor %}
+{%- if ns.e %}
+          - type: tile
+            entity: {{ ns.e }}
+            name: "{{ t("Emplacements de l'écran (blueprint)", 'Screen slots (blueprint)') }}"
+            features_position: inline
+            features:
+              - type: toggle
+{%- endif %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: "{{ t('Alertes de santé', 'Health alerts') }}"
+            icon: mdi:bell-alert-outline
+          - type: markdown
+            text_only: true
+            content: |-
+              {{ t("Chaque garde envoie une notification dans Home Assistant, la plupart aussi sur le téléphone. Pendant une mise à jour de la tablette, coupez-les pour éviter de fausses alertes, puis rallumez-les.", 'Each guard sends a notification in Home Assistant, most of them to the phone too. During a tablet update, turn them off to avoid false alerts, then turn them back on.') }}
+          - type: heading
+            heading: "{{ t('À couper pendant une OTA', 'Turn off during an OTA') }}"
+            heading_style: subtitle
+{%- for id, fr_, en_ in [('tab5_health_api_off_2min', 'Tablette déconnectée 2 min', 'Tablet disconnected 2 min'),
+                         ('tab5_health_unexpected_reboot', 'Redémarrage inattendu', 'Unexpected restart'),
+                         ('tab5_health_template_error', 'Erreur dans une poussée', 'Error in a push'),
+                         ('tab5_health_fichiers_ha', 'Fichiers HA en retard', 'HA files out of date'),
+                         ('tab5_health_journal', 'Journal des démarrages', 'Start log'),
+                         ('tab5_health_batterie_faible', 'Batterie faible', 'Low battery')] %}
+{%- if A[id] %}
+          - type: tile
+            entity: {{ A[id] }}
+            name: "{{ t(fr_, en_) }}"
+            features_position: inline
+            features:
+              - type: toggle
+{%- endif %}
+{%- endfor %}
+{%- if 'sensor.tab5_alertes' in present %}
+          # Historique des alertes (lot 4 du plan des alertes) : les 20 dernières alertes abonnées,
+          # comme le popup « Alertes » de la tablette (custom_templates/tab5_alertes.jinja). Avant
+          # la tuile : la fin du bloc qui suit mangerait la fin de sa dernière ligne.
+          - type: markdown
+            content: |-
+              #### {{ t('Historique des alertes', 'Alert history') }}
+              {% raw %}{% from 'tab5_alertes.jinja' import tab5_alertes_historique %}{% set h = tab5_alertes_historique('liste') | from_json %}{% if h %}{% endraw %}
+              | | {{ t('Alerte', 'Alert') }} | {{ t('Apparue', 'Appeared') }} | {{ t('Lue', 'Read') }} | {{ t('Terminée', 'Ended') }} |
+              |---|---|---|---|---|{% raw %}{% for e in h %}{% endraw %}
+              | {% raw %}{{ '🔴' if e.g == 'Rouge' else '🟡' if e.g == 'Jaune' else '🟠' }} | {% set x = e.t | string %}{{ x[5:] ~ ' · {% endraw %}{{ t('mise à jour', 'update') }}{% raw %}' if x.startswith('@maj:') else x[9:] ~ ' {% endraw %}{{ t('indisponibles', 'unavailable') }}{% raw %}' if x.startswith('@indispo:') else '{% endraw %}{{ t('Vigilance météo', 'Weather warning') }}{% raw %}' if x.startswith('@vigi:') else x }} | {{ (e.a | int(0)) | timestamp_custom('%d/%m %H:%M') if e.a else '—' }} | {{ (e.l | int(0)) | timestamp_custom('%d/%m %H:%M') if e.l else '—' }} | {{ (e.f | int(0)) | timestamp_custom('%d/%m %H:%M') if e.f else '—' }} |{% endfor %}{% endraw %}
+              {% raw %}{% else %}{% endraw %}{{ t('Aucune alerte', 'No alerts') }}{% raw %}{% endif %}{% endraw %}
+          - type: tile
+            entity: sensor.tab5_alertes
+            name: "{{ t("Alertes à lire sur l'écran", 'Alerts to read on screen') }}"
+            icon: mdi:bell-alert-outline
+            grid_options:
+              columns: 12
+{%- endif %}
+{%- endif %}
+{%- endmacro -%}
+{%- macro tab5_dashboard_ecrans(adresse='dashboard-tab5', langue='') -%}
+  {#- Un jeu de vues (Tab5, Réglages, Santé) PAR ÉCRAN (ADR-0071, 25/10/2026). Chaque
+      appareil de modèle tab5-ha-hmi qui a un « HA API Status », connecté ou non, trié par
+      nom. Un seul écran : exactement tab5_dashboard(adresse, langue). Plusieurs : chaque
+      écran prend pour chemin le préfixe de ses actions, « _ » devenu « - » (stable : il
+      vient du nom ESPHome ; « tab5 », « tab5-ha-hmi », « tab5-salon-7b » pour salon_7b),
+      puis -reglages et -sante ; chaque vue porte le nom de l'écran. Les réglages de la maison (agendas, météo,
+      listes « Tab5 · … ») sont communs : ils apparaissent dans la vue Réglages de chaque
+      écran. -#}
+  {%- from 'tab5_tablette.jinja' import tab5_prefixe -%}
+  {%- set ns = namespace(l=[]) -%}
+  {%- for e in integration_entities('esphome') | select('match', 'binary_sensor[.].*_ha_api_status(_[0-9]+)?$') -%}
+    {%- set d = device_id(e) -%}
+    {%- if d and device_attr(e, 'model') == 'tab5-ha-hmi' and d not in ns.l | map(attribute='d') | list -%}
+      {%- set ns.l = ns.l + [{'d': d, 'nom': device_attr(d, 'name_by_user') or device_attr(d, 'name') or 'Tab5'}] -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {%- set ecrans = ns.l | sort(attribute='nom') -%}
+  {%- if ecrans | count <= 1 -%}
+    {{- tab5_dashboard(adresse, langue) -}}
+  {%- else -%}
+    {%- set vu = namespace(chemins=[]) -%}
+views:
+    {%- for e in ecrans -%}
+      {%- set chemin = tab5_prefixe(e.d) | replace('_', '-') -%}
+      {%- set chemin = chemin if chemin.startswith('tab5') else 'tab5-' ~ chemin -%}
+      {%- if chemin in vu.chemins -%}
+        {%- set chemin = chemin ~ '-' ~ loop.index -%}
+      {%- endif -%}
+      {%- set vu.chemins = vu.chemins + [chemin] -%}
+      {{- tab5_dashboard(adresse, langue, appareil=e.d, chemin=chemin, titre=e.nom, vues_seules=true) -}}
+    {%- endfor -%}
+  {%- endif -%}
+{%- endmacro -%}
+{#- ── Traductions : allemand, néerlandais, espagnol, italien, turc ─────────────────────────────
+    Clé = le texte français passé à t(), à l'identique (espaces insécables compris) ; valeurs dans
+    l'ordre de ces langues. Écrites par une IA à partir du français et de l'anglais, non relues.
+    Lue par t() au moment de l'appel : la table peut donc venir après la macro. -#}
+{%- set TRADUCTIONS = {
+  'Tablette déconnectée': {
+    'de': 'Tablet getrennt',
+    'nl': 'Tablet offline',
+    'es': 'Tableta desconectada',
+    'it': 'Tablet disconnesso',
+    'tr': 'Tablet bağlantısı kesildi'},
+  'Fichiers HA en retard': {
+    'de': 'HA-Dateien veraltet',
+    'nl': 'HA-bestanden verouderd',
+    'es': 'Archivos HA desactualizados',
+    'it': 'File HA non aggiornati',
+    'tr': 'HA dosyaları güncel değil'},
+  'Mise à jour du firmware': {
+    'de': 'Firmware-Update',
+    'nl': 'Firmware-update',
+    'es': 'Actualización del firmware',
+    'it': 'Aggiornamento firmware',
+    'tr': 'Firmware güncellemesi'},
+  'Tablette': {
+    'de': 'Tablet',
+    'nl': 'Tablet',
+    'es': 'Tableta',
+    'it': 'Tablet',
+    'tr': 'Tablet'},
+  'Réglages': {
+    'de': 'Einstellungen',
+    'nl': 'Instellingen',
+    'es': 'Ajustes',
+    'it': 'Impostazioni',
+    'tr': 'Ayarlar'},
+  'Écran, capteurs, énergie, météo, agendas, voix': {
+    'de': 'Bildschirm, Sensoren, Energie, Wetter, Kalender, Sprache',
+    'nl': 'Scherm, sensoren, energie, weer, agenda’s, spraak',
+    'es': 'Pantalla, sensores, energía, tiempo, calendarios, voz',
+    'it': 'Schermo, sensori, energia, meteo, calendari, voce',
+    'tr': 'Ekran, sensörler, enerji, hava durumu, takvimler, ses'},
+  'Santé': {
+    'de': 'Zustand',
+    'nl': 'Gezondheid',
+    'es': 'Salud',
+    'it': 'Salute',
+    'tr': 'Sağlık'},
+  'Dépannage, diagnostic, alertes': {
+    'de': 'Fehlersuche, Diagnose, Warnungen',
+    'nl': 'Probleemoplossing, diagnose, meldingen',
+    'es': 'Solución de problemas, diagnóstico, alertas',
+    'it': 'Risoluzione problemi, diagnostica, avvisi',
+    'tr': 'Sorun giderme, tanılama, uyarılar'},
+  'Luminosité': {
+    'de': 'Helligkeit',
+    'nl': 'Helderheid',
+    'es': 'Brillo',
+    'it': 'Luminosità',
+    'tr': 'Parlaklık'},
+  'Afficher': {
+    'de': 'Anzeigen',
+    'nl': 'Tonen',
+    'es': 'Mostrar',
+    'it': 'Mostra',
+    'tr': 'Göster'},
+  'Haut-parleur': {
+    'de': 'Lautsprecher',
+    'nl': 'Luidspreker',
+    'es': 'Altavoz',
+    'it': 'Altoparlante',
+    'tr': 'Hoparlör'},
+  'Recharger le calendrier': {
+    'de': 'Kalender neu laden',
+    'nl': 'Agenda herladen',
+    'es': 'Recargar el calendario',
+    'it': 'Ricarica il calendario',
+    'tr': 'Takvimi yeniden yükle'},
+  'Réveil': {
+    'de': 'Wecker',
+    'nl': 'Wekker',
+    'es': 'Alarma',
+    'it': 'Sveglia',
+    'tr': 'Alarm'},
+  'Prochaine sonnerie': {
+    'de': 'Nächster Weckruf',
+    'nl': 'Volgende wekker',
+    'es': 'Próxima alarma',
+    'it': 'Prossima sveglia',
+    'tr': 'Sonraki alarm'},
+  'Réveil armé': {
+    'de': 'Wecker an',
+    'nl': 'Wekker aan',
+    'es': 'Alarma activada',
+    'it': 'Sveglia attiva',
+    'tr': 'Alarm açık'},
+  'Heure fixe': {
+    'de': 'Feste Zeit',
+    'nl': 'Vaste tijd',
+    'es': 'Hora fija',
+    'it': 'Ora fissa',
+    'tr': 'Sabit saat'},
+  'Jours': {
+    'de': 'Tage',
+    'nl': 'Dagen',
+    'es': 'Días',
+    'it': 'Giorni',
+    'tr': 'Günler'},
+  'Tester': {
+    'de': 'Testen',
+    'nl': 'Testen',
+    'es': 'Probar',
+    'it': 'Prova',
+    'tr': 'Dene'},
+  'Arrêter': {
+    'de': 'Stopp',
+    'nl': 'Stop',
+    'es': 'Detener',
+    'it': 'Ferma',
+    'tr': 'Durdur'},
+  'Répéter': {
+    'de': 'Später',
+    'nl': 'Snooze',
+    'es': 'Aplazar',
+    'it': 'Posponi',
+    'tr': 'Ertele'},
+  "Sonnerie, volume et mode « avant l'ouverture » : page Réglages": {
+    'de': 'Klingelton, Lautstärke und Schicht-Modus: Seite Einstellungen',
+    'nl': 'Wekgeluid, volume en modus “voor opening”: pagina Instellingen',
+    'es': 'Tono, volumen y modo «antes del turno»: página Ajustes',
+    'it': 'Suoneria, volume e modalità «inizio turno»: pagina Impostazioni',
+    'tr': 'Zil sesi, ses seviyesi ve mesai başı modu: Ayarlar sayfası'},
+  'Rendez-vous': {
+    'de': 'Termine',
+    'nl': 'Afspraken',
+    'es': 'Citas',
+    'it': 'Appuntamenti',
+    'tr': 'Randevular'},
+  'Prochain rendez-vous': {
+    'de': 'Nächster Termin',
+    'nl': 'Volgende afspraak',
+    'es': 'Próxima cita',
+    'it': 'Prossimo appuntamento',
+    'tr': 'Sonraki randevu'},
+  'Annonce vocale': {
+    'de': 'Sprachansage',
+    'nl': 'Gesproken herinnering',
+    'es': 'Aviso de voz',
+    'it': 'Annuncio vocale',
+    'tr': 'Sesli hatırlatma'},
+  'Annoncer avant': {
+    'de': 'Vorab ansagen',
+    'nl': 'Herinner vooraf',
+    'es': 'Avisar antes',
+    'it': 'Preavviso',
+    'tr': 'Önceden hatırlat'},
+  'Pousser la liste': {
+    'de': 'Liste senden',
+    'nl': 'Lijst versturen',
+    'es': 'Enviar la lista',
+    'it': 'Invia l’elenco',
+    'tr': 'Listeyi gönder'},
+  'Envoie les rendez-vous à la tablette': {
+    'de': 'Sendet die Termine ans Tablet',
+    'nl': 'Stuurt de afspraken naar de tablet',
+    'es': 'Envía las citas a la tableta',
+    'it': 'Invia gli appuntamenti al tablet',
+    'tr': 'Randevuları tablete gönderir'},
+  'Briefing parlé': {
+    'de': 'Gesprochenes Briefing',
+    'nl': 'Gesproken briefing',
+    'es': 'Resumen hablado',
+    'it': 'Briefing vocale',
+    'tr': 'Sesli özet'},
+  "Teste l'annonce du matin": {
+    'de': 'Testet die Morgenansage',
+    'nl': 'Test de ochtendbriefing',
+    'es': 'Prueba el resumen de la mañana',
+    'it': 'Prova l’annuncio del mattino',
+    'tr': 'Sabah duyurusunu dener'},
+  'Assistant vocal': {
+    'de': 'Sprachassistent',
+    'nl': 'Spraakassistent',
+    'es': 'Asistente de voz',
+    'it': 'Assistente vocale',
+    'tr': 'Sesli asistan'},
+  'Assistant': {
+    'de': 'Assistent',
+    'nl': 'Assistent',
+    'es': 'Asistente',
+    'it': 'Assistente',
+    'tr': 'Asistan'},
+  "« Ok Nabu » à l'écoute": {
+    'de': '„Ok Nabu“ hört zu',
+    'nl': '“Ok Nabu” luistert',
+    'es': 'Ok Nabu escuchando',
+    'it': '«Ok Nabu» in ascolto',
+    'tr': '“Ok Nabu” dinliyor'},
+  'Micro coupé (absence)': {
+    'de': 'Mikro aus (abwesend)',
+    'nl': 'Microfoon uit (afwezig)',
+    'es': 'Micro apagado (ausencia)',
+    'it': 'Microfono spento (assenza)',
+    'tr': 'Mikrofon kapalı (dışarıda)'},
+  'Texte à annoncer': {
+    'de': 'Anzusagender Text',
+    'nl': 'Tekst om uit te spreken',
+    'es': 'Texto a anunciar',
+    'it': 'Testo da annunciare',
+    'tr': 'Duyurulacak metin'},
+  'Faire parler la tablette': {
+    'de': 'Tablet sprechen lassen',
+    'nl': 'Tablet laten praten',
+    'es': 'Hacer hablar a la tableta',
+    'it': 'Fai parlare il tablet',
+    'tr': 'Tableti konuştur'},
+  'Lit le texte ci-dessus': {
+    'de': 'Liest den obigen Text vor',
+    'nl': 'Leest de tekst hierboven voor',
+    'es': 'Lee el texto de arriba',
+    'it': 'Legge il testo qui sopra',
+    'tr': 'Yukarıdaki metni okur'},
+  'Réglages Tab5': {
+    'de': 'Tab5-Einstellungen',
+    'nl': 'Tab5-instellingen',
+    'es': 'Ajustes de Tab5',
+    'it': 'Impostazioni Tab5',
+    'tr': 'Tab5 ayarları'},
+  'Régler la tablette': {
+    'de': 'Tablet einrichten',
+    'nl': 'De tablet instellen',
+    'es': 'Configurar la tableta',
+    'it': 'Configura il tablet',
+    'tr': 'Tableti ayarlama'},
+  'Tout se règle depuis Home Assistant, sans recompiler la tablette, à trois endroits :': {
+    'de': 'Alles wird in Home Assistant eingestellt, ohne das Tablet neu zu bauen, an drei Orten:',
+    'nl': 'Alles wordt ingesteld via Home Assistant, zonder de tablet opnieuw te compileren, op drie plekken:',
+    'es': 'Todo se ajusta desde Home Assistant, sin recompilar la tableta, en tres sitios:',
+    'it': 'Tutto si imposta da Home Assistant, senza ricompilare il tablet, in tre posti:',
+    'tr': 'Her şey Home Assistant’tan, tableti yeniden derlemeden, üç yerden ayarlanır:'},
+  'Cette page': {
+    'de': 'Diese Seite',
+    'nl': 'Deze pagina',
+    'es': 'Esta página',
+    'it': 'Questa pagina',
+    'tr': 'Bu sayfa'},
+  ' : ce qui vaut pour toute la maison (météo, agendas, téléphone, présence, voix) et les réglages de la tablette.': {
+    'de': ': was für das ganze Zuhause gilt (Wetter, Kalender, Telefon, Anwesenheit, Sprache) und die Tablet-Einstellungen.',
+    'nl': ': wat voor het hele huis geldt (weer, agenda’s, telefoon, aanwezigheid, spraak) en de tabletinstellingen.',
+    'es': ': lo que vale para toda la casa (tiempo, calendarios, teléfono, presencia, voz) y los ajustes de la tableta.',
+    'it': ': ciò che vale per tutta la casa (meteo, calendari, telefono, presenza, voce) e le impostazioni del tablet.',
+    'tr': ': tüm eve ait olanlar (hava durumu, takvimler, telefon, varlık, ses) ve tablet ayarları.'},
+  "Les emplacements de l'écran": {
+    'de': 'Die Bildschirmplätze',
+    'nl': 'De schermvakken',
+    'es': 'Las ranuras de pantalla',
+    'it': 'Gli slot dello schermo',
+    'tr': 'Ekran yuvaları'},
+  " : ce que l'écran montre, appareil par appareil et capteur par capteur (pièces, températures, clim, plantes, énergie solaire, planning).": {
+    'de': ': was der Bildschirm zeigt, Gerät für Gerät und Sensor für Sensor (Räume, Temperaturen, Klima, Pflanzen, Solarenergie, Dienstplan).',
+    'nl': ': wat het scherm toont, apparaat per apparaat en sensor per sensor (kamers, temperaturen, airco, planten, zonne-energie, planning).',
+    'es': ': lo que muestra la pantalla, dispositivo a dispositivo y sensor a sensor (estancias, temperaturas, clima, plantas, energía solar, horario).',
+    'it': ': ciò che mostra lo schermo, dispositivo per dispositivo e sensore per sensore (stanze, temperature, clima, piante, energia solare, turni).',
+    'tr': ': ekranın gösterdikleri, cihaz cihaz ve sensör sensör (odalar, sıcaklıklar, klima, bitkiler, güneş enerjisi, planlama).'},
+  'La page de la tablette': {
+    'de': 'Die Tablet-Seite',
+    'nl': 'De tabletpagina',
+    'es': 'La página de la tableta',
+    'it': 'La pagina del tablet',
+    'tr': 'Tablet sayfası'},
+  " : toutes ses entités dans l'intégration ESPHome, son diagnostic et ses mises à jour.": {
+    'de': ': alle Entitäten in der ESPHome-Integration, Diagnose und Updates.',
+    'nl': ': al zijn entiteiten in de ESPHome-integratie, de diagnose en de updates.',
+    'es': ': todas sus entidades en la integración ESPHome, su diagnóstico y sus actualizaciones.',
+    'it': ': tutte le sue entità nell’integrazione ESPHome, la diagnostica e gli aggiornamenti.',
+    'tr': ': ESPHome entegrasyonundaki tüm varlıkları, tanılama ve güncellemeleri.'},
+  'Page de la tablette': {
+    'de': 'Tablet-Seite',
+    'nl': 'Tabletpagina',
+    'es': 'Página de la tableta',
+    'it': 'Pagina del tablet',
+    'tr': 'Tablet sayfası'},
+  'ESPHome : réglages, diagnostic, mises à jour': {
+    'de': 'ESPHome: Einstellungen, Diagnose, Updates',
+    'nl': 'ESPHome: instellingen, diagnose, updates',
+    'es': 'ESPHome: ajustes, diagnóstico, actualizaciones',
+    'it': 'ESPHome: impostazioni, diagnostica, aggiornamenti',
+    'tr': 'ESPHome: ayarlar, tanılama, güncellemeler'},
+  "Emplacements de l'écran": {
+    'de': 'Bildschirmplätze',
+    'nl': 'Schermvakken',
+    'es': 'Ranuras de pantalla',
+    'it': 'Slot dello schermo',
+    'tr': 'Ekran yuvaları'},
+  'Pièces, capteurs, clim, plantes, énergie': {
+    'de': 'Räume, Sensoren, Klima, Pflanzen, Energie',
+    'nl': 'Kamers, sensoren, airco, planten, energie',
+    'es': 'Estancias, sensores, clima, plantas, energía',
+    'it': 'Stanze, sensori, clima, piante, energia',
+    'tr': 'Odalar, sensörler, klima, bitkiler, enerji'},
+  'Connexion ESPHome': {
+    'de': 'ESPHome-Verbindung',
+    'nl': 'ESPHome-verbinding',
+    'es': 'Conexión ESPHome',
+    'it': 'Connessione ESPHome',
+    'tr': 'ESPHome bağlantısı'},
+  'Adresse, clé, options': {
+    'de': 'Adresse, Schlüssel, Optionen',
+    'nl': 'Adres, sleutel, opties',
+    'es': 'Dirección, clave, opciones',
+    'it': 'Indirizzo, chiave, opzioni',
+    'tr': 'Adres, anahtar, seçenekler'},
+  'Réglages et options': {
+    'de': 'Einstellungen und Optionen',
+    'nl': 'Instellingen en opties',
+    'es': 'Ajustes y opciones',
+    'it': 'Impostazioni e opzioni',
+    'tr': 'Ayarlar ve seçenekler'},
+  'En bref': {
+    'de': 'Auf einen Blick',
+    'nl': 'In het kort',
+    'es': 'En breve',
+    'it': 'In breve',
+    'tr': 'Özet'},
+  'Ce que la tablette utilise en ce moment': {
+    'de': 'Was das Tablet gerade verwendet',
+    'nl': 'Wat de tablet nu gebruikt',
+    'es': 'Lo que usa la tableta ahora',
+    'it': 'Cosa usa il tablet in questo momento',
+    'tr': 'Tabletin şu an kullandıkları'},
+  'non choisi': {
+    'de': 'nicht gewählt',
+    'nl': 'niet gekozen',
+    'es': 'sin elegir',
+    'it': 'non scelto',
+    'tr': 'seçilmedi'},
+  'Réglage': {
+    'de': 'Einstellung',
+    'nl': 'Instelling',
+    'es': 'Ajuste',
+    'it': 'Impostazione',
+    'tr': 'Ayar'},
+  'Choix': {
+    'de': 'Auswahl',
+    'nl': 'Keuze',
+    'es': 'Elección',
+    'it': 'Scelta',
+    'tr': 'Seçim'},
+  "Langue de l'écran": {
+    'de': 'Bildschirmsprache',
+    'nl': 'Schermtaal',
+    'es': 'Idioma de la pantalla',
+    'it': 'Lingua dello schermo',
+    'tr': 'Ekran dili'},
+  'Prévisions': {
+    'de': 'Vorhersage',
+    'nl': 'Voorspellingen',
+    'es': 'Previsiones',
+    'it': 'Previsioni',
+    'tr': 'Tahminler'},
+  "Pluie dans l'heure": {
+    'de': 'Regen in der nächsten Stunde',
+    'nl': 'Regen komend uur',
+    'es': 'Lluvia próxima hora',
+    'it': 'Pioggia nell’ora',
+    'tr': '1 saat içinde yağmur'},
+  'Vigilances': {
+    'de': 'Wetterwarnungen',
+    'nl': 'Weerwaarschuwingen',
+    'es': 'Alertas meteo',
+    'it': 'Allerte meteo',
+    'tr': 'Hava uyarıları'},
+  'Agenda de travail': {
+    'de': 'Arbeitskalender',
+    'nl': 'Werkagenda',
+    'es': 'Calendario de trabajo',
+    'it': 'Calendario di lavoro',
+    'tr': 'İş takvimi'},
+  'mot « ': {
+    'de': 'Stichwort: ',
+    'nl': 'trefwoord: ',
+    'es': 'palabra: ',
+    'it': 'parola chiave: ',
+    'tr': 'anahtar kelime: '},
+  'tous': {
+    'de': 'alle',
+    'nl': 'alle',
+    'es': 'todos',
+    'it': 'qualsiasi',
+    'tr': 'tümü'},
+  ' »': {
+    'de': '',
+    'nl': '',
+    'es': '',
+    'it': '',
+    'tr': ''},
+  'Anniversaires': {
+    'de': 'Geburtstage',
+    'nl': 'Verjaardagen',
+    'es': 'Cumpleaños',
+    'it': 'Compleanni',
+    'tr': 'Doğum günleri'},
+  'Jours fériés': {
+    'de': 'Feiertage',
+    'nl': 'Feestdagen',
+    'es': 'Festivos',
+    'it': 'Festività',
+    'tr': 'Resmi tatiller'},
+  'Vacances scolaires': {
+    'de': 'Schulferien',
+    'nl': 'Schoolvakanties',
+    'es': 'Vacaciones escolares',
+    'it': 'Vacanze scolastiche',
+    'tr': 'Okul tatilleri'},
+  'Téléphone': {
+    'de': 'Telefon',
+    'nl': 'Telefoon',
+    'es': 'Teléfono',
+    'it': 'Telefono',
+    'tr': 'Telefon'},
+  'Capteur de présence': {
+    'de': 'Anwesenheitssensor',
+    'nl': 'Aanwezigheidssensor',
+    'es': 'Sensor de presencia',
+    'it': 'Sensore di presenza',
+    'tr': 'Varlık sensörü'},
+  'TV Samsung': {
+    'de': 'Samsung-TV',
+    'nl': 'Samsung-tv',
+    'es': 'TV Samsung',
+    'it': 'TV Samsung',
+    'tr': 'Samsung TV'},
+  'Volet': {
+    'de': 'Rollladen',
+    'nl': 'Rolluik',
+    'es': 'Persiana',
+    'it': 'Tapparella',
+    'tr': 'Panjur'},
+  'Mode « Discu »': {
+    'de': 'Modus „Discu“',
+    'nl': 'Modus “Discu”',
+    'es': 'Modo «Discu»',
+    'it': 'Modalità «Discu»',
+    'tr': '“Discu” modu'},
+  'automatisation active': {
+    'de': 'Automatisierung aktiv',
+    'nl': 'automatisering aan',
+    'es': 'automatización activada',
+    'it': 'automazione attiva',
+    'tr': 'otomasyon açık'},
+  'automatisation désactivée': {
+    'de': 'Automatisierung deaktiviert',
+    'nl': 'automatisering uit',
+    'es': 'automatización desactivada',
+    'it': 'automazione disattivata',
+    'tr': 'otomasyon kapalı'},
+  'Zones masquées': {
+    'de': 'Ausgeblendete Zonen',
+    'nl': 'Verborgen zones',
+    'es': 'Zonas ocultas',
+    'it': 'Zone nascoste',
+    'tr': 'Gizli alanlar'},
+  "Ce que l'écran affiche": {
+    'de': 'Was der Bildschirm zeigt',
+    'nl': 'Wat het scherm toont',
+    'es': 'Lo que muestra la pantalla',
+    'it': 'Cosa mostra lo schermo',
+    'tr': 'Ekranın gösterdikleri'},
+  "Appareils et capteurs se choisissent dans l'automatisation des emplacements, section par section :": {
+    'de': 'Geräte und Sensoren werden in der Automatisierung der Bildschirmplätze gewählt, Abschnitt für Abschnitt:',
+    'nl': 'Apparaten en sensoren kies je in de automatisering van de schermvakken, sectie per sectie:',
+    'es': 'Los dispositivos y sensores se eligen en la automatización de las ranuras, sección por sección:',
+    'it': 'Dispositivi e sensori si scelgono nell’automazione degli slot, sezione per sezione:',
+    'tr': 'Cihazlar ve sensörler, ekran yuvaları otomasyonunda bölüm bölüm seçilir:'},
+  'Pièce 1 à 5': {
+    'de': 'Raum 1 bis 5',
+    'nl': 'Kamer 1 tot 5',
+    'es': 'Estancia 1 a 5',
+    'it': 'Stanza da 1 a 5',
+    'tr': 'Oda 1-5'},
+  ' : cinq appareils par pièce au plus (lumières, prises, volets, clim, scènes, capteurs…), les tuiles du bas, une pièce par page.': {
+    'de': ': höchstens fünf Geräte pro Raum (Lichter, Steckdosen, Rollläden, Klima, Szenen, Sensoren…), die Kacheln unten, ein Raum pro Seite.',
+    'nl': ': maximaal vijf apparaten per kamer (lampen, stekkers, rolluiken, airco, scènes, sensoren…), de tegels onderaan, één kamer per pagina.',
+    'es': ': hasta cinco dispositivos por estancia (luces, enchufes, persianas, clima, escenas, sensores…), las teselas de abajo, una estancia por página.',
+    'it': ': al massimo cinque dispositivi per stanza (luci, prese, tapparelle, clima, scene, sensori…), le tessere in basso, una stanza per pagina.',
+    'tr': ': oda başına en fazla beş cihaz (ışıklar, prizler, panjurlar, klima, sahneler, sensörler…), alttaki kutucuklar, sayfa başına bir oda.'},
+  'TV, téléphone': {
+    'de': 'TV, Telefon',
+    'nl': 'Tv, telefoon',
+    'es': 'TV, teléfono',
+    'it': 'TV, telefono',
+    'tr': 'TV, telefon'},
+  " : la TV et sa télécommande, la batterie du téléphone (icône d'état).": {
+    'de': ': der Fernseher und seine Fernbedienung, der Akku des Telefons (Statussymbol).',
+    'nl': ': de tv en de afstandsbediening, de telefoonbatterij (statuspictogram).',
+    'es': ': la TV y su mando, la batería del teléfono (icono de estado).',
+    'it': ': la TV e il suo telecomando, la batteria del telefono (icona di stato).',
+    'tr': ': TV ve kumandası, telefon pili (durum simgesi).'},
+  'Températures': {
+    'de': 'Temperaturen',
+    'nl': 'Temperaturen',
+    'es': 'Temperaturas',
+    'it': 'Temperature',
+    'tr': 'Sıcaklıklar'},
+  " : température et humidité de la pièce, une seconde température (serre), sur l'accueil.": {
+    'de': ': Temperatur und Luftfeuchtigkeit des Raums, eine zweite Temperatur (Gewächshaus), auf der Startseite.',
+    'nl': ': temperatuur en luchtvochtigheid van de kamer, een tweede temperatuur (kas), op de startpagina.',
+    'es': ': temperatura y humedad de la estancia, una segunda temperatura (invernadero), en la página de inicio.',
+    'it': ': temperatura e umidità della stanza, una seconda temperatura (serra), nella home.',
+    'tr': ': odanın sıcaklığı ve nemi, ikinci bir sıcaklık (sera), ana sayfada.'},
+  'Climatisation': {
+    'de': 'Klimaanlage',
+    'nl': 'Airco',
+    'es': 'Climatización',
+    'it': 'Clima',
+    'tr': 'Klima'},
+  " : − / consigne / + de l'accueil et le popup clim.": {
+    'de': ': − / Sollwert / + auf der Startseite und im Klima-Popup.',
+    'nl': ': − / instelwaarde / + op de startpagina en de airco-popup.',
+    'es': ': − / consigna / + de la página de inicio y el popup de clima.',
+    'it': ': − / valore impostato / + della home e il popup del clima.',
+    'tr': ': ana sayfadaki − / hedef / + ve klima penceresi.'},
+  'Plantes': {
+    'de': 'Pflanzen',
+    'nl': 'Planten',
+    'es': 'Plantas',
+    'it': 'Piante',
+    'tr': 'Bitkiler'},
+  " : le capteur d'humidité de chaque pot (Flower Care et semblables) ; le reste est lu sur le même appareil.": {
+    'de': ': der Feuchtesensor jedes Topfs (Flower Care und Ähnliche); der Rest wird vom selben Gerät gelesen.',
+    'nl': ': de vochtsensor van elke pot (Flower Care en dergelijke); de rest wordt van hetzelfde apparaat gelezen.',
+    'es': ': el sensor de humedad de cada maceta (Flower Care y similares); el resto se lee del mismo dispositivo.',
+    'it': ': il sensore di umidità di ogni vaso (Flower Care e simili); il resto viene letto dallo stesso dispositivo.',
+    'tr': ': her saksının nem sensörü (Flower Care ve benzerleri); gerisi aynı cihazdan okunur.'},
+  'Planning de travail': {
+    'de': 'Dienstplan',
+    'nl': 'Werkplanning',
+    'es': 'Horario de trabajo',
+    'it': 'Turni di lavoro',
+    'tr': 'İş planı'},
+  ' : un agenda ; vide, celui de la liste « Agenda de travail » plus bas.': {
+    'de': ': ein Kalender; leer, der aus der Liste „Arbeitskalender“ weiter unten.',
+    'nl': ': een agenda; leeg, die van de lijst “Werkagenda” hieronder.',
+    'es': ': un calendario; si está vacío, el de la lista «Trabajo» más abajo.',
+    'it': ': un calendario; se vuoto, quello dell’elenco «Calendario di lavoro» più in basso.',
+    'tr': ': bir takvim; boşsa aşağıdaki “İş takvimi” listesindeki.'},
+  'Météo': {
+    'de': 'Wetter',
+    'nl': 'Weer',
+    'es': 'Tiempo',
+    'it': 'Meteo',
+    'tr': 'Hava durumu'},
+  ' : facultatif, prime sur les listes « Météo » plus bas.': {
+    'de': ': optional, hat Vorrang vor den Listen „Wetter“ weiter unten.',
+    'nl': ': optioneel, heeft voorrang op de lijsten “Weer” hieronder.',
+    'es': ': opcional, prevalece sobre las listas «Tiempo» de más abajo.',
+    'it': ': facoltativo, ha la precedenza sugli elenchi «Meteo» più in basso.',
+    'tr': ': isteğe bağlı, aşağıdaki “Hava durumu” listelerine göre önceliklidir.'},
+  'Énergie': {
+    'de': 'Energie',
+    'nl': 'Energie',
+    'es': 'Energía',
+    'it': 'Energia',
+    'tr': 'Enerji'},
+  ' : voir « Énergie solaire ».': {
+    'de': ': siehe „Solarenergie“.',
+    'nl': ': zie “Zonne-energie”.',
+    'es': ': ver «Energía solar».',
+    'it': ': vedi «Energia solare».',
+    'tr': ': bkz. “Güneş enerjisi”.'},
+  "Un champ vide disparaît de l'écran avec ses boutons, et « Zones masquées » le dit. Un changement part tout de suite, sans redémarrer.": {
+    'de': 'Ein leeres Feld verschwindet mit seinen Tasten vom Bildschirm, und „Ausgeblendete Zonen“ sagt es. Eine Änderung wird sofort gesendet, ohne Neustart.',
+    'nl': 'Een leeg veld verdwijnt van het scherm met zijn knoppen, en “Verborgen zones” meldt dat. Een wijziging wordt meteen verstuurd, zonder opnieuw op te starten.',
+    'es': 'Un campo vacío desaparece de la pantalla con sus botones, y «Zonas ocultas» lo indica. Un cambio se envía al instante, sin reiniciar.',
+    'it': 'Un campo vuoto scompare dallo schermo insieme ai suoi pulsanti, e «Zone nascoste» lo segnala. Una modifica parte subito, senza riavviare.',
+    'tr': 'Boş bir alan düğmeleriyle birlikte ekrandan kalkar ve “Gizli alanlar” bunu belirtir. Değişiklik hemen gönderilir, yeniden başlatmak gerekmez.'},
+  'Adapter à sa maison': {
+    'de': 'An dein Zuhause anpassen',
+    'nl': 'Aanpassen aan je huis',
+    'es': 'Adaptar a tu casa',
+    'it': 'Adatta alla tua casa',
+    'tr': 'Evine uyarla'},
+  'Choisir appareils et capteurs': {
+    'de': 'Geräte und Sensoren wählen',
+    'nl': 'Apparaten en sensoren kiezen',
+    'es': 'Elegir dispositivos y sensores',
+    'it': 'Scegli dispositivi e sensori',
+    'tr': 'Cihaz ve sensör seç'},
+  "Tab5 — emplacements de l'écran": {
+    'de': 'Tab5 — emplacements de l’écran (Bildschirmplätze)',
+    'nl': 'Tab5 — emplacements de l’écran (schermvakken)',
+    'es': 'Tab5 — emplacements de l’écran (ranuras de pantalla)',
+    'it': 'Tab5 — emplacements de l’écran (slot dello schermo)',
+    'tr': 'Tab5 — emplacements de l’écran (ekran yuvaları)'},
+  'Énergie solaire': {
+    'de': 'Solarenergie',
+    'nl': 'Zonne-energie',
+    'es': 'Energía solar',
+    'it': 'Energia solare',
+    'tr': 'Güneş enerjisi'},
+  "Facultatif. Dans l'automatisation des emplacements, ouvrez les sections repliées **« Énergie : … »** (solaire, réseau et maison, batterie) :": {
+    'de': 'Optional. In der Automatisierung der Bildschirmplätze die eingeklappten Abschnitte **„Énergie : … · Energy: …“** öffnen (Solar, Netz und Haus, Batterie):',
+    'nl': 'Optioneel. Open in de automatisering van de schermvakken de ingeklapte secties **“Énergie : … · Energy: …”** (zon, net en huis, batterij):',
+    'es': 'Opcional. En la automatización de las ranuras, abre las secciones plegadas **«Énergie : … · Energy: …»** (solar, red y casa, batería):',
+    'it': 'Facoltativo. Nell’automazione degli slot, apri le sezioni chiuse **«Énergie : … · Energy: …»** (solare, rete e casa, batteria):',
+    'tr': 'İsteğe bağlı. Ekran yuvaları otomasyonunda, katlanmış **“Énergie : … · Energy: …”** bölümlerini aç (güneş, şebeke ve ev, batarya):'},
+  'Puissance solaire': {
+    'de': 'Solarleistung',
+    'nl': 'Zonnevermogen',
+    'es': 'Potencia solar',
+    'it': 'Potenza solare',
+    'tr': 'Güneş gücü'},
+  ' : ce que produisent les panneaux en ce moment (W ou kW).': {
+    'de': ': was die Panels gerade erzeugen (W oder kW).',
+    'nl': ': wat de panelen op dit moment produceren (W of kW).',
+    'es': ': lo que producen los paneles ahora mismo (W o kW).',
+    'it': ': ciò che producono i pannelli in questo momento (W o kW).',
+    'tr': ': panellerin şu an ürettiği (W veya kW).'},
+  'Puissance crête des panneaux': {
+    'de': 'Spitzenleistung der Panels',
+    'nl': 'Piekvermogen van de panelen',
+    'es': 'Potencia pico de los paneles',
+    'it': 'Potenza di picco dei pannelli',
+    'tr': 'Panel tepe gücü'},
+  " (kWc, sur la facture ou l'onduleur) : avec la puissance solaire, une icône du bandeau d'état, en haut à gauche, montre la production par sa couleur (gris la nuit, puis rouge, ambre, bleu, vert). 0 : pas d'icône.": {
+    'de': ' (kWp, auf der Rechnung oder am Wechselrichter): Zusammen mit der Solarleistung zeigt ein Symbol der Statusleiste oben links die Erzeugung an seiner Farbe (grau nachts, dann rot, bernstein, blau, grün). 0: kein Symbol.',
+    'nl': ' (kWp, op de factuur of de omvormer): samen met het zonnevermogen toont een pictogram in de statusbalk, linksboven, de productie met zijn kleur (grijs ’s nachts, dan rood, amber, blauw, groen). 0: geen pictogram.',
+    'es': ' (kWp, en la factura o el inversor): junto con la potencia solar, un icono de la barra de estado, arriba a la izquierda, muestra la producción por su color (gris de noche, luego rojo, ámbar, azul, verde). 0: sin icono.',
+    'it': ' (kWp, in bolletta o sull’inverter): insieme alla potenza solare, un’icona della barra di stato, in alto a sinistra, mostra la produzione con il colore (grigio di notte, poi rosso, ambra, blu, verde). 0: nessuna icona.',
+    'tr': ' (kWp, faturada veya eviricide yazar): güneş gücüyle birlikte durum şeridinin sol üstündeki bir simge, üretimi rengiyle gösterir (gece gri, sonra kırmızı, kehribar, mavi, yeşil). 0: simge yok.'},
+  'Popup Énergie': {
+    'de': 'Energie-Popup',
+    'nl': 'Energie-popup',
+    'es': 'Popup de energía',
+    'it': 'Popup Energia',
+    'tr': 'Enerji penceresi'},
+  ' : énergie produite (le compteur en kWh du tableau Énergie de Home Assistant), réseau, maison, batterie, tous facultatifs.': {
+    'de': ': erzeugte Energie (der kWh-Zähler aus dem Energie-Dashboard von Home Assistant), Netz, Haus, Batterie, alle optional.',
+    'nl': ': geproduceerde energie (de kWh-teller van het Energiedashboard van Home Assistant), net, huis, batterij, allemaal optioneel.',
+    'es': ': energía producida (el contador en kWh del panel de energía de Home Assistant), red, casa, batería, todos opcionales.',
+    'it': ': energia prodotta (il contatore in kWh della dashboard Energia di Home Assistant), rete, casa, batteria, tutti facoltativi.',
+    'tr': ': üretilen enerji (Home Assistant Enerji panosundaki kWh sayacı), şebeke, ev, pil; hepsi isteğe bağlı.'},
+  'Placez la puissance solaire dans une pièce : sa tuile ouvre le popup au toucher.': {
+    'de': 'Lege die Solarleistung in einen Raum: Ihre Kachel öffnet per Tipp das Popup.',
+    'nl': 'Zet het zonnevermogen in een kamer: de tegel ervan opent de popup bij aanraking.',
+    'es': 'Pon la potencia solar en una estancia: su tesela abre el popup al tocarla.',
+    'it': 'Metti la potenza solare in una stanza: la sua tessera apre il popup al tocco.',
+    'tr': 'Güneş gücünü bir odaya yerleştir: kutucuğa dokununca pencere açılır.'},
+  'Énergie solaire, pas à pas': {
+    'de': 'Solarenergie Schritt für Schritt',
+    'nl': 'Zonne-energie, stap voor stap',
+    'es': 'Energía solar, paso a paso',
+    'it': 'Energia solare, passo passo',
+    'tr': 'Güneş enerjisi, adım adım'},
+  'Régler les panneaux': {
+    'de': 'Panels einrichten',
+    'nl': 'De panelen instellen',
+    'es': 'Configurar los paneles',
+    'it': 'Imposta i pannelli',
+    'tr': 'Panelleri ayarla'},
+  'Sections « Énergie »': {
+    'de': 'Abschnitte „Energie“',
+    'nl': 'Secties “Energie”',
+    'es': 'Secciones Energía',
+    'it': 'Sezioni «Energia»',
+    'tr': 'Enerji bölümleri'},
+  'Tableau Énergie': {
+    'de': 'Energie-Dashboard',
+    'nl': 'Energiedashboard',
+    'es': 'Panel de energía',
+    'it': 'Dashboard Energia',
+    'tr': 'Enerji panosu'},
+  'Compteur de production': {
+    'de': 'Erzeugungszähler',
+    'nl': 'Productieteller',
+    'es': 'Contador de producción',
+    'it': 'Contatore di produzione',
+    'tr': 'Üretim sayacı'},
+  'Thème': {
+    'de': 'Design',
+    'nl': 'Thema',
+    'es': 'Tema',
+    'it': 'Tema',
+    'tr': 'Tema'},
+  'Clair ou sombre': {
+    'de': 'Hell oder dunkel',
+    'nl': 'Licht of donker',
+    'es': 'Claro u oscuro',
+    'it': 'Chiaro o scuro',
+    'tr': 'Açık veya koyu'},
+  "Sens de l'écran": {
+    'de': 'Bildschirmausrichtung',
+    'nl': 'Schermrichting',
+    'es': 'Orientación de la pantalla',
+    'it': 'Orientamento dello schermo',
+    'tr': 'Ekran yönü'},
+  "Upside down : carte montée à l'envers ; l'image et le tactile tournent aussitôt": {
+    'de': 'Upside down: Platine kopfüber montiert; Bild und Touch drehen sich sofort',
+    'nl': 'Upside down: bord ondersteboven gemonteerd; beeld en aanraking draaien meteen',
+    'es': 'Upside down: placa montada al revés; la imagen y el táctil giran al instante',
+    'it': 'Upside down: scheda montata capovolta; immagine e tocco ruotano subito',
+    'tr': 'Upside down: kart ters monte edilmiş; görüntü ve dokunma hemen döner'},
+  "Extinction auto de l'écran": {
+    'de': 'Bildschirm automatisch aus',
+    'nl': 'Scherm automatisch uit',
+    'es': 'Apagado automático de la pantalla',
+    'it': 'Spegnimento automatico dello schermo',
+    'tr': 'Ekranı otomatik kapat'},
+  'Délai sans toucher ; jamais pendant le réveil, la voix ou un jeu': {
+    'de': 'Zeit ohne Berührung; nie während der Wecker klingelt, bei Sprache oder einem Spiel',
+    'nl': 'Tijd zonder aanraking; nooit terwijl de wekker afgaat, bij spraak of een spel',
+    'es': 'Tiempo sin tocar; nunca mientras suena la alarma, con la voz o en un juego',
+    'it': 'Tempo senza tocco; mai mentre suona la sveglia, con la voce o in un gioco',
+    'tr': 'Dokunmadan geçen süre; alarm çalarken, sesli asistanda veya oyunda asla'},
+  'Extinction de nuit': {
+    'de': 'Nachtabschaltung',
+    'nl': 'Nachtuitschakeling',
+    'es': 'Apagado nocturno',
+    'it': 'Spegnimento notturno',
+    'tr': 'Gece ekran kapatma'},
+  'Pendant la plage : éteint après 1 min sans toucher, rallumé à la fin ; « Not set » : jamais': {
+    'de': 'Im Zeitfenster: aus nach 1 Min. ohne Berührung, am Ende wieder an; « Not set »: nie',
+    'nl': 'Tijdens het venster: uit na 1 min zonder aanraking, aan het einde weer aan; « Not set »: nooit',
+    'es': 'Durante la franja: apagada tras 1 min sin tocar, encendida al final; « Not set »: nunca',
+    'it': 'Durante la fascia: spento dopo 1 min senza tocco, riacceso alla fine; « Not set »: mai',
+    'tr': 'Aralık boyunca: 1 dk dokunulmazsa kapanır, sonunda yeniden açılır; « Not set »: asla'},
+  'Réglages propres à un écran': {
+    'de': 'Einstellungen eines Bildschirms',
+    'nl': 'Instellingen van één scherm',
+    'es': 'Ajustes de una pantalla',
+    'it': 'Impostazioni di uno schermo',
+    'tr': 'Bir ekranın ayarları'},
+  'Écran à régler': {
+    'de': 'Einzustellender Bildschirm',
+    'nl': 'In te stellen scherm',
+    'es': 'Pantalla a ajustar',
+    'it': 'Schermo da impostare',
+    'tr': 'Ayarlanacak ekran'},
+  'Régler cet écran': {
+    'de': 'Diesen Bildschirm einstellen',
+    'nl': 'Dit scherm instellen',
+    'es': 'Ajustar esta pantalla',
+    'it': 'Imposta questo schermo',
+    'tr': 'Bu ekranı ayarla'},
+  'Capteur de présence de cet écran': {
+    'de': 'Präsenzsensor dieses Bildschirms',
+    'nl': 'Aanwezigheidssensor van dit scherm',
+    'es': 'Sensor de presencia de esta pantalla',
+    'it': 'Sensore di presenza di questo schermo',
+    'tr': 'Bu ekranın varlık sensörü'},
+  'Extinction de nuit de cet écran': {
+    'de': 'Nachtabschaltung dieses Bildschirms',
+    'nl': 'Nachtuitschakeling van dit scherm',
+    'es': 'Apagado nocturno de esta pantalla',
+    'it': 'Spegnimento notturno di questo schermo',
+    'tr': 'Bu ekranın gece kapatması'},
+  'Lecteurs de musique de cet écran': {
+    'de': 'Musikplayer dieses Bildschirms',
+    'nl': 'Muziekspelers van dit scherm',
+    'es': 'Reproductores de música de esta pantalla',
+    'it': 'Lettori musicali di questo schermo',
+    'tr': 'Bu ekranın müzik çalarları'},
+  '« Same as home » : la liste de la maison ; le pipeline, les agendas et le téléphone restent ceux de la maison': {
+    'de': '« Same as home »: die Liste des Hauses; Pipeline, Kalender und Telefon bleiben die des Hauses',
+    'nl': '« Same as home »: de lijst van het huis; pipeline, agenda’s en telefoon blijven die van het huis',
+    'es': '« Same as home »: la lista de la casa; el pipeline, los calendarios y el teléfono siguen siendo los de la casa',
+    'it': '« Same as home »: l’elenco della casa; pipeline, calendari e telefono restano quelli della casa',
+    'tr': '« Same as home »: evin listesi; pipeline, takvimler ve telefon evinkiler olarak kalır'},
+  'Extinction sur batterie seulement': {
+    'de': 'Automatisch aus nur im Akkubetrieb',
+    'nl': 'Automatisch uit alleen op batterij',
+    'es': 'Apagado solo con batería',
+    'it': 'Spegnimento solo a batteria',
+    'tr': 'Yalnızca pilde otomatik kapat'},
+  "Rallumer l'écran d'une tape": {
+    'de': 'Bildschirm per Tipp aufwecken',
+    'nl': 'Scherm wekken met een tik',
+    'es': 'Reactivar la pantalla con un toque',
+    'it': 'Riaccendi lo schermo con un tocco',
+    'tr': 'Ekranı dokunarak uyandır'},
+  "Rallumer l'écran à Okay Nabu": {
+    'de': 'Bildschirm mit Okay Nabu aufwecken',
+    'nl': 'Scherm wekken met Okay Nabu',
+    'es': 'Reactivar la pantalla con Okay Nabu',
+    'it': 'Riaccendi lo schermo con Okay Nabu',
+    'tr': 'Okay Nabu ile ekranı uyandır'},
+  'Batterie montée': {
+    'de': 'Batterie eingebaut',
+    'nl': 'Batterij gemonteerd',
+    'es': 'Batería instalada',
+    'it': 'Batteria montata',
+    'tr': 'Pil takılı'},
+  "Allumée, l'icône de batterie apparaît dans le bandeau": {
+    'de': 'An: Das Batteriesymbol erscheint in der Statusleiste',
+    'nl': 'Aan: het batterijpictogram verschijnt in de statusbalk',
+    'es': 'Activado: el icono de batería aparece en la barra de estado',
+    'it': 'Attiva: l’icona della batteria compare nella barra di stato',
+    'tr': 'Açıkken pil simgesi durum şeridinde görünür'},
+  "Fond de l'horloge": {
+    'de': 'Uhr-Hintergrund',
+    'nl': 'Klokachtergrond',
+    'es': 'Fondo del reloj',
+    'it': "Sfondo dell’orologio",
+    'tr': 'Saat arka planı'},
+  'Appareils sur la météo': {
+    'de': 'Geräte auf der Vorhersage',
+    'nl': 'Apparaten op de verwachting',
+    'es': 'Dispositivos en la previsión',
+    'it': 'Dispositivi sulle previsioni',
+    'tr': 'Tahminde cihazlar'},
+  'Éteint, les prévisions montrent la météo seule ; le bouton HA garde les appareils': {
+    'de': 'Aus: Die Vorhersagekarten zeigen nur das Wetter; die HA-Taste zeigt weiter die Geräte',
+    'nl': 'Uit: de verwachtingskaarten tonen alleen het weer; de HA-knop toont de apparaten nog',
+    'es': 'Desactivado: las tarjetas de previsión solo muestran el tiempo; el botón HA sigue mostrando los dispositivos',
+    'it': 'Disattivo: le schede delle previsioni mostrano solo il meteo; il pulsante HA mostra ancora i dispositivi',
+    'tr': 'Kapalıyken tahmin kartları yalnızca havayı gösterir; HA düğmesi cihazları göstermeye devam eder'},
+  "Économie d'énergie": {
+    'de': 'Energiesparen',
+    'nl': 'Energiebesparing',
+    'es': 'Ahorro de energía',
+    'it': 'Risparmio energetico',
+    'tr': 'Enerji tasarrufu'},
+  'Luminosité plafonnée à 50 %, au plus bas après 30 s sans toucher ou sous 35 % de batterie ; sans animation': {
+    'de': 'Helligkeit auf 50 % begrenzt, ganz dunkel nach 30 s ohne Berührung oder unter 35 % Akku; ohne Animation',
+    'nl': 'Helderheid begrensd op 50 %, op het laagst na 30 s zonder aanraking of onder 35 % batterij; zonder animatie',
+    'es': 'Brillo limitado al 50 %, al mínimo tras 30 s sin tocar o por debajo del 35 % de batería; sin animación',
+    'it': 'Luminosità limitata al 50 %, al minimo dopo 30 s senza tocco o sotto il 35 % di batteria; senza animazioni',
+    'tr': 'Parlaklık %50 ile sınırlı; 30 sn dokunulmazsa veya pil %35 altına inerse en düşükte; animasyon yok'},
+  'Limite de charge': {
+    'de': 'Ladegrenze',
+    'nl': 'Laadlimiet',
+    'es': 'Límite de carga',
+    'it': 'Limite di carica',
+    'tr': 'Şarj sınırı'},
+  '80 % : la charge s’arrête à 80 % et reprend à 70 %, pour une tablette toujours branchée': {
+    'de': '80 %: Das Laden stoppt bei 80 % und setzt bei 70 % wieder ein, für ein dauerhaft eingestecktes Tablet',
+    'nl': '80 %: het laden stopt bij 80 % en hervat bij 70 %, voor een tablet die altijd aan de stroom hangt',
+    'es': '80 %: la carga se detiene al 80 % y se reanuda al 70 %, para una tableta siempre enchufada',
+    'it': '80 %: la carica si ferma all’80 % e riprende al 70 %, per un tablet sempre collegato',
+    'tr': '%80: şarj %80’de durur ve %70’te yeniden başlar; sürekli takılı bir tablet için'},
+  'Animations': {
+    'de': 'Animationen',
+    'nl': 'Animaties',
+    'es': 'Animaciones',
+    'it': 'Animazioni',
+    'tr': 'Animasyonlar'},
+  'Essential : seule la carte du centre tourne ; « None » : tout est instantané': {
+    'de': 'Essential: nur die mittlere Karte dreht sich; « None »: alles sofort',
+    'nl': 'Essential: alleen de middelste kaart draait; « None »: alles direct',
+    'es': 'Essential: solo gira la tarjeta central; « None »: todo es instantáneo',
+    'it': 'Essential: ruota solo la scheda centrale; « None »: tutto è istantaneo',
+    'tr': 'Essential: yalnızca ortadaki kart döner; « None »: her şey anında'},
+  'Mode de charge': {
+    'de': 'Lademodus',
+    'nl': 'Laadmodus',
+    'es': 'Modo de carga',
+    'it': 'Modalità di carica',
+    'tr': 'Şarj modu'},
+  'Fast : la charge rapide du chargeur, seulement quand il est allumé': {
+    'de': 'Fast: die Schnellladung des Ladegeräts, nur wenn es eingeschaltet ist',
+    'nl': 'Fast: het snelladen van de lader, alleen als die aan staat',
+    'es': 'Fast: la carga rápida del cargador, solo cuando está encendido',
+    'it': 'Fast: la carica rapida del caricatore, solo quando è acceso',
+    'tr': 'Fast: şarj cihazının hızlı şarjı, yalnızca açıkken'},
+  'Wi-Fi éco': {
+    'de': 'WLAN sparen',
+    'nl': 'Zuinige wifi',
+    'es': 'Wi-Fi eco',
+    'it': 'Wi-Fi eco',
+    'tr': 'Eko Wi-Fi'},
+  'Le Wi-Fi somnole entre deux balises : réponses parfois plus lentes ; jamais pendant la voix, un son ou une mise à jour': {
+    'de': 'Das WLAN döst zwischen zwei Beacons: Antworten manchmal langsamer; nie bei Sprache, Ton oder einem Update',
+    'nl': 'De wifi sluimert tussen twee beacons: antwoorden soms trager; nooit tijdens spraak, geluid of een update',
+    'es': 'El Wi-Fi dormita entre dos balizas: respuestas a veces más lentas; nunca durante la voz, un sonido o una actualización',
+    'it': 'Il Wi-Fi sonnecchia tra due beacon: risposte a volte più lente; mai durante la voce, un suono o un aggiornamento',
+    'tr': 'Wi-Fi iki işaret arasında uyur: yanıtlar bazen daha yavaş; ses, konuşma veya güncelleme sırasında asla'},
+  'Nuit (thème auto)': {
+    'de': 'Nacht (Auto-Design)',
+    'nl': 'Nacht (auto-thema)',
+    'es': 'Noche (tema auto)',
+    'it': 'Notte (tema auto)',
+    'tr': 'Gece (otomatik tema)'},
+  'En mode Auto, Home Assistant l’allume au coucher du soleil': {
+    'de': 'Im Automodus schaltet Home Assistant es bei Sonnenuntergang ein',
+    'nl': 'In de modus Auto zet Home Assistant dit aan bij zonsondergang',
+    'es': 'En modo Auto, Home Assistant lo activa al ponerse el sol',
+    'it': 'In modalità Auto, Home Assistant la attiva al tramonto',
+    'tr': 'Otomatik modda Home Assistant gün batımında açar'},
+  'Sortie audio': {
+    'de': 'Audioausgang',
+    'nl': 'Audio-uitgang',
+    'es': 'Salida de audio',
+    'it': 'Uscita audio',
+    'tr': 'Ses çıkışı'},
+  'Antenne Wi-Fi': {
+    'de': 'Wi-Fi-Antenne',
+    'nl': 'Wi-Fi-antenne',
+    'es': 'Antena Wi-Fi',
+    'it': 'Antenna Wi-Fi',
+    'tr': 'Wi-Fi anteni'},
+  'La section « Météo » du blueprint prime si elle est remplie': {
+    'de': 'Der Abschnitt „Wetter“ des Blueprints hat Vorrang, wenn er ausgefüllt ist',
+    'nl': 'De sectie “Weer” van de blueprint heeft voorrang als die is ingevuld',
+    'es': 'La sección Tiempo del blueprint prevalece si está rellena',
+    'it': 'La sezione «Meteo» del blueprint ha la precedenza se compilata',
+    'tr': 'Blueprint’in Hava durumu bölümü doluysa o önceliklidir'},
+  'Sources trouvées': {
+    'de': 'Gefundene Quellen',
+    'nl': 'Gevonden bronnen',
+    'es': 'Fuentes encontradas',
+    'it': 'Fonti trovate',
+    'tr': 'Bulunan kaynaklar'},
+  "Prévisions : n'importe quelle entité météo (Met.no vient avec Home Assistant). Pluie dans l'heure et vigilances : facultatives, la source dépend du pays.": {
+    'de': 'Vorhersage: jede Wetter-Entität (Met.no ist in Home Assistant enthalten). Regen in der nächsten Stunde und Wetterwarnungen: optional, die Quelle hängt vom Land ab.',
+    'nl': 'Voorspellingen: elke weerentiteit (Met.no wordt met Home Assistant meegeleverd). Regen komend uur en weerwaarschuwingen: optioneel, de bron hangt af van het land.',
+    'es': 'Previsiones: cualquier entidad meteorológica (Met.no viene con Home Assistant). Lluvia próxima hora y alertas meteo: opcionales, la fuente depende del país.',
+    'it': 'Previsioni: qualsiasi entità meteo (Met.no è inclusa in Home Assistant). Pioggia nell’ora e allerte meteo: facoltative, la fonte dipende dal paese.',
+    'tr': 'Tahminler: herhangi bir hava durumu varlığı (Met.no Home Assistant ile gelir). Saatlik yağmur ve hava uyarıları: isteğe bağlı, kaynak ülkeye göre değişir.'},
+  'Fournisseurs météo': {
+    'de': 'Wetteranbieter',
+    'nl': 'Weerproviders',
+    'es': 'Proveedores del tiempo',
+    'it': 'Fornitori meteo',
+    'tr': 'Hava durumu sağlayıcıları'},
+  'Maison': {
+    'de': 'Zuhause',
+    'nl': 'Huis',
+    'es': 'Casa',
+    'it': 'Casa',
+    'tr': 'Ev'},
+  "Le téléphone et la présence allument ou éteignent l'écran": {
+    'de': 'Telefon und Anwesenheit schalten den Bildschirm ein oder aus',
+    'nl': 'De telefoon en de aanwezigheid zetten het scherm aan of uit',
+    'es': 'El teléfono y la presencia encienden o apagan la pantalla',
+    'it': 'Telefono e presenza accendono o spengono lo schermo',
+    'tr': 'Telefon ve varlık ekranı açar veya kapatır'},
+  'Adresse de la TV': {
+    'de': 'TV-Adresse',
+    'nl': 'Tv-adres',
+    'es': 'Dirección de la TV',
+    'it': 'Indirizzo della TV',
+    'tr': 'TV adresi'},
+  'Lecteurs de musique (popup Musique)': {
+    'de': 'Musikplayer (Popup Musik)',
+    'nl': 'Muziekspelers (pop-up Muziek)',
+    'es': 'Reproductores de música (ventana Música)',
+    'it': 'Lettori musicali (popup Musica)',
+    'tr': 'Müzik oynatıcıları (Müzik penceresi)'},
+  'Capteurs suivis (popup Suivi)': {
+    'de': 'Verfolgte Sensoren (Popup Verlauf)',
+    'nl': 'Gevolgde sensoren (pop-up Volgen)',
+    'es': 'Sensores seguidos (ventana Seguimiento)',
+    'it': 'Sensori monitorati (popup Monitoraggio)',
+    'tr': 'Takip edilen sensörler (Takip penceresi)'},
+  "**Capteurs suivis** : ouvrez la liste, choisissez un capteur (« ○ » devient « ✓ »), puis le suivant. Six au plus ; le premier est celui montré à gauche de l'horloge. Un cours de bourse, une température, une puissance : tout capteur qui a des statistiques.": {
+    'de': '**Verfolgte Sensoren**: Liste öffnen, einen Sensor wählen (« ○ » wird zu « ✓ »), dann den nächsten. Höchstens sechs; der erste wird links von der Uhr gezeigt. Ein Börsenkurs, eine Temperatur, eine Leistung: jeder Sensor mit Statistiken.',
+    'nl': '**Gevolgde sensoren**: open de lijst, kies een sensor (« ○ » wordt « ✓ »), dan de volgende. Maximaal zes; de eerste staat links van de klok. Een beurskoers, een temperatuur, een vermogen: elke sensor met statistieken.',
+    'es': '**Sensores seguidos**: abra la lista, elija un sensor (« ○ » pasa a « ✓ ») y luego el siguiente. Seis como máximo; el primero se muestra a la izquierda del reloj. Una cotización de bolsa, una temperatura, una potencia: cualquier sensor con estadísticas.',
+    'it': '**Sensori monitorati**: aprite l’elenco, scegliete un sensore (« ○ » diventa « ✓ »), poi il successivo. Al massimo sei; il primo è mostrato a sinistra dell’orologio. Una quotazione di borsa, una temperatura, una potenza: qualsiasi sensore con statistiche.',
+    'tr': '**Takip edilen sensörler**: listeyi açın, bir sensör seçin (« ○ » işareti « ✓ » olur), sonra bir sonrakini. En fazla altı; ilki saatin solunda gösterilir. Bir borsa fiyatı, bir sıcaklık, bir güç: istatistiği olan her sensör.'},
+  'Le popup Suivi, pas à pas': {
+    'de': 'Das Verlauf-Popup Schritt für Schritt',
+    'nl': 'De pop-up Volgen stap voor stap',
+    'es': 'La ventana Seguimiento paso a paso',
+    'it': 'Il popup Monitoraggio passo per passo',
+    'tr': 'Takip penceresi adım adım'},
+  'Réfrigérateurs (popup Froid)': {
+    'de': 'Kühlschränke (Popup Kälte)',
+    'nl': 'Koelkasten (pop-up Koude)',
+    'es': 'Neveras (ventana Frío)',
+    'it': 'Frigoriferi (popup Freddo)',
+    'tr': 'Buzdolapları (Soğuk penceresi)'},
+  'Congélateurs (popup Froid)': {
+    'de': 'Gefriergeräte (Popup Kälte)',
+    'nl': 'Vriezers (pop-up Koude)',
+    'es': 'Congeladores (ventana Frío)',
+    'it': 'Congelatori (popup Freddo)',
+    'tr': 'Dondurucular (Soğuk penceresi)'},
+  'Serveur IA local': {
+    'de': 'Lokaler KI-Server',
+    'nl': 'Lokale AI-server',
+    'es': 'Servidor de IA local',
+    'it': 'Server IA locale',
+    'tr': 'Yerel yapay zekâ sunucusu'},
+  'Adresse du serveur IA': {
+    'de': 'Adresse des KI-Servers',
+    'nl': 'Adres van de AI-server',
+    'es': 'Dirección del servidor de IA',
+    'it': 'Indirizzo del server IA',
+    'tr': 'Yapay zekâ sunucusunun adresi'},
+  'Adresse MAC du serveur IA (Réveiller)': {
+    'de': 'MAC-Adresse des KI-Servers (Aufwecken)',
+    'nl': 'MAC-adres van de AI-server (Wekken)',
+    'es': 'Dirección MAC del servidor de IA (Despertar)',
+    'it': 'Indirizzo MAC del server IA (Risveglia)',
+    'tr': 'Yapay zekâ sunucusunun MAC adresi (Uyandır)'},
+  'Redémarrage du serveur IA (script ou bouton)': {
+    'de': 'Neustart des KI-Servers (Skript oder Taste)',
+    'nl': 'Herstart van de AI-server (script of knop)',
+    'es': 'Reinicio del servidor de IA (script o botón)',
+    'it': 'Riavvio del server IA (script o pulsante)',
+    'tr': 'Yapay zekâ sunucusunun yeniden başlatılması (betik veya düğme)'},
+  'Popup Serveur IA : un capteur par mesure': {
+    'de': 'Popup KI-Server: ein Sensor pro Messwert',
+    'nl': 'Pop-up AI-server: één sensor per meting',
+    'es': 'Ventana Servidor de IA: un sensor por medida',
+    'it': 'Popup Server IA: un sensore per misura',
+    'tr': 'Yapay zekâ sunucusu penceresi: her ölçüm için bir sensör'},
+  'Modèle chargé': {
+    'de': 'Geladenes Modell',
+    'nl': 'Geladen model',
+    'es': 'Modelo cargado',
+    'it': 'Modello caricato',
+    'tr': 'Yüklü model'},
+  'Tokens par seconde': {
+    'de': 'Tokens pro Sekunde',
+    'nl': 'Tokens per seconde',
+    'es': 'Tokens por segundo',
+    'it': 'Token al secondo',
+    'tr': 'Saniyede token'},
+  'Requêtes en cours': {
+    'de': 'Laufende Anfragen',
+    'nl': 'Lopende verzoeken',
+    'es': 'Solicitudes en curso',
+    'it': 'Richieste in corso',
+    'tr': 'Süren istekler'},
+  'Requêtes en file': {
+    'de': 'Wartende Anfragen',
+    'nl': 'Verzoeken in de wachtrij',
+    'es': 'Solicitudes en cola',
+    'it': 'Richieste in coda',
+    'tr': 'Kuyruktaki istekler'},
+  'VRAM utilisée': {
+    'de': 'Belegter VRAM',
+    'nl': 'Gebruikt VRAM',
+    'es': 'VRAM usada',
+    'it': 'VRAM usata',
+    'tr': 'Kullanılan VRAM'},
+  'VRAM totale': {
+    'de': 'VRAM gesamt',
+    'nl': 'Totaal VRAM',
+    'es': 'VRAM total',
+    'it': 'VRAM totale',
+    'tr': 'Toplam VRAM'},
+  'Température du GPU': {
+    'de': 'GPU-Temperatur',
+    'nl': 'GPU-temperatuur',
+    'es': 'Temperatura de la GPU',
+    'it': 'Temperatura della GPU',
+    'tr': 'GPU sıcaklığı'},
+  'RAM utilisée': {
+    'de': 'Belegter RAM',
+    'nl': 'Gebruikt RAM',
+    'es': 'RAM usada',
+    'it': 'RAM usata',
+    'tr': 'Kullanılan RAM'},
+  'Puissance de la machine': {
+    'de': 'Leistung des Rechners',
+    'nl': 'Vermogen van de machine',
+    'es': 'Potencia de la máquina',
+    'it': 'Potenza della macchina',
+    'tr': 'Makinenin gücü'},
+  'Volet à course simulée': {
+    'de': 'Rollladen mit simulierter Laufzeit',
+    'nl': 'Rolluik met gesimuleerde looptijd',
+    'es': 'Persiana con recorrido simulado',
+    'it': 'Tapparella a corsa simulata',
+    'tr': 'Hareketi simüle edilen panjur'},
+  "**Téléphone** (application mobile de Home Assistant) : son retour allume l'écran, son départ l'éteint. **Capteur de présence** : une présence allume l'écran, 15 min sans présence l'éteignent, sauf pendant le réveil.": {
+    'de': '**Telefon** (mobile App von Home Assistant): Kommt es zurück, geht der Bildschirm an, geht es weg, aus. **Anwesenheitssensor**: Anwesenheit schaltet den Bildschirm ein, 15 Min. ohne Anwesenheit schalten ihn aus, außer während der Wecker klingelt.',
+    'nl': '**Telefoon** (mobiele app van Home Assistant): als hij thuiskomt gaat het scherm aan, als hij vertrekt gaat het uit. **Aanwezigheidssensor**: bij aanwezigheid gaat het scherm aan, na 15 min zonder aanwezigheid gaat het uit, behalve als de wekker gaat.',
+    'es': '**Teléfono** (aplicación móvil de Home Assistant): su regreso enciende la pantalla, su salida la apaga. **Sensor de presencia**: una presencia enciende la pantalla, 15 min sin presencia la apagan, salvo mientras suena la alarma.',
+    'it': '**Telefono** (app mobile di Home Assistant): quando torna accende lo schermo, quando esce lo spegne. **Sensore di presenza**: una presenza accende lo schermo, 15 min senza presenza lo spengono, tranne durante la sveglia.',
+    'tr': '**Telefon** (Home Assistant mobil uygulaması): eve dönünce ekranı açar, çıkınca kapatır. **Varlık sensörü**: varlık algılanınca ekranı açar, 15 dk varlık olmazsa kapatır; alarm çalarken kapatmaz.'},
+  'Agendas': {
+    'de': 'Kalender',
+    'nl': 'Agenda’s',
+    'es': 'Calendarios',
+    'it': 'Calendari',
+    'tr': 'Takvimler'},
+  'Travail : planning, jours de repos, heure du réveil': {
+    'de': 'Arbeit: Dienstplan, freie Tage, Weckzeit',
+    'nl': 'Werk: planning, vrije dagen, wektijd',
+    'es': 'Trabajo: horario, días libres, hora de la alarma',
+    'it': 'Lavoro: turni, giorni di riposo, ora della sveglia',
+    'tr': 'İş: planlama, izin günleri, alarm saati'},
+  'Travail': {
+    'de': 'Arbeit',
+    'nl': 'Werk',
+    'es': 'Trabajo',
+    'it': 'Lavoro',
+    'tr': 'İş'},
+  'Mot des événements de travail (vide = tous)': {
+    'de': 'Stichwort der Arbeitstermine (leer = alle)',
+    'nl': 'Trefwoord werkafspraken (leeg = alle)',
+    'es': 'Palabra de los eventos de trabajo (vacío = todos)',
+    'it': 'Parola degli eventi di lavoro (vuoto = tutti)',
+    'tr': 'İş etkinliği anahtar kelimesi (boş = tümü)'},
+  'Popup calendrier, rappels, briefing du matin': {
+    'de': 'Kalender-Popup, Erinnerungen, Morgenbriefing',
+    'nl': 'Agenda-popup, herinneringen, ochtendbriefing',
+    'es': 'Popup de calendario, recordatorios, resumen de la mañana',
+    'it': 'Popup calendario, promemoria, briefing del mattino',
+    'tr': 'Takvim penceresi, hatırlatmalar, sabah özeti'},
+  "Un agenda vient d'une intégration de Home Assistant (Google Agenda, CalDAV, calendrier local…). Une liste vide n'affiche rien.": {
+    'de': 'Ein Kalender stammt aus einer Integration von Home Assistant (Google Kalender, CalDAV, lokaler Kalender…). Eine leere Liste zeigt nichts an.',
+    'nl': 'Een agenda komt uit een integratie van Home Assistant (Google Agenda, CalDAV, lokale agenda…). Een lege lijst toont niets.',
+    'es': 'Un calendario viene de una integración de Home Assistant (Google Calendar, CalDAV, calendario local…). Una lista vacía no muestra nada.',
+    'it': 'Un calendario proviene da un’integrazione di Home Assistant (Google Calendar, CalDAV, calendario locale…). Un elenco vuoto non mostra nulla.',
+    'tr': 'Takvim, bir Home Assistant entegrasyonundan gelir (Google Takvim, CalDAV, yerel takvim…). Boş bir liste hiçbir şey göstermez.'},
+  'Ajouter une intégration': {
+    'de': 'Integration hinzufügen',
+    'nl': 'Integratie toevoegen',
+    'es': 'Añadir una integración',
+    'it': 'Aggiungi integrazione',
+    'tr': 'Entegrasyon ekle'},
+  'Agenda, météo, capteurs…': {
+    'de': 'Kalender, Wetter, Sensoren…',
+    'nl': 'Agenda, weer, sensoren…',
+    'es': 'Calendario, tiempo, sensores…',
+    'it': 'Calendario, meteo, sensori…',
+    'tr': 'Takvim, hava durumu, sensörler…'},
+  'Assistants vocaux de HA': {
+    'de': 'HA-Sprachassistenten',
+    'nl': 'Spraakassistenten van HA',
+    'es': 'Asistentes de voz de HA',
+    'it': 'Assistenti vocali di HA',
+    'tr': 'HA sesli asistanları'},
+  'Pipelines : reconnaissance, agent, voix': {
+    'de': 'Pipelines: Spracherkennung, Agent, Stimme',
+    'nl': 'Pipelines: spraakherkenning, agent, stem',
+    'es': 'Pipelines: reconocimiento, agente, voz',
+    'it': 'Pipeline: riconoscimento, agente, voce',
+    'tr': 'Pipeline: konuşma tanıma, ajan, ses'},
+  'Mode en cours': {
+    'de': 'Aktueller Modus',
+    'nl': 'Huidige modus',
+    'es': 'Modo actual',
+    'it': 'Modalità attuale',
+    'tr': 'Geçerli mod'},
+  'Pipeline du mode « Discu » (Not set = boutons masqués)': {
+    'de': 'Pipeline des Modus „Discu“ (Not set = Tasten ausgeblendet)',
+    'nl': 'Pipeline van de modus “Discu” (Not set = knoppen verborgen)',
+    'es': 'Pipeline del modo «Discu» (Not set = botones ocultos)',
+    'it': 'Pipeline della modalità «Discu» (Not set = pulsanti nascosti)',
+    'tr': '“Discu” modu pipeline’ı (Not set = düğmeler gizli)'},
+  "Mot d'activation": {
+    'de': 'Aktivierungswort',
+    'nl': 'Activeringswoord',
+    'es': 'Palabra de activación',
+    'it': 'Parola di attivazione',
+    'tr': 'Uyandırma sözcüğü'},
+  "2ᵉ mot d'activation": {
+    'de': '2. Aktivierungswort',
+    'nl': 'Tweede activeringswoord',
+    'es': '2.ª palabra de activación',
+    'it': '2ª parola di attivazione',
+    'tr': '2. uyandırma sözcüğü'},
+  'Pipeline du 2ᵉ mot': {
+    'de': 'Pipeline des 2. Worts',
+    'nl': 'Pipeline tweede woord',
+    'es': 'Pipeline de la 2.ª palabra',
+    'it': 'Pipeline della 2ª parola',
+    'tr': '2. sözcüğün pipeline’ı'},
+  'Fin de la parole': {
+    'de': 'Sprachende',
+    'nl': 'Einde van spraak',
+    'es': 'Fin del habla',
+    'it': 'Fine del parlato',
+    'tr': 'Konuşma sonu'},
+  "**Domo** : l'assistant préféré de Home Assistant (agent « Home Assistant » pour commander la maison). **Discu** : l'assistant choisi dans la liste ci-dessus, avec n'importe quel agent de conversation (IA en ligne, Ollama en local…). « Mode en cours » suit les boutons de l'écran : ne le changez pas à la main.": {
+    'de': '**Domo**: der bevorzugte Assistent von Home Assistant (Agent „Home Assistant“, um das Haus zu steuern). **Discu**: der in der Liste oben gewählte Assistent, mit beliebigem Konversationsagenten (Online-KI, lokales Ollama…). „Aktueller Modus“ folgt den Tasten des Bildschirms: nicht von Hand ändern.',
+    'nl': '**Domo**: de voorkeursassistent van Home Assistant (agent “Home Assistant” om het huis te bedienen). **Discu**: de assistent gekozen in de lijst hierboven, met elke gespreksagent (online AI, lokale Ollama…). “Huidige modus” volgt de knoppen van het scherm: niet met de hand wijzigen.',
+    'es': '**Domo**: el asistente preferido de Home Assistant (agente «Home Assistant» para controlar la casa). **Discu**: el asistente elegido en la lista de arriba, con cualquier agente de conversación (IA en línea, Ollama local…). «Modo actual» sigue los botones de la pantalla: no lo cambie a mano.',
+    'it': '**Domo**: l’assistente preferito di Home Assistant (agente «Home Assistant» per comandare la casa). **Discu**: l’assistente scelto nell’elenco sopra, con qualsiasi agente di conversazione (IA online, Ollama in locale…). «Modalità attuale» segue i pulsanti dello schermo: non cambiarla a mano.',
+    'tr': '**Domo**: Home Assistant’ın tercih edilen asistanı (evi yönetmek için “Home Assistant” ajanı). **Discu**: yukarıdaki listede seçilen asistan, herhangi bir konuşma ajanıyla (çevrimiçi yapay zekâ, yerel Ollama…). “Geçerli mod” ekrandaki düğmeleri izler: elle değiştirmeyin.'},
+  'Les deux modes vocaux': {
+    'de': 'Die zwei Sprachmodi',
+    'nl': 'De twee spraakmodi',
+    'es': 'Los dos modos de voz',
+    'it': 'Le due modalità vocali',
+    'tr': 'İki ses modu'},
+  'Sonnerie': {
+    'de': 'Klingelton',
+    'nl': 'Wekgeluid',
+    'es': 'Tono',
+    'it': 'Suoneria',
+    'tr': 'Zil sesi'},
+  'Mélodie': {
+    'de': 'Melodie',
+    'nl': 'Melodie',
+    'es': 'Melodía',
+    'it': 'Melodia',
+    'tr': 'Melodi'},
+  'Volume du réveil': {
+    'de': 'Wecker-Lautstärke',
+    'nl': 'Wekkervolume',
+    'es': 'Volumen de la alarma',
+    'it': 'Volume sveglia',
+    'tr': 'Alarm sesi'},
+  'Volume progressif': {
+    'de': 'Ansteigende Lautstärke',
+    'nl': 'Oplopend volume',
+    'es': 'Volumen progresivo',
+    'it': 'Volume progressivo',
+    'tr': 'Kademeli ses'},
+  'Annonce parlée': {
+    'de': 'Sprachansage',
+    'nl': 'Gesproken briefing',
+    'es': 'Anuncio de voz',
+    'it': 'Annuncio vocale',
+    'tr': 'Sesli duyuru'},
+  'Répétition': {
+    'de': 'Schlummern',
+    'nl': 'Snooze',
+    'es': 'Aplazar',
+    'it': 'Posticipo',
+    'tr': 'Erteleme'},
+  'Durée max': {
+    'de': 'Max. Dauer',
+    'nl': 'Max. duur',
+    'es': 'Duración máx.',
+    'it': 'Durata max',
+    'tr': 'Maks. süre'},
+  'URL de sonnerie (option)': {
+    'de': 'Klingelton-URL (optional)',
+    'nl': 'Wekgeluid-URL (optioneel)',
+    'es': 'URL del tono (opcional)',
+    'it': 'URL suoneria (opzionale)',
+    'tr': 'Zil sesi URL’si (isteğe bağlı)'},
+  "Mode « avant l'ouverture »": {
+    'de': 'Schicht-Modus',
+    'nl': 'Modus “voor opening”',
+    'es': 'Modo «antes del turno»',
+    'it': 'Modalità «inizio turno»',
+    'tr': 'Mesai başı modu'},
+  "Délai avant l'embauche": {
+    'de': 'Vorlauf vor Arbeitsbeginn',
+    'nl': 'Voorlooptijd voor werk',
+    'es': 'Antelación al trabajo',
+    'it': 'Anticipo prima del turno',
+    'tr': 'Mesai öncesi süre'},
+  'Jamais avant': {
+    'de': 'Nicht vor',
+    'nl': 'Niet eerder dan',
+    'es': 'Nunca antes',
+    'it': 'Mai prima',
+    'tr': 'En erken'},
+  'Jamais après': {
+    'de': 'Nicht nach',
+    'nl': 'Niet later dan',
+    'es': 'Nunca después',
+    'it': 'Mai dopo',
+    'tr': 'En geç'},
+  'Repos mini après la fermeture': {
+    'de': 'Min. Ruhe nach Schichtende',
+    'nl': 'Minimale rust na sluiting',
+    'es': 'Sueño mín. tras el cierre',
+    'it': 'Riposo minimo dopo la chiusura',
+    'tr': 'Kapanıştan sonra min. izin'},
+  'Sonner aussi les jours de repos': {
+    'de': 'Auch an freien Tagen klingeln',
+    'nl': 'Ook op vrije dagen wekken',
+    'es': 'Sonar también en días libres',
+    'it': 'Suona anche nei giorni di riposo',
+    'tr': 'İzin günlerinde de çal'},
+  'Santé Tab5': {
+    'de': 'Tab5-Zustand',
+    'nl': 'Tab5-gezondheid',
+    'es': 'Salud de Tab5',
+    'it': 'Salute Tab5',
+    'tr': 'Tab5 sağlığı'},
+  'Quand quelque chose cloche': {
+    'de': 'Wenn etwas klemmt',
+    'nl': 'Als er iets mis is',
+    'es': 'Cuando algo falla',
+    'it': 'Quando qualcosa non va',
+    'tr': 'Bir şey ters gittiğinde'},
+  'Écran figé, données anciennes': {
+    'de': 'Bild eingefroren, alte Daten',
+    'nl': 'Bevroren scherm, oude gegevens',
+    'es': 'Pantalla congelada, datos antiguos',
+    'it': 'Schermo bloccato, dati vecchi',
+    'tr': 'Donmuş ekran, eski veriler'},
+  " : « MAJ écran » renvoie tout d'un coup ; si rien ne change, regardez si une automatisation de poussée est coupée.": {
+    'de': ': „Bild aktualisieren“ sendet alles auf einmal; ändert sich nichts, prüfen Sie, ob eine Push-Automatisierung ausgeschaltet ist.',
+    'nl': ': “Scherm vernieuwen” stuurt alles in één keer; verandert er niets, kijk dan of een push-automatisering uit staat.',
+    'es': ': «Refrescar pantalla» lo reenvía todo de una vez; si nada cambia, compruebe si una automatización de envío está apagada.',
+    'it': ': «Aggiorna schermo» rinvia tutto in una volta; se non cambia nulla, controllate se un’automazione di invio è disattivata.',
+    'tr': ': “Ekranı yenile” her şeyi bir seferde yeniden gönderir; hiçbir şey değişmezse bir gönderim otomasyonunun kapalı olup olmadığına bakın.'},
+  'Cas déjà vu': {
+    'de': 'Bekannter Fall',
+    'nl': 'Bekend geval',
+    'es': 'Caso ya visto',
+    'it': 'Caso già visto',
+    'tr': 'Bilinen durum'},
+  ' : alimentation et Wi-Fi. Écran noir et tablette absente du réseau après une mise à jour : une vraie coupure (USB débranché 15 s, et appui long avec une batterie).': {
+    'de': ': Stromversorgung und Wi-Fi. Schwarzer Bildschirm und Tablet nicht im Netz nach einem Update: ein echter Stromausfall (USB 15 s abziehen, mit Akku zusätzlich lang drücken).',
+    'nl': ': voeding en Wi-Fi. Zwart scherm en tablet niet op het netwerk na een update: een echte stroomonderbreking (USB 15 s losgekoppeld, met een batterij ook lang indrukken).',
+    'es': ': alimentación y Wi-Fi. Pantalla negra y tableta fuera de la red tras una actualización: un corte real (USB desenchufado 15 s y, con batería, también una pulsación larga).',
+    'it': ': alimentazione e Wi-Fi. Schermo nero e tablet assente dalla rete dopo un aggiornamento: un vero spegnimento (USB scollegato per 15 s e, con la batteria, anche una pressione lunga).',
+    'tr': ': güç ve Wi-Fi. Güncellemeden sonra ekran siyah ve tablet ağda yoksa gerçek bir güç kesintisi yap (USB’yi 15 sn çıkar; pil takılıysa ayrıca uzun bas).'},
+  'Détail': {
+    'de': 'Details',
+    'nl': 'Details',
+    'es': 'Detalle',
+    'it': 'Dettagli',
+    'tr': 'Ayrıntı'},
+  'Redémarrages': {
+    'de': 'Neustarts',
+    'nl': 'Herstarts',
+    'es': 'Reinicios',
+    'it': 'Riavvii',
+    'tr': 'Yeniden başlatmalar'},
+  ' : « Raison du dernier démarrage » ci-dessous ; un redémarrage inattendu et le journal envoyé par la tablette arrivent en notification.': {
+    'de': ': „Grund des letzten Starts“ unten; ein unerwarteter Neustart und das vom Tablet gesendete Protokoll kommen als Benachrichtigung.',
+    'nl': ': “Reden laatste start” hieronder; een onverwachte herstart en het door de tablet verstuurde log komen binnen als melding.',
+    'es': ': «Motivo del último arranque» abajo; un reinicio inesperado y el registro enviado por la tableta llegan como notificaciones.',
+    'it': ': «Motivo dell’ultimo avvio» qui sotto; un riavvio imprevisto e il log inviato dal tablet arrivano come notifiche.',
+    'tr': ': aşağıdaki “Son başlatma nedeni”; beklenmedik bir yeniden başlatma ve tabletin gönderdiği günlük bildirim olarak gelir.'},
+  " : remplacez-les par ceux de l'archive tab5_home_assistant.zip de la même version que la tablette.": {
+    'de': ': ersetze sie durch die aus dem Archiv tab5_home_assistant.zip derselben Version wie das Tablet.',
+    'nl': ': vervang ze door die van het archief tab5_home_assistant.zip van dezelfde versie als de tablet.',
+    'es': ': sustitúyelos por los del archivo tab5_home_assistant.zip de la misma versión que la tableta.',
+    'it': ': sostituiscili con quelli dell’archivio tab5_home_assistant.zip della stessa versione del tablet.',
+    'tr': ': bunları tabletle aynı sürümdeki tab5_home_assistant.zip arşivindekilerle değiştir.'},
+  "Une zone manque à l'écran": {
+    'de': 'Eine Zone fehlt auf dem Bildschirm',
+    'nl': 'Een zone ontbreekt op het scherm',
+    'es': 'Falta una zona en la pantalla',
+    'it': 'Manca una zona sullo schermo',
+    'tr': 'Ekranda bir alan eksik'},
+  ' : « Zones masquées », vue Réglages.': {
+    'de': ': „Ausgeblendete Zonen“, Ansicht Einstellungen.',
+    'nl': ': “Verborgen zones”, weergave Instellingen.',
+    'es': ': «Zonas ocultas», vista Ajustes.',
+    'it': ': «Zone nascoste», vista Impostazioni.',
+    'tr': ': “Gizli alanlar”, Ayarlar görünümü.'},
+  'Capteurs et diagnostic': {
+    'de': 'Sensoren und Diagnose',
+    'nl': 'Sensoren en diagnose',
+    'es': 'Sensores y diagnóstico',
+    'it': 'Sensori e diagnostica',
+    'tr': 'Sensörler ve tanılama'},
+  'Journal de HA': {
+    'de': 'HA-Protokolle',
+    'nl': 'HA-logboek',
+    'es': 'Registro de HA',
+    'it': 'Log di HA',
+    'tr': 'HA günlüğü'},
+  'Erreurs et avertissements': {
+    'de': 'Fehler und Warnungen',
+    'nl': 'Fouten en waarschuwingen',
+    'es': 'Errores y advertencias',
+    'it': 'Errori e avvisi',
+    'tr': 'Hatalar ve uyarılar'},
+  'Corrections': {
+    'de': 'Reparaturen',
+    'nl': 'Reparaties',
+    'es': 'Reparaciones',
+    'it': 'Riparazioni',
+    'tr': 'Onarımlar'},
+  'Ce que HA signale': {
+    'de': 'Was HA meldet',
+    'nl': 'Wat HA meldt',
+    'es': 'Lo que avisa HA',
+    'it': 'Cosa segnala HA',
+    'tr': 'HA’nın bildirdikleri'},
+  'Dépannage': {
+    'de': 'Fehlersuche',
+    'nl': 'Probleemoplossing',
+    'es': 'Solución de problemas',
+    'it': 'Risoluzione problemi',
+    'tr': 'Sorun giderme'},
+  'Pannes déjà diagnostiquées': {
+    'de': 'Bereits diagnostizierte Störungen',
+    'nl': 'Eerder gediagnosticeerde storingen',
+    'es': 'Averías ya diagnosticadas',
+    'it': 'Guasti già diagnosticati',
+    'tr': 'Teşhis edilmiş arızalar'},
+  'Point': {
+    'de': 'Punkt',
+    'nl': 'Punt',
+    'es': 'Punto',
+    'it': 'Elemento',
+    'tr': 'Öğe'},
+  'État': {
+    'de': 'Status',
+    'nl': 'Status',
+    'es': 'Estado',
+    'it': 'Stato',
+    'tr': 'Durum'},
+  'Liaison avec HA': {
+    'de': 'Verbindung zu HA',
+    'nl': 'Verbinding met HA',
+    'es': 'Enlace con HA',
+    'it': 'Collegamento con HA',
+    'tr': 'HA bağlantısı'},
+  'connectée': {
+    'de': 'verbunden',
+    'nl': 'verbonden',
+    'es': 'conectado',
+    'it': 'connesso',
+    'tr': 'bağlı'},
+  'coupée': {
+    'de': 'unterbrochen',
+    'nl': 'verbroken',
+    'es': 'perdido',
+    'it': 'interrotto',
+    'tr': 'kopuk'},
+  'Démarrée le': {
+    'de': 'Gestartet am',
+    'nl': 'Gestart op',
+    'es': 'Iniciada el',
+    'it': 'Avviato il',
+    'tr': 'Başlatılma zamanı'},
+  'Raison du démarrage': {
+    'de': 'Startgrund',
+    'nl': 'Reden start',
+    'es': 'Motivo del arranque',
+    'it': 'Motivo dell’avvio',
+    'tr': 'Başlatma nedeni'},
+  'disponible': {
+    'de': 'verfügbar',
+    'nl': 'beschikbaar',
+    'es': 'disponible',
+    'it': 'disponibile',
+    'tr': 'mevcut'},
+  'Fichiers HA': {
+    'de': 'HA-Dateien',
+    'nl': 'HA-bestanden',
+    'es': 'Archivos HA',
+    'it': 'File HA',
+    'tr': 'HA dosyaları'},
+  'en retard': {
+    'de': 'veraltet',
+    'nl': 'verouderd',
+    'es': 'desactualizados',
+    'it': 'non aggiornati',
+    'tr': 'güncel değil'},
+  'Entités HA indisponibles': {
+    'de': 'Nicht verfügbare HA-Entitäten',
+    'nl': 'Onbeschikbare HA-entiteiten',
+    'es': 'Entidades HA no disponibles',
+    'it': 'Entità HA non disponibili',
+    'tr': 'Erişilemez HA varlıkları'},
+  'Source météo': {
+    'de': 'Wetterquelle',
+    'nl': 'Weerbron',
+    'es': 'Fuente meteorológica',
+    'it': 'Fonte meteo',
+    'tr': 'Hava durumu kaynağı'},
+  'choisie :': {
+    'de': 'gewählt:',
+    'nl': 'gekozen:',
+    'es': 'elegida:',
+    'it': 'scelta:',
+    'tr': 'seçilen:'},
+  'Signal Wi-Fi': {
+    'de': 'Wi-Fi-Signal',
+    'nl': 'Wi-Fi-signaal',
+    'es': 'Señal Wi-Fi',
+    'it': 'Segnale Wi-Fi',
+    'tr': 'Wi-Fi sinyali'},
+  'Alertes de santé': {
+    'de': 'Zustandswarnungen',
+    'nl': 'Gezondheidsmeldingen',
+    'es': 'Alertas de salud',
+    'it': 'Avvisi di salute',
+    'tr': 'Sağlık uyarıları'},
+  'toutes actives': {
+    'de': 'alle aktiv',
+    'nl': 'alle aan',
+    'es': 'todas activas',
+    'it': 'tutti attivi',
+    'tr': 'hepsi açık'},
+  'coupée(s)': {
+    'de': 'aus',
+    'nl': 'uit',
+    'es': 'apagada(s)',
+    'it': 'disattivati',
+    'tr': 'kapalı'},
+  "« Raison du dernier démarrage » dit si c'était une mise à jour, une coupure ou un plantage. « Fichiers HA » vaut « dépôt » pour des fichiers pris dans le dépôt plutôt que dans une archive de version. « Entités HA indispo » compte toute la maison, pas seulement la tablette.": {
+    'de': '„Grund des letzten Starts“ zeigt, ob es ein Update, ein Stromausfall oder ein Absturz war. „HA-Dateien“ steht auf „dépôt“, wenn die Dateien aus dem Repository statt aus einem Release-Archiv stammen. „Nicht verfügbare HA-Entitäten“ zählt das ganze Zuhause, nicht nur das Tablet.',
+    'nl': '“Reden laatste start” geeft aan of het een update, een stroomonderbreking of een crash was. “HA-bestanden” staat op “dépôt” voor bestanden uit de repository in plaats van uit een releasearchief. “Onbeschikbare HA-entiteiten” telt het hele huis, niet alleen de tablet.',
+    'es': '«Motivo del último arranque» indica si fue una actualización, un corte de corriente o un fallo. «Archivos HA» vale «dépôt» para archivos tomados del repositorio y no de un archivo de versión. «Entidades HA no disp.» cuenta toda la casa, no solo la tableta.',
+    'it': '«Motivo dell’ultimo avvio» indica se era un aggiornamento, uno spegnimento o un crash. «File HA» indica «dépôt» per i file presi dal repository anziché da un archivio di versione. «Entità HA non disp.» conta tutta la casa, non solo il tablet.',
+    'tr': '“Son başlatma nedeni”, bunun güncelleme, güç kesintisi ya da çökme olduğunu söyler. “HA dosyaları” için “dépôt” yazıyorsa dosyalar bir sürüm arşivinden değil depodan alınmıştır. “Erişilemez HA varlıkları” yalnız tableti değil tüm evi sayar.'},
+  'Démarrée': {
+    'de': 'Gestartet',
+    'nl': 'Gestart',
+    'es': 'Iniciada',
+    'it': 'Avviato',
+    'tr': 'Başlatıldı'},
+  'Raison du dernier démarrage': {
+    'de': 'Grund des letzten Starts',
+    'nl': 'Reden laatste start',
+    'es': 'Motivo del último arranque',
+    'it': 'Motivo dell’ultimo avvio',
+    'tr': 'Son başlatma nedeni'},
+  'Chronologie du démarrage (ms)': {
+    'de': 'Startablauf (ms)',
+    'nl': 'Tijdlijn van de start (ms)',
+    'es': 'Cronología del arranque (ms)',
+    'it': 'Cronologia dell’avvio (ms)',
+    'tr': 'Başlatma zaman çizelgesi (ms)'},
+  'Chronologie du démarrage, suite (ms)': {
+    'de': 'Startablauf, Fortsetzung (ms)',
+    'nl': 'Tijdlijn van de start, vervolg (ms)',
+    'es': 'Cronología del arranque, continuación (ms)',
+    'it': 'Cronologia dell’avvio, seguito (ms)',
+    'tr': 'Başlatma zaman çizelgesi, devamı (ms)'},
+  'Firmware': {
+    'de': 'Firmware',
+    'nl': 'Firmware',
+    'es': 'Firmware',
+    'it': 'Firmware',
+    'tr': 'Firmware'},
+  'En retard ?': {
+    'de': 'Veraltet?',
+    'nl': 'Verouderd?',
+    'es': '¿Desactualizados?',
+    'it': 'In ritardo?',
+    'tr': 'Güncel değil mi?'},
+  'Puce Wi-Fi (C6)': {
+    'de': 'Wi-Fi-Chip (C6)',
+    'nl': 'Wi-Fi-chip (C6)',
+    'es': 'Chip Wi-Fi (C6)',
+    'it': 'Chip Wi-Fi (C6)',
+    'tr': 'Wi-Fi çipi (C6)'},
+  'Entités HA indispo': {
+    'de': 'Nicht verfügbare HA-Entitäten',
+    'nl': 'Onbeschikbare HA-entiteiten',
+    'es': 'Entidades HA no disp.',
+    'it': 'Entità HA non disp.',
+    'tr': 'Erişilemez HA varlıkları'},
+  'Redémarrer la tablette': {
+    'de': 'Tablet neu starten',
+    'nl': 'Tablet herstarten',
+    'es': 'Reiniciar la tableta',
+    'it': 'Riavvia il tablet',
+    'tr': 'Tableti yeniden başlat'},
+  'Redémarrer la tablette Tab5 ?': {
+    'de': 'Tab5-Tablet neu starten?',
+    'nl': 'Tab5-tablet herstarten?',
+    'es': '¿Reiniciar la tableta Tab5?',
+    'it': 'Riavviare il tablet Tab5?',
+    'tr': 'Tab5 tableti yeniden başlatılsın mı?'},
+  'Performances (24 h)': {
+    'de': 'Leistung (24 Std.)',
+    'nl': 'Prestaties (24 u)',
+    'es': 'Rendimiento (24 h)',
+    'it': 'Prestazioni (24 h)',
+    'tr': 'Performans (24 sa)'},
+  "Ce qui compte, c'est la forme des courbes : plates sur 24 h. Une mémoire libre qui descend sans remonter ou une pile qui fond annoncent un redémarrage ; un temps de boucle qui grimpe, un écran qui rame.": {
+    'de': 'Entscheidend ist die Form der Kurven: flach über 24 Std. Freier Speicher, der sinkt und nie wieder steigt, oder ein schrumpfender Stack kündigen einen Neustart an; eine steigende Schleifenzeit, einen trägen Bildschirm.',
+    'nl': 'Waar het om gaat, is de vorm van de curven: vlak over 24 u. Vrij geheugen dat daalt en niet meer stijgt, of een slinkende stack, kondigt een herstart aan; een stijgende lustijd, een haperend scherm.',
+    'es': 'Lo que importa es la forma de las curvas: planas durante 24 h. Una memoria libre que baja y no vuelve a subir, o una pila que se reduce, anuncian un reinicio; un tiempo de bucle que sube, una pantalla que va lenta.',
+    'it': 'Conta la forma delle curve: piatte nelle 24 h. Una memoria libera che scende senza risalire o uno stack che si riduce annunciano un riavvio; un tempo di ciclo che sale, uno schermo che rallenta.',
+    'tr': 'Önemli olan eğrilerin şeklidir: 24 saat boyunca düz olmalı. Düşüp bir daha yükselmeyen boş bellek ya da erimekte olan yığın yeniden başlatmayı haber verir; yükselen döngü süresi ise ekranın kasmasını.'},
+  'Mesures de référence': {
+    'de': 'Referenzmessungen',
+    'nl': 'Referentiemetingen',
+    'es': 'Mediciones de referencia',
+    'it': 'Misure di riferimento',
+    'tr': 'Referans ölçümler'},
+  'Temps de boucle': {
+    'de': 'Schleifenzeit',
+    'nl': 'Lustijd',
+    'es': 'Tiempo de bucle',
+    'it': 'Tempo di ciclo',
+    'tr': 'Döngü süresi'},
+  'Mémoire libre': {
+    'de': 'Freier Speicher',
+    'nl': 'Vrij geheugen',
+    'es': 'Memoria libre',
+    'it': 'Memoria libera',
+    'tr': 'Boş bellek'},
+  'Température du processeur': {
+    'de': 'Prozessortemperatur',
+    'nl': 'Processortemperatuur',
+    'es': 'Temperatura del procesador',
+    'it': 'Temperatura del processore',
+    'tr': 'İşlemci sıcaklığı'},
+  'Pile libre (minimum)': {
+    'de': 'Freier Stack (Minimum)',
+    'nl': 'Vrije stack (minimum)',
+    'es': 'Pila libre (mínimo)',
+    'it': 'Stack libero (minimo)',
+    'tr': 'Boş yığın (minimum)'},
+  'Réseau': {
+    'de': 'Netzwerk',
+    'nl': 'Netwerk',
+    'es': 'Red',
+    'it': 'Rete',
+    'tr': 'Ağ'},
+  "Le signal est en dBm : plus il est proche de 0, mieux c'est (−40 excellent, −80 faible).": {
+    'de': 'Das Signal wird in dBm angegeben: je näher an 0, desto besser (−40 ausgezeichnet, −80 schwach).',
+    'nl': 'Het signaal is in dBm: hoe dichter bij 0, hoe beter (−40 uitstekend, −80 zwak).',
+    'es': 'La señal está en dBm: cuanto más cerca de 0, mejor (−40 excelente, −80 débil).',
+    'it': 'Il segnale è in dBm: più è vicino a 0, meglio è (−40 ottimo, −80 debole).',
+    'tr': 'Sinyal dBm cinsindendir: 0’a ne kadar yakınsa o kadar iyi (−40 mükemmel, −80 zayıf).'},
+  ' Une antenne externe se choisit dans « Antenne Wi-Fi », vue Réglages.': {
+    'de': ' Eine externe Antenne wird unter „Wi-Fi-Antenne“ gewählt, Ansicht Einstellungen.',
+    'nl': ' Een externe antenne kies je bij “Wi-Fi-antenne”, weergave Instellingen.',
+    'es': ' Una antena externa se elige en «Antena Wi-Fi», vista Ajustes.',
+    'it': ' Un’antenna esterna si sceglie in «Antenna Wi-Fi», vista Impostazioni.',
+    'tr': ' Harici anten, Ayarlar görünümündeki “Wi-Fi anteni” ile seçilir.'},
+  'Adresse IP': {
+    'de': 'IP-Adresse',
+    'nl': 'IP-adres',
+    'es': 'Dirección IP',
+    'it': 'Indirizzo IP',
+    'tr': 'IP adresi'},
+  'Matériel': {
+    'de': 'Hardware',
+    'nl': 'Hardware',
+    'es': 'Hardware',
+    'it': 'Hardware',
+    'tr': 'Donanım'},
+  'Jack casque': {
+    'de': 'Kopfhörerbuchse',
+    'nl': 'Koptelefoonaansluiting',
+    'es': 'Conector de auriculares',
+    'it': 'Jack cuffie',
+    'tr': 'Kulaklık jakı'},
+  'Batterie': {
+    'de': 'Batterie',
+    'nl': 'Batterij',
+    'es': 'Batería',
+    'it': 'Batteria',
+    'tr': 'Pil'},
+  'Batterie détectée': {
+    'de': 'Batterie erkannt',
+    'nl': 'Batterij gedetecteerd',
+    'es': 'Batería detectada',
+    'it': 'Batteria rilevata',
+    'tr': 'Pil algılandı'},
+  'Sécurité chargeur': {
+    'de': 'Ladegerät-Schutz',
+    'nl': 'Laderbeveiliging',
+    'es': 'Seguridad del cargador',
+    'it': 'Sicurezza caricatore',
+    'tr': 'Şarj cihazı güvenliği'},
+  'Tension': {
+    'de': 'Spannung',
+    'nl': 'Spanning',
+    'es': 'Tensión',
+    'it': 'Tensione',
+    'tr': 'Gerilim'},
+  'En charge': {
+    'de': 'Lädt',
+    'nl': 'Laden',
+    'es': 'Cargando',
+    'it': 'In carica',
+    'tr': 'Şarj oluyor'},
+  'Sur batterie': {
+    'de': 'Im Akkubetrieb',
+    'nl': 'Op batterij',
+    'es': 'Con batería',
+    'it': 'A batteria',
+    'tr': 'Pilde'},
+  'Courant': {
+    'de': 'Strom',
+    'nl': 'Stroom',
+    'es': 'Corriente',
+    'it': 'Corrente',
+    'tr': 'Akım'},
+  'Consommation': {
+    'de': 'Verbrauch',
+    'nl': 'Verbruik',
+    'es': 'Consumo',
+    'it': 'Consumo',
+    'tr': 'Tüketim'},
+  'Mesure de consommation': {
+    'de': 'Verbrauchsmessung',
+    'nl': 'Verbruiksmeting',
+    'es': 'Medición del consumo',
+    'it': 'Misura dei consumi',
+    'tr': 'Tüketim ölçümü'},
+  'Test de consommation': {
+    'de': 'Verbrauchstest',
+    'nl': 'Verbruikstest',
+    'es': 'Prueba de consumo',
+    'it': 'Test dei consumi',
+    'tr': 'Tüketim testi'},
+  'Sur batterie, environ 1 h ; résultat en notification': {
+    'de': 'Im Akkubetrieb, etwa 1 h; Ergebnis als Benachrichtigung',
+    'nl': 'Op de accu, ongeveer 1 u; resultaat als melding',
+    'es': 'Con batería, aprox. 1 h; resultado en una notificación',
+    'it': 'A batteria, circa 1 h; risultato in una notifica',
+    'tr': 'Pilde, yaklaşık 1 sa; sonuç bildirimde'},
+  'Débrancher l’USB et ne plus toucher la tablette pendant environ 1 h. Lancer le test ?': {
+    'de': 'USB-Kabel abziehen und das Tablet etwa 1 h nicht berühren. Test starten?',
+    'nl': 'Haal de USB-kabel los en raak de tablet ongeveer 1 u niet aan. Test starten?',
+    'es': 'Desconecta el cable USB y no toques la tableta durante 1 h aprox. ¿Iniciar la prueba?',
+    'it': 'Scollega il cavo USB e non toccare il tablet per circa 1 h. Avviare il test?',
+    'tr': 'USB kablosunu çıkarın ve tablete yaklaşık 1 sa dokunmayın. Test başlasın mı?'},
+  'Poussées HA → tablette': {
+    'de': 'HA → Tablet-Pushes',
+    'nl': 'Pushes HA → tablet',
+    'es': 'Envíos HA → tableta',
+    'it': 'Invii HA → tablet',
+    'tr': 'HA → tablet gönderimleri'},
+  "La tablette ne demande rien : Home Assistant lui envoie tout. Une automatisation coupée ici laisse son morceau d'écran figé, sans message d'erreur. « MAJ écran » renvoie tout d'un coup.": {
+    'de': 'Das Tablet fragt nichts an: Home Assistant sendet ihm alles. Eine hier ausgeschaltete Automatisierung lässt ihren Teil des Bildschirms eingefroren, ohne Fehlermeldung. „Bild aktualisieren“ sendet alles auf einmal.',
+    'nl': 'De tablet vraagt nergens om: Home Assistant stuurt hem alles. Een hier uitgezette automatisering laat haar deel van het scherm bevroren, zonder foutmelding. “Scherm vernieuwen” stuurt alles in één keer.',
+    'es': 'La tableta no pide nada: Home Assistant se lo envía todo. Una automatización apagada aquí deja su parte de la pantalla congelada, sin mensaje de error. «Refrescar pantalla» lo reenvía todo de una vez.',
+    'it': 'Il tablet non chiede nulla: Home Assistant gli invia tutto. Un’automazione disattivata qui lascia la sua parte di schermo bloccata, senza messaggi di errore. «Aggiorna schermo» rinvia tutto in una volta.',
+    'tr': 'Tablet hiçbir şey istemez: Home Assistant ona her şeyi gönderir. Burada kapatılan bir otomasyon, ekranın kendi bölümünü hata mesajı vermeden dondurur. “Ekranı yenile” her şeyi bir seferde yeniden gönderir.'},
+  'MAJ écran': {
+    'de': 'Bild aktualisieren',
+    'nl': 'Scherm vernieuwen',
+    'es': 'Refrescar pantalla',
+    'it': 'Aggiorna schermo',
+    'tr': 'Ekranı yenile'},
+  "Pousse tout l'écran maintenant": {
+    'de': 'Sendet jetzt den ganzen Bildschirm',
+    'nl': 'Stuurt nu het hele scherm',
+    'es': 'Envía toda la pantalla ahora',
+    'it': 'Invia subito tutto lo schermo',
+    'tr': 'Tüm ekranı şimdi gönderir'},
+  'Automatisations': {
+    'de': 'Automatisierungen',
+    'nl': 'Automatiseringen',
+    'es': 'Automatizaciones',
+    'it': 'Automazioni',
+    'tr': 'Otomasyonlar'},
+  'Poussée complète': {
+    'de': 'Vollständiger Push',
+    'nl': 'Volledige push',
+    'es': 'Envío completo',
+    'it': 'Invio completo',
+    'tr': 'Tam gönderim'},
+  'Alertes et santé (léger)': {
+    'de': 'Warnungen und Zustand (leicht)',
+    'nl': 'Meldingen en gezondheid (licht)',
+    'es': 'Alertas y salud (ligero)',
+    'it': 'Allerte e salute (leggero)',
+    'tr': 'Uyarılar ve sağlık (hafif)'},
+  'Météo actuelle': {
+    'de': 'Aktuelles Wetter',
+    'nl': 'Huidig weer',
+    'es': 'Tiempo actual',
+    'it': 'Meteo attuale',
+    'tr': 'Güncel hava durumu'},
+  'Rendez-vous (5 min)': {
+    'de': 'Termine (5 Min.)',
+    'nl': 'Afspraken (5 min)',
+    'es': 'Citas (5 min)',
+    'it': 'Appuntamenti (5 min)',
+    'tr': 'Randevular (5 dk)'},
+  'Demandes de la tablette': {
+    'de': 'Tablet-Anfragen',
+    'nl': 'Verzoeken van de tablet',
+    'es': 'Peticiones de la tableta',
+    'it': 'Richieste del tablet',
+    'tr': 'Tablet istekleri'},
+  'Écran selon le téléphone': {
+    'de': 'Bildschirm per Telefon',
+    'nl': 'Scherm volgens telefoon',
+    'es': 'Pantalla según el teléfono',
+    'it': 'Schermo in base al telefono',
+    'tr': 'Telefona göre ekran'},
+  'Micro coupé en absence': {
+    'de': 'Mikro aus bei Abwesenheit',
+    'nl': 'Microfoon uit bij afwezigheid',
+    'es': 'Micro apagado si ausente',
+    'it': 'Microfono spento se assente',
+    'tr': 'Dışarıdayken mikrofon kapalı'},
+  "Emplacements de l'écran (blueprint)": {
+    'de': 'Bildschirmplätze (Blueprint)',
+    'nl': 'Schermvakken (blueprint)',
+    'es': 'Ranuras de pantalla (blueprint)',
+    'it': 'Slot dello schermo (blueprint)',
+    'tr': 'Ekran yuvaları (blueprint)'},
+  'Chaque garde envoie une notification dans Home Assistant, la plupart aussi sur le téléphone. Pendant une mise à jour de la tablette, coupez-les pour éviter de fausses alertes, puis rallumez-les.': {
+    'de': 'Jeder Wächter sendet eine Benachrichtigung in Home Assistant, die meisten auch ans Telefon. Schalte sie bei einem Update des Tablets aus, um Fehlalarme zu vermeiden, und danach wieder ein.',
+    'nl': 'Elke bewaker stuurt een melding in Home Assistant, de meeste ook naar de telefoon. Zet ze tijdens een update van de tablet uit om valse meldingen te voorkomen en zet ze daarna weer aan.',
+    'es': 'Cada vigilante envía una notificación en Home Assistant, la mayoría también al teléfono. Durante una actualización de la tableta, apágalos para evitar falsas alertas y luego vuelve a encenderlos.',
+    'it': 'Ogni controllo invia una notifica in Home Assistant, la maggior parte anche sul telefono. Durante un aggiornamento del tablet, disattivali per evitare falsi allarmi, poi riattivali.',
+    'tr': 'Her koruma Home Assistant’ta bir bildirim gönderir, çoğu telefona da gönderir. Tablet güncellemesi sırasında yanlış alarmları önlemek için bunları kapat, sonra tekrar aç.'},
+  'À couper pendant une OTA': {
+    'de': 'Bei einem OTA ausschalten',
+    'nl': 'Uitzetten tijdens een OTA',
+    'es': 'Apagar durante una OTA',
+    'it': 'Da disattivare durante un OTA',
+    'tr': 'OTA sırasında kapat'},
+  'Tablette déconnectée 2 min': {
+    'de': 'Tablet 2 Min. getrennt',
+    'nl': 'Tablet offline 2 min',
+    'es': 'Tableta desconectada 2 min',
+    'it': 'Tablet disconnesso 2 min',
+    'tr': 'Tablet 2 dk bağlantısız'},
+  'Redémarrage inattendu': {
+    'de': 'Unerwarteter Neustart',
+    'nl': 'Onverwachte herstart',
+    'es': 'Reinicio inesperado',
+    'it': 'Riavvio imprevisto',
+    'tr': 'Beklenmedik yeniden başlatma'},
+  'Erreur dans une poussée': {
+    'de': 'Fehler in einem Push',
+    'nl': 'Fout in een push',
+    'es': 'Error en un envío',
+    'it': 'Errore in un invio',
+    'tr': 'Gönderimde hata'},
+  'Journal des démarrages': {
+    'de': 'Startprotokoll',
+    'nl': 'Startlogboek',
+    'es': 'Registro de arranques',
+    'it': 'Log degli avvii',
+    'tr': 'Başlatma günlüğü'},
+  'Batterie faible': {
+    'de': 'Batterie schwach',
+    'nl': 'Batterij bijna leeg',
+    'es': 'Batería baja',
+    'it': 'Batteria scarica',
+    'tr': 'Pil zayıf'},
+  "Alertes à lire sur l'écran": {
+    'de': 'Ungelesene Warnungen am Bildschirm',
+    'nl': 'Ongelezen meldingen op het scherm',
+    'es': 'Alertas por leer en la pantalla',
+    'it': 'Avvisi da leggere sullo schermo',
+    'tr': 'Ekranda okunacak uyarılar'},
+  'Créer les emplacements': {
+    'de': 'Bildschirmplätze erstellen',
+    'nl': 'Schermvakken aanmaken',
+    'es': 'Crear las ranuras',
+    'it': 'Crea gli slot',
+    'tr': 'Yuvaları oluştur'},
+  'pas encore créés (bouton ci-dessus)': {
+    'de': 'noch nicht erstellt (Schaltfläche oben)',
+    'nl': 'nog niet aangemaakt (knop hierboven)',
+    'es': 'aún sin crear (botón de arriba)',
+    'it': 'non ancora creati (pulsante sopra)',
+    'tr': 'henüz oluşturulmadı (yukarıdaki düğme)'},
+  'Package tab5_energie absent : le popup reste « En attente de Home Assistant ».': {
+    'de': 'Paket tab5_energie fehlt: Das Popup bleibt bei „Warte auf Home Assistant“.',
+    'nl': 'Pakket tab5_energie ontbreekt: de popup blijft op “Wachten op Home Assistant”.',
+    'es': 'Falta el paquete tab5_energie: el popup sigue en «Esperando a Home Assistant».',
+    'it': 'Pacchetto tab5_energie assente: il popup resta su «In attesa di Home Assistant».',
+    'tr': 'tab5_energie paketi yok: pencere “Home Assistant bekleniyor” durumunda kalır.'},
+  'Tablette introuvable : ajoutez-la dans Home Assistant (intégration ESPHome), puis recommencez.': {
+    'de': 'Tablet nicht gefunden: Füge es in Home Assistant hinzu (ESPHome-Integration), dann versuche es erneut.',
+    'nl': 'Tablet niet gevonden: voeg hem toe in Home Assistant (ESPHome-integratie) en probeer het opnieuw.',
+    'es': 'Tableta no encontrada: añádela en Home Assistant (integración ESPHome) y vuelve a intentarlo.',
+    'it': 'Tablet non trovato: aggiungilo in Home Assistant (integrazione ESPHome), poi riprova.',
+    'tr': 'Tablet bulunamadı: Home Assistant’a ekle (ESPHome entegrasyonu), sonra tekrar dene.'},
+  'Alertes': {
+    'de': 'Warnungen',
+    'nl': 'Meldingen',
+    'es': 'Alertas',
+    'it': 'Avvisi',
+    'tr': 'Uyarılar'},
+  "Ce qui s'affiche en alerte sur la carte centrale": {
+    'de': 'Was als Warnung auf der mittleren Karte erscheint',
+    'nl': 'Wat als melding op de middelste kaart verschijnt',
+    'es': 'Lo que aparece como alerta en la tarjeta central',
+    'it': 'Cosa compare come avviso sulla scheda centrale',
+    'tr': 'Orta kartta uyarı olarak görünenler'},
+  'Mises à jour': {
+    'de': 'Updates',
+    'nl': 'Updates',
+    'es': 'Actualizaciones',
+    'it': 'Aggiornamenti',
+    'tr': 'Güncellemeler'},
+  'Vigilance à partir de': {
+    'de': 'Wetterwarnungen ab',
+    'nl': 'Weerwaarschuwingen vanaf',
+    'es': 'Avisos meteorológicos desde',
+    'it': 'Allerte meteo da',
+    'tr': 'Hava uyarıları şu seviyeden'},
+  'Capteurs « problème »': {
+    'de': 'Problem-Sensoren',
+    'nl': 'Probleemsensoren',
+    'es': 'Sensores de problema',
+    'it': 'Sensori di problema',
+    'tr': 'Sorun sensörleri'},
+  'Entités indisponibles': {
+    'de': 'Nicht verfügbare Entitäten',
+    'nl': 'Niet-beschikbare entiteiten',
+    'es': 'Entidades no disponibles',
+    'it': 'Entità non disponibili',
+    'tr': 'Kullanılamayan varlıklar'},
+  'Étiquette « Tab5 · alerte »': {
+    'de': 'Label „Tab5 · alerte“',
+    'nl': 'Label „Tab5 · alerte”',
+    'es': 'Etiqueta «Tab5 · alerte»',
+    'it': 'Etichetta «Tab5 · alerte»',
+    'tr': '“Tab5 · alerte” etiketi'},
+  'Réfrigérateurs et congélateurs': {
+    'de': 'Kühl- und Gefriergeräte',
+    'nl': 'Koelkasten en vriezers',
+    'es': 'Neveras y congeladores',
+    'it': 'Frigoriferi e congelatori',
+    'tr': 'Buzdolapları ve dondurucular'},
+  'Piles sous': {
+    'de': 'Batterien unter',
+    'nl': 'Batterijen onder',
+    'es': 'Pilas por debajo de',
+    'it': 'Batterie sotto',
+    'tr': 'Şunun altındaki piller'},
+  "Une alerte reste sur la carte centrale jusqu'au tap. Lue, elle ne revient que si elle change (nouvelle version, autre vigilance, nouvelle entité indisponible) ou si elle s'arrête puis recommence. Pour suivre une porte, une fuite ou une serrure : créez l'étiquette « Tab5 · alerte » et posez-la sur l'entité. Les téléphones de l'application mobile ne comptent pas dans les piles.": {
+    'de': 'Eine Warnung bleibt auf der mittleren Karte, bis du sie antippst. Gelesen kommt sie nur zurück, wenn sie sich ändert (neue Version, andere Wetterwarnung, neu nicht verfügbare Entität) oder wenn sie endet und neu beginnt. Um eine Tür, ein Leck oder ein Schloss zu verfolgen: Lege das Label „Tab5 · alerte“ an und setze es auf die Entität. Handys der Mobile-App zählen nicht als Batterien.',
+    'nl': 'Een melding blijft op de middelste kaart tot je erop tikt. Gelezen komt ze alleen terug als ze verandert (nieuwe versie, andere weerwaarschuwing, nieuw niet-beschikbare entiteit) of als ze stopt en opnieuw begint. Om een deur, een lek of een slot te volgen: maak het label „Tab5 · alerte” aan en zet het op de entiteit. Telefoons van de mobiele app tellen niet als batterijen.',
+    'es': 'Una alerta se queda en la tarjeta central hasta que la tocas. Una vez leída, solo vuelve si cambia (nueva versión, otro aviso, nueva entidad no disponible) o si termina y empieza de nuevo. Para seguir una puerta, una fuga o una cerradura: crea la etiqueta «Tab5 · alerte» y ponla en la entidad. Los teléfonos de la aplicación móvil no cuentan como pilas.',
+    'it': 'Un avviso resta sulla scheda centrale finché non lo tocchi. Letto, torna solo se cambia (nuova versione, altra allerta, nuova entità non disponibile) o se finisce e ricomincia. Per seguire una porta, una perdita o una serratura: crea l’etichetta «Tab5 · alerte» e mettila sull’entità. I telefoni dell’app mobile non contano come batterie.',
+    'tr': 'Bir uyarı, dokunana kadar orta kartta kalır. Okunduktan sonra yalnızca değişirse (yeni sürüm, başka hava uyarısı, yeni kullanılamayan varlık) ya da bitip yeniden başlarsa geri gelir. Bir kapıyı, sızıntıyı veya kilidi izlemek için: “Tab5 · alerte” etiketini oluştur ve varlığa ekle. Mobil uygulamanın telefonları pil sayılmaz.'},
+  'Historique des alertes': {
+    'de': 'Warnungsverlauf',
+    'nl': 'Meldingengeschiedenis',
+    'es': 'Historial de alertas',
+    'it': 'Cronologia degli avvisi',
+    'tr': 'Uyarı geçmişi'},
+  'Alerte': {
+    'de': 'Warnung',
+    'nl': 'Melding',
+    'es': 'Alerta',
+    'it': 'Avviso',
+    'tr': 'Uyarı'},
+  'Apparue': {
+    'de': 'Erschienen',
+    'nl': 'Verschenen',
+    'es': 'Aparecida',
+    'it': 'Comparso',
+    'tr': 'Çıktı'},
+  'Lue': {
+    'de': 'Gelesen',
+    'nl': 'Gelezen',
+    'es': 'Leída',
+    'it': 'Letto',
+    'tr': 'Okundu'},
+  'Terminée': {
+    'de': 'Beendet',
+    'nl': 'Beëindigd',
+    'es': 'Terminada',
+    'it': 'Terminato',
+    'tr': 'Bitti'},
+  'mise à jour': {
+    'de': 'Update',
+    'nl': 'update',
+    'es': 'actualización',
+    'it': 'aggiornamento',
+    'tr': 'güncelleme'},
+  'indisponibles': {
+    'de': 'nicht verfügbar',
+    'nl': 'niet beschikbaar',
+    'es': 'no disponibles',
+    'it': 'non disponibili',
+    'tr': 'kullanılamıyor'},
+  'Vigilance météo': {
+    'de': 'Wetterwarnung',
+    'nl': 'Weerwaarschuwing',
+    'es': 'Aviso meteorológico',
+    'it': 'Allerta meteo',
+    'tr': 'Hava uyarısı'},
+  'Aucune alerte': {
+    'de': 'Keine Warnungen',
+    'nl': 'Geen meldingen',
+    'es': 'Sin alertas',
+    'it': 'Nessun avviso',
+    'tr': 'Uyarı yok'}
+} -%}

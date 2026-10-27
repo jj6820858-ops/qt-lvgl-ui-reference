@@ -1,0 +1,231 @@
+# Voice Assistant Pipeline
+
+## English · [Français](#version-française)
+
+---
+
+## Overview
+
+The Tab5 functions as a local voice satellite for Home Assistant. It runs wake-word detection entirely on-device, streams audio only on demand, and gives real-time visual feedback through an icon on the UI.
+
+The pipeline involves these stages in sequence: local wake-word model → I2S audio capture → Home Assistant Voice pipeline (Wyoming STT → conversation agent → Wyoming TTS) → ES8388 DAC playback.
+
+The conversation agent is the one of the Home Assistant voice assistant in use: two modes of the screen, Domo and Discu, pick which assistant answers ([Assistant mode selection](#assistant-mode-selection)). Any conversation agent of Home Assistant will do.
+
+---
+
+## Wake-word detection
+
+The device runs `micro_wake_word` — ESPHome's TensorFlow Lite Micro integration. The model (`okay_nabu`) runs continuously in the background, processing audio frames from the I2S microphone. This runs on-device, in the ESP32-P4's local memory. No audio is transmitted over the network during idle listening.
+
+When the model detects the wake phrase with sufficient confidence, it fires an internal event that ESPHome forwards to the Home Assistant Voice pipeline.
+
+**Resource cost:** the micro_wake_word model runs at roughly 5–8% CPU on the ESP32-P4 at 360 MHz, continuously. This is acceptable, but it means the remaining ~92% must cover LVGL rendering, I2S handling, and Wi-Fi. On this hardware, that's comfortable. On an ESP32-S3, headroom would be tighter.
+
+Wake-word detection can be toggled via a UI button (`tab5_wake_word_active` switch entity). When off, the device acts as a manual push-to-talk panel only.
+
+### Second wake word: "Stop" (roller shutter)
+
+A second microWakeWord model (`Stop`) is declared alongside `okay_nabu` in `tab5-assist.yaml`, but it is only armed (`micro_wake_word.enable_model`) while the roller shutter is moving (`volet_en_mouvement` global, pushed by HA) and disarmed as soon as the movement ends. Saying "Stop" while the shutter moves triggers the stop script directly on the device — no wake phrase, no pipeline round-trip, no network latency. Two gotchas already burned into this setup: ESPHome only auto-enables the *first* declared model (hence the explicit enable/disable), and the detected `wake_word` string is `"Stop"` with a capital S.
+
+### Interrupting a running reply
+
+Tapping the mic icon while TTS is playing stops the pipeline (`voice_assistant.stop`, which Home Assistant follows) and the speaker, aborts the current session and immediately restarts listening (`tab5_vocal_interrupt_and_listen`, `tab5-scripts.yaml`). This is the firmware-side answer to barge-in: while the Assist pipeline is in its responding phase the microphone belongs to the pipeline and the wake word is inactive, so a voice "stop" cannot work there — the tap can.
+
+---
+
+## Audio capture
+
+| Parameter | Value |
+|-----------|-------|
+| Sample rate | 16 kHz |
+| Bit depth | 16-bit |
+| Channels | Mono |
+| Interface | I2S |
+| GPIO DIN | GPIO 28 |
+| GPIO BCLK | GPIO 27 |
+| GPIO LRCLK | GPIO 29 |
+
+16 kHz / 16-bit mono is the standard format for speech processing pipelines. Home Assistant's Whisper-based STT expects this format.
+
+**Gain staging — take gain in the analog stage, not the digital one.** All the input gain is set on the ES7210 preamp (`mic_gain: 30dB`, adjustable 0–37.5 dB), *before* the converter, and both `gain_factor` values (wake word and voice assistant) are left at **1**. ESPHome's `gain_factor` is an integer multiply followed by a hard clamp (`microphone_source.cpp`): it amplifies the converter's noise floor exactly as much as the voice — so it buys no signal-to-noise — and it clips peaks into square waves, which is what Whisper transcribes worst. Moving 6 dB from digital to analog on 2026-08-05 kept the same output level and the same clipping threshold, but put the amplification where it actually adds signal. `noise_suppression_level` is set to `0` for the same reason: it is applied by HA (`MicroVadSpeexEnhancer` in `assist_pipeline/pipeline.py`), but a denoiser distorts speech and Whisper is trained on natural audio. Raise it to 1–2 only if recognition degrades in a noisy room.
+
+Once the wake-word fires, audio is streamed in real time over the existing Wi-Fi connection to the HA Voice pipeline. The pipeline handles STT (Whisper), intent processing (Conversation agent), and TTS (Piper or cloud). The result comes back as an audio stream routed to the `media_player` entity on the Tab5.
+
+---
+
+## Audio playback — ES8388
+
+TTS responses play through the ES8388 DAC → amplifier → built-in speaker. The media player entity on the Tab5 is a standard ESPHome I2S media player component.
+
+**Boot sequence:** the amplifier enable switch is activated *after* the backlight and the `media_player` volume have been set (and only then does the device wait for the HA API connection). Enabling the amplifier before the I2S clock is stable produces an audible pop. The `on_boot` sequence in `tab5-ha-hmi.yaml` enforces this order.
+
+**Pushes during TTS:** Home Assistant no longer paces its pushes (the 1 s pauses between blocks were removed on 2026-10-01, see `docs/architecture.md`). A full push is 8 bulk calls of a few hundred bytes; outside a reconnection it runs every 10 minutes.
+
+**Playback format — this is a Home Assistant setting, not an output setting.** The `announcement_pipeline` block of the `media_player` declares the *preferred format advertised to HA*, i.e. what HA transcodes the TTS to before sending it. It must therefore match the TTS engine, not the DAC:
+
+| Parameter | Value | Why |
+|-----------|-------|-----|
+| Format | FLAC | Lossless, ~half the bytes of raw WAV over Wi-Fi. ESPHome's default, and what the official Home Assistant Voice PE firmware uses |
+| Sample rate | 24000 Hz | The higher of the two engines now in service: "Domotique" stays on local Piper (`fr_FR-upmc-medium`, 22050 Hz), "Discussion LLM" moved to HA Cloud / AlainNeural (24000 Hz) on 2026-08-05. At 24000 the cloud is native and Piper is merely upsampled, which discards **no** content; asking for 22050 would do the reverse and cut the cloud above 11 kHz. Asking for 16 kHz — the original setting — silently threw away everything above 8 kHz, sibilants included. **Revisit whenever the TTS engines change** |
+| Channels | Mono | One speaker |
+
+The I2S speaker in primary mode accepts 16000–48000 Hz and reconfigures its clock to whatever stream arrives, so the `sample_rate: 48000` on the `speaker:` component is only a default, never a constraint on the pipeline.
+
+**Playback buffer:** `buffer_duration: 500ms` on the speaker (the ESPHome default). Do not lower it. TTS is streamed over HTTP from HA *while it is still being generated*, over Wi-Fi carried by the C6 co-processor on SDIO, and when this ring buffer runs dry the speaker task does not pause the stream — it pads the DMA buffer with silence. Every network hiccup becomes an audible micro-gap.
+
+---
+
+## Pipeline states and visual feedback
+
+The microphone icon in the UI changes color to reflect the current pipeline state:
+
+| State | Icon color | Meaning |
+|-------|-----------|---------|
+| Idle — wake word listening | Grey | Background detection running |
+| Wake word detected | Green | Actively capturing speech |
+| Processing | Orange | HA pipeline analyzing the command |
+| Speaking | Blue | TTS audio playing back |
+| Error / not understood | Red | Pipeline returned no result |
+| Wake word disabled | Dim grey | Detection switched off |
+
+ESPHome's voice assistant component fires callbacks (`on_listening`, `on_stt_end`, `on_tts_start`, `on_end`, `on_error`) declared in `tab5-assist.yaml`; each one calls `assist_set_pipeline_state()` (`tab5_assist.cpp`), which sets the icon, its `UIColor.` colour (the active palette) and the status label from a single table. There is no separate state variable — the icon color *is* the state indicator.
+
+---
+
+## Assistant mode selection
+
+Two buttons, on the home page and in the assistant popup, pick the Home Assistant voice assistant that answers:
+
+1. **Domo** (Home Assistant icon) — Home Assistant's preferred assistant. To control the home, its conversation agent is « Home Assistant » (devices, sensors, automations).
+2. **Discu** (robot icon) — the assistant picked in « Tab5 · chat pipeline », with any conversation agent: a language model online, a local Ollama, another integration. In this mode, each request opens the assistant popup.
+
+Setting them up in Home Assistant: [Tablet settings → Voice assistant: the two modes](installation/settings.md#voice-assistant-the-two-modes).
+
+**The author's Discu** goes through his own engine, [vromvrom-engine](https://github.com/Axellum/vromvrom-engine), for three reasons:
+- a fast home shortcut: short home commands are recognised and run directly, without going through an LLM;
+- an LLM with dedicated agents depending on the request (specialists);
+- replacing the chosen LLM when it is unavailable, or for a smarter one for instance, local or in the cloud.
+
+This engine is still a rough draft, which the author manages only through AI: it is not a prerequisite, nor something he can recommend. Any Home Assistant conversation agent will do.
+
+How it works: the mode is stored in the `conversation_mode` global bool (kept across restarts); both pairs of buttons show it with a coloured border. On the HA side, the tablet's pipeline select (« Assistant », `select.m5stack_tab5_home_assistant_hmi_assistant` with the default device name) holds the pipeline in use. The tablet does not set it itself: it sends an `esphome.tab5_mode_assistant` event (option `preferred` or `Discussion LLM`) on each tap, and at each start once Home Assistant is connected, and `packages/tab5_evenements.yaml` selects on the select of **that** tablet the preferred pipeline, or for Discussion the one chosen in « Tab5 · chat pipeline » (up to 3.2, a pipeline named exactly « Discussion LLM »), only if it exists ([ADR-0025](decisions/0025-events-only.md)). That is why a hand change of « Assistant » does not last. « Not set » in the list selects the preferred pipeline, and the screen slots automation then reports the « discussion » zone as absent: the buttons are hidden and the tablet goes back to Domo (`tab5-zones.yaml`). The same package stops the tablet's media player when a reply is interrupted (`esphome.tab5_voix_stop`) and speaks the announcements (`esphome.tab5_annonce`: appointments, « Volet arrêté »). No « allow Home Assistant actions » option is needed.
+
+→ Broader context: [`related_projects.md`](related_projects.md)
+
+---
+
+---
+
+## Version Française
+
+---
+
+## Vue d'ensemble
+
+Le Tab5 fonctionne comme un satellite vocal local pour Home Assistant. Il exécute la détection de wake-word entièrement sur l'appareil, stream l'audio uniquement à la demande, et donne un retour visuel en temps réel via une icône dans l'UI.
+
+Le pipeline enchaîne : modèle de wake-word local → capture audio I2S → pipeline Voice Home Assistant (Wyoming STT → agent conversation → Wyoming TTS) → lecture DAC ES8388.
+
+L'agent de conversation est celui de l'assistant vocal de Home Assistant utilisé : deux modes de l'écran, Domo et Discu, choisissent quel assistant répond ([Sélection du mode assistant](#sélection-du-mode-assistant)). N'importe quel agent de conversation de Home Assistant convient.
+
+---
+
+## Détection du wake-word
+
+L'appareil fait tourner `micro_wake_word` — l'intégration TensorFlow Lite Micro d'ESPHome. Le modèle (`okay_nabu`) tourne en continu en arrière-plan, traitant les frames audio venant du microphone I2S. Ça tourne sur l'appareil, dans la mémoire locale de l'ESP32-P4. Aucun audio n'est transmis sur le réseau pendant l'écoute passive.
+
+Quand le modèle détecte la phrase d'activation avec une confiance suffisante, il déclenche un événement interne qu'ESPHome transmet au pipeline Voice de Home Assistant.
+
+**Coût ressources :** le modèle micro_wake_word tourne à environ 5–8% CPU sur l'ESP32-P4 à 360 MHz, en continu. C'est acceptable, mais ça signifie que les ~92% restants doivent couvrir le rendu LVGL, la gestion I2S et le Wi-Fi. Sur ce matériel, c'est confortable. Sur un ESP32-S3, la marge serait plus serrée.
+
+La détection du wake-word peut être basculée via un bouton UI (switch `tab5_wake_word_active`). Quand désactivé, l'appareil fonctionne uniquement en mode push-to-talk manuel.
+
+### Second wake word : « Stop » (volet roulant)
+
+Un second modèle microWakeWord (`Stop`) est déclaré à côté de `okay_nabu` dans `tab5-assist.yaml`, mais il n'est armé (`micro_wake_word.enable_model`) que pendant que le volet est en mouvement (globale `volet_en_mouvement`, poussée par HA) et désarmé dès la fin du mouvement. Dire « Stop » pendant que le volet bouge déclenche le script d'arrêt directement sur l'appareil — pas de phrase d'activation, pas d'aller-retour pipeline, pas de latence réseau. Deux pièges déjà rencontrés sur ce setup : ESPHome n'active automatiquement que le *premier* modèle déclaré (d'où l'enable/disable explicite), et la chaîne `wake_word` détectée est `"Stop"` avec un S majuscule.
+
+### Interrompre une réponse en cours
+
+Taper l'icône micro pendant que le TTS joue arrête le pipeline (`voice_assistant.stop`, que Home Assistant suit) et le haut-parleur, interrompt la session en cours et relance immédiatement l'écoute (`tab5_vocal_interrupt_and_listen`, `tab5-scripts.yaml`). C'est la réponse côté firmware au barge-in : pendant la phase de réponse du pipeline Assist, le micro appartient au pipeline et le wake word est inactif — un « stop » vocal ne peut pas marcher là, le tap si.
+
+---
+
+## Capture audio
+
+| Paramètre | Valeur |
+|-----------|--------|
+| Taux d'échantillonnage | 16 kHz |
+| Profondeur de bits | 16-bit |
+| Canaux | Mono |
+| Interface | I2S |
+| GPIO DIN | GPIO 28 |
+| GPIO BCLK | GPIO 27 |
+| GPIO LRCLK | GPIO 29 |
+
+16 kHz / 16-bit mono est le format standard pour les pipelines de traitement vocal. Le STT basé sur Whisper de Home Assistant attend ce format.
+
+**Étage de gain — prendre le gain en analogique, pas en numérique.** Tout le gain d'entrée est réglé sur le préampli ES7210 (`mic_gain: 30dB`, réglable de 0 à 37,5 dB), *avant* le convertisseur, et les deux `gain_factor` (wake word et assistant vocal) restent à **1**. Le `gain_factor` d'ESPHome est une multiplication entière suivie d'un `clamp` dur (`microphone_source.cpp`) : il amplifie le bruit de fond du convertisseur exactement autant que la voix — donc aucun gain de rapport signal/bruit — et il écrête les crêtes en signaux carrés, ce que Whisper transcrit le plus mal. Déplacer 6 dB du numérique vers l'analogique le 05/08/2026 a conservé le même niveau de sortie et le même seuil d'écrêtage, mais a mis l'amplification là où elle apporte vraiment du signal. `noise_suppression_level` est à `0` pour la même raison : il est bien appliqué par HA (`MicroVadSpeexEnhancer` dans `assist_pipeline/pipeline.py`), mais un débruiteur déforme la parole et Whisper est entraîné sur de l'audio naturel. Le remonter à 1-2 seulement si la reconnaissance se dégrade dans une pièce bruyante.
+
+Une fois le wake-word déclenché, l'audio est streamé en temps réel via la connexion Wi-Fi existante vers le pipeline Voice HA. Le pipeline gère le STT (Whisper), le traitement d'intention (agent Conversation), et le TTS (Piper ou cloud). Le résultat revient comme flux audio routé vers l'entité `media_player` du Tab5.
+
+---
+
+## Lecture audio — ES8388
+
+Les réponses TTS sont jouées via le DAC ES8388 → amplificateur → haut-parleur intégré. L'entité media player du Tab5 est un composant media player I2S ESPHome standard.
+
+**Séquence de boot :** le switch d'activation de l'amplificateur est activé *après* le rétroéclairage et le réglage du volume du `media_player` (et c'est seulement ensuite que l'appareil attend la connexion API HA). Activer l'ampli avant que l'horloge I2S soit stable produit un pop audible. La séquence `on_boot` dans `tab5-ha-hmi.yaml` garantit cet ordre.
+
+**Poussées pendant le TTS :** Home Assistant n'espace plus ses envois (les pauses d'une seconde entre les blocs ont été retirées le 01/10/2026, voir `docs/architecture.md`). Une poussée complète, c'est 8 envois groupés de quelques centaines d'octets ; hors reconnexion, elle part toutes les 10 minutes.
+
+**Format de lecture — c'est un réglage Home Assistant, pas un réglage de sortie.** Le bloc `announcement_pipeline` du `media_player` déclare le *format préféré annoncé à HA*, c'est-à-dire ce vers quoi HA transcode le TTS avant de l'envoyer. Il doit donc coller au moteur TTS, pas au DAC :
+
+| Paramètre | Valeur | Pourquoi |
+|-----------|--------|----------|
+| Format | FLAC | Sans perte, ~deux fois moins d'octets sur le WiFi que le WAV brut. Défaut ESPHome, et ce qu'utilise le firmware officiel Home Assistant Voice PE |
+| Taux d'échantillonnage | 24000 Hz | Le plus haut des deux moteurs désormais en service : « Domotique » reste sur Piper en local (`fr_FR-upmc-medium`, 22050 Hz), « Discussion LLM » est passé sur HA Cloud / AlainNeural (24000 Hz) le 05/08/2026. À 24000 le cloud est natif et Piper est simplement suréchantillonné, ce qui ne coupe **aucun** contenu ; demander 22050 ferait l'inverse et raboterait le cloud au-dessus de 11 kHz. Demander 16 kHz — le réglage d'origine — jetait silencieusement tout ce qui est au-dessus de 8 kHz, sifflantes comprises. **À revoir à chaque changement de moteur TTS** |
+| Canaux | Mono | Un seul haut-parleur |
+
+Le haut-parleur I2S en mode primary accepte 16000 à 48000 Hz et reconfigure son horloge sur le flux qui arrive : le `sample_rate: 48000` du composant `speaker:` n'est qu'un défaut, jamais une contrainte sur le pipeline.
+
+**Tampon de lecture :** `buffer_duration: 500ms` sur le haut-parleur (le défaut ESPHome). Ne pas le baisser. Le TTS est streamé en HTTP depuis HA *pendant sa génération*, via le WiFi porté par le co-processeur C6 en SDIO, et quand ce tampon se vide la tâche du haut-parleur ne met pas le flux en pause — elle remplit le buffer DMA de silence. Chaque hoquet réseau devient un micro-trou audible.
+
+---
+
+## États du pipeline et retour visuel
+
+L'icône microphone dans l'UI change de couleur pour refléter l'état courant du pipeline :
+
+| État | Couleur icône | Signification |
+|------|--------------|---------------|
+| Veille — écoute wake word | Gris | Détection en arrière-plan |
+| Wake word détecté | Vert | Capture vocale active |
+| Traitement | Orange | Pipeline HA analyse la commande |
+| Synthèse | Bleu | Audio TTS en lecture |
+| Erreur / non compris | Rouge | Pipeline n'a retourné aucun résultat |
+| Wake word désactivé | Gris sombre | Détection coupée |
+
+Les callbacks du composant assistant vocal ESPHome (`on_listening`, `on_stt_end`, `on_tts_start`, `on_end`, `on_error`) sont déclarés dans `tab5-assist.yaml` ; chacun appelle `assist_set_pipeline_state()` (`tab5_assist.cpp`), qui règle l'icône, sa couleur et le libellé d'état depuis une seule table — anciennement, chaque callback réglait directement la couleur via `lv_obj_set_style_text_color` avec un token `UIColor::`. Il n'y a pas de variable d'état séparée — la couleur de l'icône *est* l'indicateur d'état.
+
+---
+
+## Sélection du mode assistant
+
+Deux boutons, sur l'accueil et dans le popup assistant, choisissent l'assistant vocal de Home Assistant qui répond :
+
+1. **Domo** (icône Home Assistant) — l'assistant préféré de Home Assistant. Pour commander la maison, son agent de conversation est « Home Assistant » (appareils, capteurs, automatisations).
+2. **Discu** (icône robot) — l'assistant choisi dans « Tab5 · chat pipeline », avec n'importe quel agent de conversation : un modèle de langage en ligne, un Ollama local, une autre intégration. Dans ce mode, chaque demande ouvre le popup assistant.
+
+Les régler dans Home Assistant : [Réglages de la tablette → Assistant vocal : les deux modes](installation/settings.md#assistant-vocal--les-deux-modes).
+
+**Le Discu de l'auteur** passe par son propre moteur, [vromvrom-engine](https://github.com/Axellum/vromvrom-engine), pour trois raisons :
+- un raccourci domotique rapide : les commandes courtes de la maison sont reconnues et exécutées directement, sans passer par un LLM ;
+- un LLM avec des agents dédiés selon la demande (spécialistes) ;
+- le remplacement du LLM choisi s'il n'est pas disponible, ou par exemple pour une meilleure intelligence, en local ou dans le cloud.
+
+Ce moteur reste un gros brouillon, que l'auteur gère uniquement par l'IA : ce n'est pas un prérequis, ni quelque chose qu'il peut conseiller. N'importe quel agent de conversation de Home Assistant convient.
+
+Fonctionnement : le mode est stocké dans la globale booléenne `conversation_mode` (gardée d'un démarrage à l'autre) ; les deux paires de boutons le montrent par une bordure colorée. Côté HA, le select de pipeline de la tablette (« Assistant », `select.m5stack_tab5_home_assistant_hmi_assistant` avec le nom d'appareil par défaut) porte le pipeline utilisé. La tablette ne le règle pas elle-même : elle envoie un événement `esphome.tab5_mode_assistant` (option `preferred` ou `Discussion LLM`) à chaque appui, et à chaque démarrage une fois Home Assistant connecté, et `packages/tab5_evenements.yaml` choisit dans le select de **cette** tablette le pipeline préféré, ou pour Discussion celui de « Tab5 · chat pipeline » (jusqu'à la 3.2, un pipeline nommé exactement « Discussion LLM »), seulement s'il existe ([ADR-0025](decisions/0025-events-only.md)). C'est pourquoi un changement d'« Assistant » à la main ne tient pas. « Not set » dans la liste choisit le pipeline préféré, et l'automatisation des emplacements signale alors la zone « discussion » absente : les boutons sont masqués et la tablette repasse en Domo (`tab5-zones.yaml`). Le même package arrête le lecteur de la tablette quand une réponse est interrompue (`esphome.tab5_voix_stop`) et prononce les annonces (`esphome.tab5_annonce` : rendez-vous, « Volet arrêté »). Aucune option « autoriser les actions Home Assistant » n'est nécessaire.
+
+→ Contexte plus large : [`related_projects.md`](related_projects.md)

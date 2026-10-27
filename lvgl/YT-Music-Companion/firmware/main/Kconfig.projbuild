@@ -1,0 +1,139 @@
+menu "YT Music board"
+
+config YTM_USE_NET
+    bool "Use the live network feed (bridge) instead of mock data"
+    default y
+    help
+        When set, the board connects to the Mac-side ytmdesktop bridge over
+        WebSocket (discovered via mDNS) and fills the view-model from it.
+        When unset, the firmware drives the screen from mock.c — useful for an
+        offline demo on hardware. The desktop simulator always uses mock.
+
+choice YTM_THEME
+    prompt "UI theme"
+    default YTM_THEME_DARK
+    help
+        Build-time theme for the Now Playing screen. Dark is the V2 default
+        (near-black, AMOLED-friendly, with the album-derived ambient glow).
+        Light is the same layout painted with light tokens and the glow
+        disabled. There is no runtime toggle; the V1 cream design is gone.
+
+    config YTM_THEME_DARK
+        bool "Dark (default)"
+
+    config YTM_THEME_LIGHT
+        bool "Light"
+endchoice
+
+config YTM_DISPLAY_BRIGHTNESS
+    int "Display brightness (percent)"
+    range 5 100
+    default 40
+    help
+        AMOLED panel brightness, 5-100%. The screen comes up at this level on
+        boot; lower it if the display is too bright (full brightness is harsh).
+        Applied via the BSP after panel init — AMOLED dims with a panel command,
+        there is no separate backlight to PWM.
+
+config YTM_IDLE_DIM_ENABLE
+    bool "Auto-dim the screen after idle"
+    default y
+    help
+        When set, the screen dims to YTM_IDLE_DIM_PERCENT after
+        YTM_IDLE_DIM_MS of no touch and no physical movement, but only while
+        nothing is playing. Any touch or motion (QMI8658 IMU) restores the
+        user's brightness. When unset, the screen never auto-dims and behaves
+        exactly as before.
+
+config YTM_IDLE_DIM_MS
+    int "Idle time before dimming (ms)"
+    depends on YTM_IDLE_DIM_ENABLE
+    default 30000
+    range 1000 600000
+    help
+        Milliseconds with no touch and no motion (and nothing playing) before
+        the screen dims.
+
+config YTM_IDLE_DIM_PERCENT
+    int "Dimmed brightness (percent)"
+    depends on YTM_IDLE_DIM_ENABLE
+    default 10
+    range 1 100
+    help
+        Panel brightness while dimmed. Restored to the user's level on any
+        interaction.
+
+config YTM_IDLE_POWEROFF_ENABLE
+    bool "Auto power-off after long idle"
+    depends on YTM_IDLE_DIM_ENABLE
+    default y
+    help
+        When set, the board hard-powers-off via the AXP2101 after it has been
+        idle (no touch, no motion, nothing playing) for longer than the timeout.
+        The timeout is shorter on battery (YTM_IDLE_POWEROFF_MS) than on external
+        (cable) power (YTM_IDLE_POWEROFF_CABLE_MS), but it powers off in both
+        cases. Once off, only a PWRON key press turns it back on (a cold boot).
+        Reuses the idle tracking that YTM_IDLE_DIM_ENABLE sets up.
+
+config YTM_IDLE_POWEROFF_MS
+    int "Idle time before power-off on battery (ms)"
+    depends on YTM_IDLE_POWEROFF_ENABLE
+    default 600000
+    range 60000 3600000
+    help
+        Milliseconds with no touch, no motion, nothing playing, and on battery
+        before the board powers itself off. Should be larger than YTM_IDLE_DIM_MS
+        (the screen dims first, then powers off) — this is not enforced by the
+        range, so set it higher than the dim timeout. Default 600000 = 10 minutes.
+
+config YTM_IDLE_POWEROFF_CABLE_MS
+    int "Idle time before power-off on cable (ms)"
+    depends on YTM_IDLE_POWEROFF_ENABLE
+    default 900000
+    range 60000 3600000
+    help
+        Milliseconds idle before the board powers off while on external (cable)
+        power. Typically longer than the battery timeout since there is no battery
+        to conserve. Must exceed YTM_IDLE_DIM_MS (not enforced by the range).
+        Default 900000 = 15 minutes.
+
+config YTM_CONNECT_GRACE_SEC
+    int "Seconds to show the connecting loader before the offline banner"
+    range 3 60
+    default 15
+    help
+        On boot (and after a mid-session WebSocket drop) the board shows a
+        loader while it reaches the bridge. If no state frame arrives within
+        this many seconds, it falls back to the offline banner.
+
+config YTM_WIFI_SSID
+    string "WiFi SSID"
+    default "changeme"
+    depends on YTM_USE_NET
+    help
+        SSID of the network the bridge (Mac) is on.
+
+config YTM_WIFI_PASSWORD
+    string "WiFi password"
+    default "changeme"
+    depends on YTM_USE_NET
+    help
+        WPA2 passphrase. Leave empty for an open network.
+
+config YTM_BRIDGE_HOST
+    string "Bridge host fallback (optional)"
+    default ""
+    depends on YTM_USE_NET
+    help
+        If set, skip mDNS and connect straight to this host (e.g. "192.168.1.50").
+        Leave empty to discover the bridge via _ytmboard._tcp.
+
+config YTM_BRIDGE_PORT
+    int "Bridge port fallback"
+    default 8765
+    depends on YTM_USE_NET
+    help
+        Port used with the host fallback above, and as a default if the mDNS TXT
+        record omits one.
+
+endmenu

@@ -1,0 +1,61 @@
+# ═══════════════════════════════════════════════════════
+# [AI-CONTEXT]
+# @file draughts_game.yaml
+# @role Page LVGL dédiée du jeu « Dames Tab ».
+# @architecture_constraint Page LVGL autonome (page_draughts dans tab5-lvgl.yaml,
+#     skip: true). Pas de modal_scrim/modal_header — flux de jeu plein cadre.
+#     La sortie du jeu se fait par le hub (« Quitter ») qui navigue vers
+#     page_arcade via lv_screen_load() en C++.
+# @ai_instruction 4 conteneurs vides uniquement. Contenu = draughts_game.cpp.
+#     Fonds appliqués en C++ (Draughts::Pal) — pas de nouveau token styles
+#     partagé (cohabitation avec jeux en parallèle).
+#     ORDRE : hud < field < panel.
+# ═══════════════════════════════════════════════════════
+obj:
+  id: draughts_root
+  align: TOP_LEFT
+  x: 0
+  y: 0
+  width: 1280
+  height: 720
+  scrollable: false
+  pad_all: 0
+  radius: 0
+  border_width: 0
+  widgets:
+    - obj:
+        id: draughts_hud
+        align: TOP_LEFT
+        x: 0
+        y: 0
+        width: 1280
+        height: 48
+        scrollable: false
+        pad_all: 0
+        radius: 0
+        border_width: 0
+
+    - obj:
+        id: draughts_field
+        align: TOP_LEFT
+        x: 0
+        y: 48
+        width: 1280
+        height: 672
+        scrollable: false
+        pad_all: 0
+        radius: 0
+        border_width: 0
+
+    - obj:
+        id: draughts_panel
+        align: TOP_LEFT
+        x: 0
+        y: 0
+        width: 1280
+        height: 720
+        hidden: true
+        scrollable: false
+        pad_all: 0
+        radius: 0
+        border_width: 0

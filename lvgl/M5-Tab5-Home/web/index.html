@@ -1,0 +1,70 @@
+<!doctype html>
+<!--
+  Racine du site, publiée sur GitHub Pages par .github/workflows/site.yml : elle renvoie vers
+  l'accueil de la documentation (en/ ou fr/, selon la langue du navigateur), dont la page
+  d'accueil est le README du dépôt (tools/site/construire.py, ADR-0030). Sans JavaScript,
+  les deux liens restent. L'ancienne vitrine a laissé la place au site avec menu le
+  05/10/2026 : ses textes étaient une deuxième copie du README.
+  La page d'installation est dans install/.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M5Stack Tab5 Home Assistant wall screen — ESPHome and LVGL firmware</title>
+<meta name="description" content="Open-source firmware that turns the M5Stack Tab5 (ESP32-P4) into a Home Assistant wall screen, built with ESPHome and LVGL: documentation in English and in French, web installer.">
+<link rel="canonical" href="https://axellum.github.io/M5-Tab5-ESPHome-LVGL/">
+<link rel="alternate" hreflang="en" href="https://axellum.github.io/M5-Tab5-ESPHome-LVGL/en/">
+<link rel="alternate" hreflang="fr" href="https://axellum.github.io/M5-Tab5-ESPHome-LVGL/fr/">
+<link rel="alternate" hreflang="x-default" href="https://axellum.github.io/M5-Tab5-ESPHome-LVGL/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="M5Stack Tab5 — Home Assistant wall screen (ESPHome, LVGL)">
+<meta property="og:description" content="Open-source firmware for the M5Stack Tab5: Home Assistant pushes, the tablet draws it natively. Local wake word, weather, climate, lights, plants, 8 offline games, in seven languages.">
+<meta property="og:url" content="https://axellum.github.io/M5-Tab5-ESPHome-LVGL/">
+<meta property="og:image" content="https://axellum.github.io/M5-Tab5-ESPHome-LVGL/images/m5stack-tab5-home-assistant-screen-card.jpg">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="M5Stack Tab5 showing a Home Assistant screen: clock, climate, work hours and 5-day forecast">
+<meta name="twitter:card" content="summary_large_image">
+<script>
+  // Avant tout affichage : l'accueil dans la langue du navigateur (français, sinon anglais).
+  // replace() : la racine ne reste pas dans l'historique, « Retour » ne la rejoue pas.
+  (function () {
+    var langues = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || "en"];
+    var code = "en";
+    for (var i = 0; i < langues.length; i++) {
+      var l = String(langues[i]).toLowerCase();
+      if (l.indexOf("fr") === 0) { code = "fr"; break; }
+      if (l.indexOf("en") === 0) break;
+    }
+    location.replace(code + "/" + location.hash);
+  })();
+</script>
+<style>
+  :root { --fond: #f6f7f9; --texte: #1d2330; --doux: #5b6475; --bord: #d9dee7; --accent: #0b6bcb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fond: #11151c; --texte: #e6e9ef; --doux: #9aa3b2; --bord: #2c3440; --accent: #4ea1f3; }
+  }
+  body { margin: 0; background: var(--fond); color: var(--texte);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 48px 16px; }
+  h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 12px; }
+  p { color: var(--doux); margin: 0 0 24px; }
+  ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+  a { display: block; padding: 14px 16px; border: 1px solid var(--bord); border-radius: 8px;
+    color: var(--accent); text-decoration: none; font-weight: 600; }
+  a:hover, a:focus-visible { border-color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>M5Stack Tab5 — Home Assistant wall screen with ESPHome and LVGL</h1>
+  <p>Open-source firmware for the M5Stack Tab5 (ESP32-P4). <span lang="fr">Un firmware libre pour la M5Stack Tab5.</span></p>
+  <ul>
+    <li><a href="en/" hreflang="en">English — home and documentation</a></li>
+    <li><a href="fr/" hreflang="fr" lang="fr">Français — accueil et documentation</a></li>
+    <li><a href="install/">Install from the browser · <span lang="fr">Installer depuis le navigateur</span></a></li>
+  </ul>
+</main>
+</body>
+</html>

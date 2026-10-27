@@ -11,7 +11,9 @@
     "upstream": "https://github.com/jpavlek/Dashboard",
     "commit": "4e597651213aa82b5878b74c6349f110a9223164",
     "license": "MIT",
-    "tracked_files": 23
+    "tracked_files": 23,
+    "preview": "qt/Dashboard/Resources/DashBoard.png",
+    "preview_type": "上游提供的截图或界面底图"
   },
   {
     "path": "lvgl/LVGL-Car-Dashboard",
@@ -32,20 +34,203 @@
     "upstream": "https://github.com/itarozzi/diy_filament_dryer",
     "commit": "a9f9d3ee061b6af0d7c692db0b6e3a38b808bcdd",
     "license": "MIT",
-    "tracked_files": 55
+    "tracked_files": 55,
+    "preview": "lvgl/DIY-Filament-Dryer/docs/screenshot1.png",
+    "preview_type": "上游提供的截图或界面底图"
   },
   {
     "path": "qt/QtIndustrialWidgets",
     "upstream": "https://github.com/paolosereno/QtIndustrialWidgets",
     "commit": "cc7ad610b14982cf9ed740eff9ff74cf8aed85ac",
     "license": "MIT; see included third-party notices",
-    "tracked_files": 207
+    "tracked_files": 207,
+    "preview": "qt/QtIndustrialWidgets/docs/images/tab-dashboard.png",
+    "preview_type": "上游提供的截图或界面底图"
   },
   {
     "path": "lvgl/esp32flight",
     "upstream": "https://github.com/theqkash/esp32flight",
     "commit": "da06b177bcc4002ba32b6f3e4f08a0fc5eed432a",
     "license": "MIT; see included third-party notices",
-    "tracked_files": 255
+    "tracked_files": 255,
+    "preview": "lvgl/esp32flight/docs/radar.png",
+    "preview_type": "上游提供的截图或界面底图"
+  },
+  {
+    "path": "qt/BmsDashboard",
+    "upstream": "https://github.com/jhehenri/BmsDashboard",
+    "commit": "9b5c75e20835aa8c195e049322271930651341b9",
+    "license": "MIT",
+    "tracked_files": 14,
+    "preview": "qt/BmsDashboard/BmsDashboard/images/live.jpg",
+    "preview_type": "上游界面照片"
+  },
+  {
+    "path": "qt/RPi-Dashboard",
+    "upstream": "https://github.com/ledimies/rpi-dashboard",
+    "commit": "af566139363f1af0b9b1784bf90a56ee5d75730b",
+    "license": "MIT",
+    "tracked_files": 27,
+    "preview": "qt/RPi-Dashboard/main_screen.png",
+    "preview_type": "上游设备画面照片"
+  },
+  {
+    "path": "qt/S5W-Dial-QML",
+    "upstream": "https://github.com/purinchu/s5w-dial-qml",
+    "commit": "3e5696a4a94c1d960d3bc5065b5c36ad39dad772",
+    "license": "MIT",
+    "tracked_files": 13,
+    "preview": "qt/S5W-Dial-QML/screenshot.png",
+    "preview_type": "上游组件示例截图"
+  },
+  {
+    "path": "qt/PyQt-Dashboard",
+    "upstream": "https://github.com/JC-qq897888271/pyqt-dashboard-template",
+    "commit": "ccd46241d91e11f259926eef40061014ec2f8234",
+    "license": "MIT",
+    "tracked_files": 6,
+    "preview": "qt/PyQt-Dashboard/docs/ui-preview.png",
+    "preview_type": "上游示例截图",
+    "excluded_paths": [
+      "release/pyqt-dashboard-template.exe"
+    ]
+  },
+  {
+    "path": "qt/PyQt-System-Monitor",
+    "upstream": "https://github.com/Littl3T/Minimalist-Windows-System-Monitor-Widget-PyQt6-",
+    "commit": "1ceb5b7271c640c6412dce267f09925c803ce5ab",
+    "license": "MIT",
+    "tracked_files": 5,
+    "preview": "qt/PyQt-System-Monitor/image.png",
+    "preview_type": "上游示例截图"
+  },
+  {
+    "path": "qt/Smarton",
+    "upstream": "https://github.com/divyadesh/Smarton",
+    "commit": "92b858241f2ddd319756f0724adfd26be0e58be0",
+    "license": "MIT",
+    "tracked_files": 387,
+    "preview": "qt/Smarton/design/screens/07-home-dashboard.png",
+    "preview_type": "上游 Figma 导出设计稿"
+  },
+  {
+    "path": "qt/Industrial-Equipment-Monitor",
+    "upstream": "https://github.com/Y71jj123/qt-industrial-equipment-monitor",
+    "commit": "1abd02ca0a434bcb9fb17be443a0e7c0f49cc164",
+    "license": "MIT",
+    "tracked_files": 105,
+    "preview": "qt/Industrial-Equipment-Monitor/docs/screenshots/overview.png",
+    "preview_type": "模拟数据运行截图"
+  },
+  {
+    "path": "qt/Qt-Serial-Monitor",
+    "upstream": "https://github.com/chxii/qt-serial-monitor",
+    "commit": "9abb67c15527ed6f9cba701c0896b388fc6a5714",
+    "license": "MIT",
+    "tracked_files": 22,
+    "preview": "qt/Qt-Serial-Monitor/docs/screenshot.png",
+    "preview_type": "模拟数据示例截图"
+  },
+  {
+    "path": "lvgl/Car-Dashboard-CYD",
+    "upstream": "https://github.com/muki01/Car-Dashboard-ESP32-CYD",
+    "commit": "a87aa340da64a05fbe4e42f36ebc16fdfac8b8db",
+    "license": "GPL-3.0",
+    "tracked_files": 201,
+    "preview": "lvgl/Car-Dashboard-CYD/images/screenshots/en/02_dashboard.png",
+    "preview_type": "上游界面截图"
+  },
+  {
+    "path": "lvgl/Waveshare-Home-Dashboard",
+    "upstream": "https://github.com/davweb/waveshare-home-dashboard",
+    "commit": "b78d382efb5a8981c5953fe2aef1653b6bbab50f",
+    "license": "MIT",
+    "tracked_files": 121,
+    "preview": "lvgl/Waveshare-Home-Dashboard/docs/screens.gif",
+    "preview_type": "上游界面动画"
+  },
+  {
+    "path": "lvgl/E-Ink-Dashboard",
+    "upstream": "https://github.com/MakersFunDuck/5.79-inch-E-ink-dashboard-with-LVGL-9",
+    "commit": "71b497c13111c3b8452ca2940e2728c40fd88f18",
+    "license": "MIT",
+    "tracked_files": 52,
+    "preview": "lvgl/E-Ink-Dashboard/preview.jpg",
+    "preview_type": "上游设备界面照片",
+    "modified_paths": [
+      {
+        "path": "src/main.cpp",
+        "reason": "移除上游注释中疑似 API 密钥的示例值；实际程序占位配置不变"
+      }
+    ]
+  },
+  {
+    "path": "lvgl/LVGL-MCP-Examples",
+    "upstream": "https://github.com/jaklys/Lvgl-mcp-esp32",
+    "commit": "e3686956565fe333d7b9fccd501c29e02d704b21",
+    "license": "MIT",
+    "tracked_files": 169,
+    "preview": "lvgl/LVGL-MCP-Examples/examples/ebrew-02-overview.png",
+    "preview_type": "上游模拟器渲染图",
+    "excluded_paths": [
+      "simulator/lib/lvgl"
+    ]
+  },
+  {
+    "path": "lvgl/ESP32-Sky-Gauge",
+    "upstream": "https://github.com/Krasnov777/esp32-sky-gauge",
+    "commit": "5476601eb997281ac21b133737664cb5d55d6e38",
+    "license": "MIT",
+    "tracked_files": 38,
+    "preview": "lvgl/ESP32-Sky-Gauge/docs/weather.png",
+    "preview_type": "上游屏幕截图"
+  },
+  {
+    "path": "lvgl/TokenTide",
+    "upstream": "https://github.com/eldios/tokentide",
+    "commit": "dbbb03cd8c23fe8dfa774dc082223313a772ab24",
+    "license": "MIT",
+    "tracked_files": 347,
+    "preview": "lvgl/TokenTide/assets/screenshots/cores3-main.png",
+    "preview_type": "上游界面截图"
+  },
+  {
+    "path": "lvgl/M5-Tab5-Home",
+    "upstream": "https://github.com/Axellum/M5-Tab5-ESPHome-LVGL",
+    "commit": "54f2eeb79941d041b07cfa8e000b46e7b90a98ff",
+    "license": "MIT",
+    "tracked_files": 979,
+    "preview": "lvgl/M5-Tab5-Home/docs/images/galerie/accueil-pluie-en.webp",
+    "preview_type": "上游 CI 渲染图"
+  },
+  {
+    "path": "lvgl/YT-Music-Companion",
+    "upstream": "https://github.com/etaiso/yt-music-companion",
+    "commit": "0b6a3aad58c9fd553bed86547298d0da437a3c9a",
+    "license": "MIT",
+    "tracked_files": 312,
+    "preview": "lvgl/YT-Music-Companion/docs/assets/now-playing.png",
+    "preview_type": "上游预览图"
+  },
+  {
+    "path": "lvgl/Smartwatch-ESP32",
+    "upstream": "https://github.com/muki01/Smartwatch-ESP32",
+    "commit": "6d98ad4191c4708d564b32867a99f03de0f9426f",
+    "license": "MIT",
+    "tracked_files": 242,
+    "preview": "lvgl/Smartwatch-ESP32/docs/images/faces.png",
+    "preview_type": "上游预览图"
+  },
+  {
+    "path": "lvgl/CYD-Dashboard",
+    "upstream": "https://github.com/ange007/CYD-Dashboard",
+    "commit": "e9a880abfdb8c98424a1faa5c02f42ee7dd8a7b9",
+    "license": "MIT",
+    "tracked_files": 197,
+    "preview": "lvgl/CYD-Dashboard/docs/screenshots/widgets_1.png",
+    "preview_type": "上游界面截图",
+    "excluded_paths": [
+      "boards"
+    ]
   }
 ]

@@ -1,0 +1,210 @@
+# ═══════════════════════════════════════════════════════
+# [AI-CONTEXT]
+# @file light_popup.yaml
+# @role Popup « Lumières » (carte 1250×690, 15 px des bords écran 1280×720), à pages depuis
+#       le 09/10/2026 (ADR-0046) : une page par pièce qui a des lumières, les noms des
+#       pièces en haut (pages_onglet.yaml), on passe de l'une à l'autre d'un glissement ou
+#       d'un tap sur son nom. Une seule pièce : ni noms ni glissement. Trois cartes de verre :
+#       - AMPOULES : les lumières de la pièce (5 au plus, piece_ligne.yaml) — pastille =
+#         allumer / éteindre, ligne = la choisir, appui long = sa roue (ADR-0036) — et
+#         « Tout éteindre » (la pièce affichée) ;
+#       - LUMINOSITÉ : arc 320 px + valeur % live + 4 raccourcis, pour la lumière choisie ;
+#       - COULEURS : 3 blancs nommés + 12 pastilles rondes, pour la lumière choisie.
+#       Ouvert par l'appui long d'une tuile lum (ou « Détails » de sa roue) sur sa pièce et
+#       cette lumière, ou par « Aller à l'écran → Lumières » / un geste de l'accueil sur la
+#       pièce affichée (la première qui a des lumières sinon). Mode héritage : une page, la
+#       pièce 0 et lumiere_1..3 comme en 3.1.
+# @architecture_constraint Toutes les actions de l'arc, des raccourcis et des couleurs
+#       ciblent id(current_light_slot) — PAS une entité en dur — : la clé de la lumière
+#       choisie (tRT, ou lumiere_N en mode héritage). Ne pas renommer arc_light_brightness
+#       / lbl_light_brightness_val / btn_light_sel_N / icon_light_sel_N / lum_onglet_N :
+#       posés dans g_tuiles_ui (tab5-tuiles.yaml) et repeints par tab5_tuiles_popups.cpp.
+#       Le glissement de page : la brique des popups à pages (tab5_pages.cpp) ; glisser sur
+#       l'arc règle la luminosité, il ne change pas de pièce.
+# @ai_instruction Cadre modal v4 (ADR-0009) : modal_scrim.yaml + modal_header.yaml
+#       (barre de titre 52 px + 20 px d'air, corps à y=72). `scrollable: false` partout — NE PAS retirer.
+#       Les 12 pastilles couleur via light_color_preset_btn.yaml (#T164) ; lignes, raccourcis
+#       de niveau et blancs nommés via piece_ligne.yaml, light_level_btn.yaml et
+#       light_white_btn.yaml (audit du 26/09/2026, lot 7.3).
+#       Le gros bouton « On / Off » de la lumière choisie (jusqu'au 09/10/2026) est devenu la
+#       pastille de chaque ligne : sa place sert aux cinq lignes de 84 px.
+# ═══════════════════════════════════════════════════════
+obj:
+  id: light_options_popup
+  align: CENTER
+  width: 100%
+  height: 100%
+  hidden: true
+  scrollable: false
+  styles: style_invisible
+  widgets:
+    - !include { file: modal_scrim.yaml, vars: { scrim_opa: "100", popup_id: light_options_popup } }
+
+    # Carte modale — 15 px des bords écran (1280×720)
+    - obj:
+        align: CENTER
+        width: ${modal_card_w}
+        height: ${modal_card_h}
+        styles: style_modal_card
+        scrollable: false
+        widgets:
+
+          # ═══ BARRE DE TITRE (cadre v4 : icône + titre + croix, corps à y=72) ═══
+          - !include { file: modal_header.yaml, vars: { icon: "\U000F0335", icon_style: "style_text_gold", title: "Lumières", title_id: "popup_light_title", close_btn_id: "btn_light_close", popup_id: light_options_popup } }
+
+          # Noms des pièces, sur la ligne du titre (pages_onglet.yaml) : posés par pages_onglets().
+          - !include { file: pages_onglet.yaml, vars: { id: lum_onglet_0, page: 0, choisir: popup_lumiere_page } }
+          - !include { file: pages_onglet.yaml, vars: { id: lum_onglet_1, page: 1, choisir: popup_lumiere_page } }
+          - !include { file: pages_onglet.yaml, vars: { id: lum_onglet_2, page: 2, choisir: popup_lumiere_page } }
+          - !include { file: pages_onglet.yaml, vars: { id: lum_onglet_3, page: 3, choisir: popup_lumiere_page } }
+          - !include { file: pages_onglet.yaml, vars: { id: lum_onglet_4, page: 4, choisir: popup_lumiere_page } }
+          - !include { file: pages_onglet.yaml, vars: { id: lum_onglet_5, page: 5, choisir: popup_lumiere_page } }
+          - !include { file: pages_onglet.yaml, vars: { id: lum_onglet_6, page: 6, choisir: popup_lumiere_page } }
+          - !include { file: pages_onglet.yaml, vars: { id: lum_onglet_7, page: 7, choisir: popup_lumiere_page } }
+          - !include { file: pages_onglet.yaml, vars: { id: lum_onglet_8, page: 8, choisir: popup_lumiere_page } }
+          - !include { file: pages_onglet.yaml, vars: { id: lum_onglet_9, page: 9, choisir: popup_lumiere_page } }
+
+          # ═══ CARTE AMPOULES (gauche) : les lumières de la pièce + Tout éteindre ═══
+          - obj:
+              align: TOP_LEFT
+              x: 24
+              y: ${modal_body_y}
+              width: ${ 386 * (corps_w | int) // 1202 }
+              height: ${corps_h}
+              styles: style_glass_card
+              scrollable: false
+              widgets:
+                - label: { text: "AMPOULES", align: TOP_LEFT, x: 22, y: 14, styles: style_text_accent }
+
+                # Une ligne par lumière de la pièce, 5 au plus (ADR-0023), 84 px tous les 92
+                # sur le Tab5 (jetons piece_ligne_h / piece_ligne_pas : à la carte ailleurs) :
+                # icône, nom, état, surbrillance et affichage posés par tab5_tuiles_popups.cpp.
+                - !include { file: piece_ligne.yaml, vars: { id: btn_light_sel_0, icone_id: icon_light_sel_0, choisir: popup_lumiere_choisir, appui: popup_lumiere_ligne_appui, idx: 0 } }
+                - !include { file: piece_ligne.yaml, vars: { id: btn_light_sel_1, icone_id: icon_light_sel_1, choisir: popup_lumiere_choisir, appui: popup_lumiere_ligne_appui, idx: 1 } }
+                - !include { file: piece_ligne.yaml, vars: { id: btn_light_sel_2, icone_id: icon_light_sel_2, choisir: popup_lumiere_choisir, appui: popup_lumiere_ligne_appui, idx: 2 } }
+                - !include { file: piece_ligne.yaml, vars: { id: btn_light_sel_3, icone_id: icon_light_sel_3, choisir: popup_lumiere_choisir, appui: popup_lumiere_ligne_appui, idx: 3 } }
+                - !include { file: piece_ligne.yaml, vars: { id: btn_light_sel_4, icone_id: icon_light_sel_4, choisir: popup_lumiere_choisir, appui: popup_lumiere_ligne_appui, idx: 4 } }
+
+                # Tout éteindre — les lumières de la pièce affichée d'un coup (coucher) :
+                # pR / eteindre (ADR-0023), lumieres / eteindre en mode héritage (le
+                # blueprint 3.x saute les lampes absentes).
+                - button:
+                    align: TOP_LEFT
+                    x: 22
+                    y: ${ corps_h | int - 82 }   # 516 sur le Tab5, sous la 5e ligne sur toute carte
+                    width: ${piece_ligne_l}
+                    height: 68
+                    styles: style_clim_btn
+                    on_short_click:
+                      - lambda: 'popup_lumiere_tout_eteindre();'
+                    widgets:
+                      - label: { text: "\U000F0425", align: LEFT_MID, x: 28, text_font: mdi_font_32, styles: style_text_error }
+                      - label: { text: "Tout éteindre", align: LEFT_MID, x: 80, styles: style_text_dim }
+
+          # ═══ CARTE LUMINOSITÉ (centre) : arc + % live + raccourcis ═══
+          - obj:
+              align: TOP_LEFT
+              x: ${ 24 + 402 * (corps_w | int) // 1202 }
+              y: ${modal_body_y}
+              width: ${ 398 * (corps_w | int) // 1202 }
+              height: ${corps_h}
+              styles: style_glass_card
+              scrollable: false
+              widgets:
+                - label: { text: "LUMINOSITÉ", align: TOP_LEFT, x: 22, y: 14, styles: style_text_accent }
+
+                # Arc jauge — synchronisé à l'ouverture (script) et en live (light_*_brightness)
+                - arc:
+                    id: arc_light_brightness
+                    align: TOP_MID
+                    y: 56
+                    width: ${ [320 * (corps_w | int) // 1202, 320 * (corps_h | int) // 598] | min }
+                    height: ${ [320 * (corps_w | int) // 1202, 320 * (corps_h | int) // 598] | min }
+                    min_value: 0
+                    max_value: 255
+                    value: 128
+                    styles: style_arc_arc_track
+                    arc_width: 22
+                    adjustable: true
+                    indicator:
+                      styles: style_arc_warning
+                      arc_width: 22
+                    knob:
+                      bg_opa: 100%
+                      styles: style_bg_soft
+                      pad_all: 6
+                    on_value:
+                      # Label % en direct ; l'appel HA est débouncé (un seul light.turn_on
+                      # une fois le doigt immobile — cf. tab5_debounce_light_brightness).
+                      # Même % que la carte et la roue (lum_pct, tab5_core) ; 0 : éteinte.
+                      - lambda: |-
+                          char buf[8];
+                          snprintf(buf, sizeof(buf), "%d %%", x > 0 ? lum_pct(x) : 0);
+                          lv_label_set_text(id(lbl_light_brightness_val), buf);
+                      # La lampe et la valeur du geste (tab5-scripts.yaml).
+                      - script.execute:
+                          id: tab5_debounce_light_brightness
+                          cible: !lambda 'return id(current_light_slot);'
+                          valeur: !lambda 'return static_cast<int>(x);'
+
+                # Valeur % au centre de l'arc
+                - label:
+                    id: lbl_light_brightness_val
+                    text: "-- %"
+                    align: TOP_MID
+                    y: ${ 56 + [320 * (corps_w | int) // 1202, 320 * (corps_h | int) // 598] | min // 2 - 24 }   # 192 : au milieu de l'arc
+                    styles: style_police_date
+
+                # Raccourcis de niveau (gabarit light_level_btn.yaml : arc = pct × 255 / 100, arrondi ;
+                # place et largeur : jetons lum_niveau_*, 80 px au pas de 90 depuis x 22 sur le Tab5)
+                - !include { file: light_level_btn.yaml, vars: { x: "${lum_niveau_x}", pct: "10", arc: 26 } }
+                - !include { file: light_level_btn.yaml, vars: { x: "${ (lum_niveau_x | int) + (lum_niveau_pas | int) }", pct: "35", arc: 89 } }
+                - !include { file: light_level_btn.yaml, vars: { x: "${ (lum_niveau_x | int) + 2 * (lum_niveau_pas | int) }", pct: "65", arc: 166 } }
+                - !include { file: light_level_btn.yaml, vars: { x: "${ (lum_niveau_x | int) + 3 * (lum_niveau_pas | int) }", pct: "100", arc: 255 } }
+
+          # ═══ CARTE COULEURS (droite) : blancs nommés + pastilles rondes ═══
+          - obj:
+              align: TOP_LEFT
+              x: ${ 24 + 816 * (corps_w | int) // 1202 }
+              y: ${modal_body_y}
+              width: ${ corps_w | int - 816 * (corps_w | int) // 1202 }   # jusqu'au bord du corps
+              height: ${corps_h}
+              styles: style_glass_card
+              scrollable: false
+              widgets:
+                - label: { text: "COULEURS", align: TOP_LEFT, x: 22, y: 14, styles: style_text_accent }
+
+                # Blancs nommés (température de blanc via color_name) — gabarit light_white_btn.yaml ;
+                # teintes : lampe_teinte() (tab5_tuiles_roue.cpp, la même liste que la roue, UI-8)
+                - !include { file: light_white_btn.yaml, vars: { x: 22, color_name: "warmwhite", name: "Chaud" } }
+                - !include { file: light_white_btn.yaml, vars: { x: "${ 22 + 118 * (corps_w | int) // 1202 }", color_name: "navajowhite", name: "Crème" } }
+                - !include { file: light_white_btn.yaml, vars: { x: "${ 22 + 236 * (corps_w | int) // 1202 }", color_name: "white", name: "Froid" } }
+
+                # Grille 4×3 de pastilles couleur (factorisées #T164, chaudes → froides)
+                - obj:
+                    align: TOP_LEFT
+                    x: 22
+                    y: ${ 50 + 106 * (corps_h | int) // 598 }   # 156 : 14 px sous les blancs
+                    width: ${ 342 * (corps_w | int) // 1202 }
+                    height: ${ 396 * (corps_h | int) // 598 }
+                    styles: style_transparent
+                    scrollable: false
+                    layout:
+                      type: FLEX
+                      flex_flow: ROW_WRAP
+                      flex_align_main: SPACE_EVENLY
+                      flex_align_cross: CENTER
+                      flex_align_track: SPACE_EVENLY
+                    widgets:
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "gold" } }
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "orange" } }
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "orangered" } }
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "red" } }
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "deeppink" } }
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "magenta" } }
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "blueviolet" } }
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "purple" } }
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "blue" } }
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "cyan" } }
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "springgreen" } }
+                      - !include { file: light_color_preset_btn.yaml, vars: { color_name: "green" } }

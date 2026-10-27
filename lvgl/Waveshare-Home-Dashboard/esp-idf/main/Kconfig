@@ -1,0 +1,1 @@
+# Dashboard data is received via MQTT. See components/MqttTools/Kconfig for configuration.

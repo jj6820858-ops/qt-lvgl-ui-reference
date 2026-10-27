@@ -1,0 +1,72 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file user_entities.example.yaml
+# @role Modèle public des réglages de compilation (substitutions ESPHome).
+# @ai_instruction Copier vers Tab5/user_entities.yaml puis adapter à votre HA.
+#   Ne jamais committer user_entities.yaml (gitignoré, comme secrets.yaml).
+# ============================================================================
+#
+# Setup (une fois après clone) :
+#   cp Tab5/user_entities.example.yaml Tab5/user_entities.yaml
+#
+# Les appareils de la maison (lumières, clim, volet, PC, TV, téléphone, températures,
+# plantes) ne se règlent plus ici depuis la 3.0 (lot 6a, ADR-0019) : ils se choisissent
+# dans Home Assistant, à la souris, avec le blueprint « Tab5 — emplacements »
+# (HomeAssistant_Config/blueprints/automation/tab5/). Un emplacement laissé vide est une
+# zone absente de l'écran. Les anciennes clés entity_light_… etc. d'un fichier existant
+# sont simplement ignorées.
+
+# --- Révision du Tab5 : la puce écran inscrite sur l'autocollant au dos, au-dessus du
+#     logo Espressif. st7123 (défaut si la ligne reste commentée, testée au quotidien),
+#     st7121 (depuis le 28/04/2026) ou ili9881c (Tab5 d'origine) : ces deux-là sont
+#     compilées par la CI mais jamais testées sur une tablette. Voir docs/hardware.md. ---
+# tab5_ecran: st7123
+
+# --- Carte : tab5 (défaut si la ligne reste commentée, le M5Stack Tab5) ou
+#     waveshare-7b (Waveshare ESP32-P4 7B, 1024×600 : prise en charge, l'écran de
+#     l'auteur depuis le 14/10/2026, sans les jeux par défaut). Voir
+#     docs/hardware.md et docs/decisions/0061-board-and-screen-size.md. ---
+# tab5_carte: tab5
+
+# --- Jeux (ADR-0065) : oui (défaut sur le Tab5) ou non (défaut sur une carte sans IMU,
+#     la Waveshare 7B : la moitié des consoles se jouent en inclinant). Non : ni Arcade,
+#     ni « Jeux » dans la roue de navigation, et le tap de la manette ouvre le lecteur
+#     audio (son appui long reste la télécommande). ---
+# tab5_jeux: oui
+
+# --- Plusieurs écrans dans la même maison (ADR-0063) : un nom par écran, en minuscules,
+#     chiffres et tirets. tab5-ha-hmi (défaut si la ligne reste commentée) pour le
+#     premier : ne pas renommer une tablette déjà installée. Home Assistant pousse
+#     le même affichage à chaque écran connecté. tab5_nom_affiche : le nom montré
+#     dans Home Assistant. Pour compiler un autre écran sans changer ce fichier :
+#     python -m esphome -s tab5_nom salon-7b … compile tab5-ha-hmi.yaml ---
+# tab5_nom: tab5-ha-hmi
+# tab5_nom_affiche: M5Stack Tab5 Home Assistant HMI
+
+# --- Langue de l'écran au PREMIER démarrage : « Français » (défaut), « English »,
+#     « Deutsch », « Nederlands », « Español », « Italiano » ou « Türkçe ».
+#     Ensuite, elle se change depuis Home Assistant (select « Langue » de la
+#     tablette), sans recompiler. ---
+# tab5_langue: Français
+
+# --- Fuseau horaire : il vient de Home Assistant depuis la 3.0 (lot 6b), la tablette
+#     garde le dernier reçu pour ses démarrages sans HA. Une ancienne ligne
+#     tab5_fuseau est simplement ignorée. ---
+
+# --- Clé privée qui signe le firmware (lot 6b, ADR-0020) : la tablette n'accepte en
+#     OTA qu'un firmware signé par la même clé. Défaut si la ligne reste commentée :
+#     tab5_signature.pem à la racine du dépôt (gitignoré). Un chemin hors du dépôt
+#     évite de la perdre avec un clone ; en garder une copie ailleurs que sur le PC.
+#     Créer la clé : python -m espsecure generate-signing-key --version 2 --scheme rsa3072 tab5_signature.pem ---
+# tab5_cle_signature: tab5_signature.pem
+
+# --- Entités de la tablette elle-même (satellite vocal, lecteur média, select de
+#     pipeline) et du bouton « MAJ Écran » : plus rien à régler depuis l'ADR-0025.
+#     La tablette envoie des événements ; Home Assistant retrouve ces entités par
+#     l'appareil qui les émet (packages/tab5_evenements.yaml). Les anciennes clés
+#     entity_tab5_satellite, entity_tab5_media_player, entity_tab5_pipeline_select,
+#     entity_primary_active et entity_push_automation sont simplement ignorées. ---
+
+# --- Taille des tuiles du bas : elle suit l'écran de la carte depuis le lot 3 du portage
+#     1024×600 (jetons acc_tuile_* de Tab5/paquets/tab5-ui-tokens.yaml, ADR-0061). Les
+#     anciennes clés meteo_cell_width, meteo_cell_height et meteo_cell_y sont ignorées. ---

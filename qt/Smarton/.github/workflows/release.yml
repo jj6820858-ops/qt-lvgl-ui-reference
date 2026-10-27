@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          cache: true
+
+      - uses: seanmiddleditch/gha-setup-ninja@master
+
+      - name: Build release
+        run: |
+          cmake --preset host-release
+          cmake --build --preset host-release --parallel
+
+      - name: Deploy (Windows)
+        if: runner.os == 'Windows'
+        run: windeployqt --qmldir ui build/host-release/bin/smarton.exe
+
+      - name: Deploy (macOS)
+        if: runner.os == 'macOS'
+        run: macdeployqt build/host-release/bin/smarton.app -qmldir=ui -dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smarton-${{ runner.os }}
+          path: build/host-release/bin/

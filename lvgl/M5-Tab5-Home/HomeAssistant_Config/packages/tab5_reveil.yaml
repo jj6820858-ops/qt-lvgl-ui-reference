@@ -1,0 +1,332 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file packages/tab5_reveil.yaml
+# @role Ce que Home Assistant apporte AU RÉVEIL du Tab5 — et rien de plus :
+#         1. `script.tab5_rdv_prochains` pousse la liste des prochains
+#            rendez-vous horodatés vers le firmware ;
+#         2. `script.tab5_reveil_annonce` prononce le briefing du matin ;
+#         3. une automation entretient (1).
+# @architecture_constraint Le réveil lui-même ne dépend PAS de ce fichier. Le
+#       firmware (Tab5/socle/alarm_clock.cpp) calcule son heure à partir de l'horloge
+#       SNTP et des horaires de travail déjà en cache, et sonne une mélodie
+#       synthétisée localement. Si Home Assistant est arrêté, le réveil sonne
+#       quand même — seuls le briefing parlé et les rappels de rendez-vous
+#       manquent. Ne JAMAIS déplacer la décision de sonner ici.
+# @architecture_constraint L'ANNONCE d'un rendez-vous est déclenchée par le
+#       firmware, pas par une automation HA : HA ne fait que pousser la liste
+#       (epoch + titre) toutes les 5 minutes, le Tab5 tient le compte à rebours.
+#       Une coupure HA entre la poussée et l'échéance ne fait donc rien rater.
+# @payload_contract tab5_maj_rdv_prochains : "epoch|titre~epoch|titre~…",
+#       8 entrées maximum, epoch UTC du DÉBUT (zéro-padding sans importance,
+#       lu en base 10), titres débarrassés de `|`, `~` et `;`. Contrat côté
+#       firmware : `rdv_store()` dans Tab5/socle/alarm_clock.cpp.
+# @data_sources Les agendas choisis dans HA (ADR-0024, packages/tab5_reglages.yaml) :
+#       « Tab5 · appointments calendar » + « Tab5 · work calendar », dont on
+#       EXCLUT les événements de travail (titre contenant un des mots de « Tab5 · work event keyword », ou tous si la liste est vide) : ce ne sont pas des
+#       rendez-vous, et leurs horaires servent déjà au calcul de l'heure de réveil.
+#       Seuls les événements
+#       HORODATÉS sont retenus — un événement journée entière n'a pas d'heure à
+#       annoncer. Aucun agenda choisi : liste vide poussée (aucun rappel).
+# @ai_warning L'HEURE du réveil vient des horaires de l'agenda de travail, poussés
+#       par packages/tab5_push.yaml (prévisions jours) et gardés par la tablette.
+#       « Tab5 · work calendar » sur « Not set » = tous les jours en repos : le
+#       réveil ne sonne plus que les jours de repos si « Réveil : sonner les jours
+#       de repos » est actif. À régler AVANT de recharger les automatisations lors
+#       d'une migration depuis les placeholders.
+# @i18n Le briefing parlé suit la langue de l'écran (select « Langue » du firmware,
+#       qui sonne, trouvé par tab5_entite()) : français, anglais, allemand, néerlandais,
+#       espagnol, italien, turc ; une langue inconnue parle français. Le texte français est
+#       celui d'avant le 29/09/2026, mot pour mot. Heures dites « 8 heures 05 » en
+#       français, « 8:05 » ailleurs (les voix lisent ce format comme une heure).
+# @ai_warning Ne JAMAIS passer `now()` brut à un service (`{{ now() }}`) —
+#       toujours via `.strftime(...)`. Un `calendar.get_events` avec un datetime
+#       brut (microsecondes incluses) a déjà cassé silencieusement toute une
+#       automation le 04/07/2026, sans aucune erreur loggée par HA.
+# @install Nécessite homeassistant.packages: !include_dir_named packages, et
+#       custom_templates/tab5_calendar.jinja (macros ev_start / ev_end / ev_summary,
+#       depuis le 07/10/2026 au lieu de leur copie ici) et custom_templates/
+#       tab5_tablette.jinja (« tablette connectée », garde d'origine, 08/10/2026)
+#       déployés et rechargés AVANT.
+# ============================================================================
+
+script:
+  tab5_rdv_prochains:
+    alias: "Tab5 — upcoming appointments (alarm / announcements)"
+    description: >-
+      Pousse vers le Tab5 les rendez-vous horodatés des 24 prochaines heures.
+      Le firmware garde la liste et déclenche l'annonce lui-même, N minutes
+      avant (N réglable depuis l'écran ou depuis le `number` « Rendez-vous :
+      annoncer avant » exposé par le firmware).
+      mode restart : si deux déclencheurs tombent en même temps, seule la
+      dernière demande compte.
+    mode: restart
+    fields:
+      appareil:
+        name: "Écran"
+        description: "device_id de l'écran qui vient de se connecter : lui seul ; vide : chaque écran connecté."
+    sequence:
+      # Tablette absente (pas encore ajoutée dans HA) ou hors ligne : rien à pousser,
+      # pas d'erreur « Action … not found » / « Not connected » (test « HA neuf »,
+      # 28/09/2026). Tablette trouvée par le modèle de l'appareil, pas par son nom.
+      # `appareil` (l'écran qui vient de se connecter, passé par « Tab5 — push the upcoming
+      # appointments ») : lui seul, sa liaison ; vide : chaque écran connecté.
+      - condition: template
+        value_template: &tab5_connectee >-
+          {%- from 'tab5_tablette.jinja' import tab5_pret -%}
+          {{ tab5_pret(appareil | default('')) == 'oui' }}
+      - variables:
+          debut: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          fin: "{{ (now() + timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S') }}"
+      # Agendas choisis dans HA : entity_id, ou '' s'il n'est pas choisi ou n'existe plus.
+      - variables: &agendas_reveil
+          ag_rdv: >-
+            {%- set a = states('select.tab5_agenda_des_rendez_vous') -%}
+            {{ a if a.startswith('calendar.') and expand(a) | count > 0 else '' }}
+          ag_travail: >-
+            {%- set a = states('select.tab5_agenda_de_travail') -%}
+            {{ a if a.startswith('calendar.') and expand(a) | count > 0 else '' }}
+          agendas: "{{ [ag_rdv, ag_travail] | reject('eq', '') | unique | list }}"
+          # Mots des événements de travail, en minuscules (tab5_reglages.yaml) ; liste
+          # vide = tout l'agenda de travail est du travail.
+          mots_travail: >-
+            {%- set m = states('input_text.tab5_mot_travail') -%}
+            {{ [] if m in ['unknown', 'unavailable'] else m.split(',') | map('trim') | map('lower') | reject('eq', '') | list }}
+      # Sans agenda, pas d'appel (une cible vide lève une erreur que continue_on_error
+      # ne rattrape pas) : `ev` reste indéfini et la liste poussée est vide.
+      - if:
+          - condition: template
+            value_template: "{{ agendas | count > 0 }}"
+        then:
+          - action: calendar.get_events
+            continue_on_error: true
+            data:
+              start_date_time: "{{ debut }}"
+              end_date_time: "{{ fin }}"
+            target:
+              entity_id: "{{ agendas }}"
+            response_variable: ev
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+            {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{{ repeat.item }}"
+            - action: "esphome.{{ tablette }}_tab5_maj_rdv_prochains"
+              continue_on_error: true
+              data:
+                payload: >-
+                  {% from 'tab5_calendar.jinja' import ev_start, ev_summary %}
+                  {% set fam = ev[ag_rdv].events if ev is defined and ag_rdv in ev and ag_rdv != ag_travail else [] %}
+                  {% set boulo = ev[ag_travail].events if ev is defined and ag_travail in ev else [] %}
+                  {% set ns = namespace(rows=[]) %}
+                  {% for e in (fam + boulo) %}
+                    {% set st = ev_start(e) %}
+                    {% set summ = ev_summary(e) %}
+                    {# 'T' dans le début = événement horodaté. Une journée entière n'a
+                       pas d'heure à annoncer, on la saute. #}
+                    {% if 'T' in st and not (mots_travail | count == 0 or mots_travail | select('in', summ | lower) | list | count > 0) %}
+                      {% set ts = st | as_datetime | as_timestamp | int(0) %}
+                      {% if ts > 0 %}
+                        {# Titre nettoyé des trois séparateurs du protocole, puis
+                           tronqué : la ligne de bandeau du Tab5 fait 1180 px, et
+                           rdv_due() travaille sur un tampon de 192 octets. #}
+                        {% set txt = summ | replace('|', '/') | replace('~', '-') | replace(';', ',') %}
+                        {# Epoch zéro-padded sur 11 chiffres : le tri lexicographique
+                           ci-dessous devient un tri chronologique, sans passer par
+                           sort(attribute=...) sur des tuples (fragile en Jinja). #}
+                        {% set ns.rows = ns.rows + ['%011d|%s' | format(ts, txt[:64])] %}
+                      {% endif %}
+                    {% endif %}
+                  {% endfor %}
+                  {# Troncature à 8 entrées : SLICE [:8], surtout pas `| first(8)` —
+                     `first` est un filtre Jinja SANS paramètre (do_first(env, seq)),
+                     lui passer un argument lève « sync_do_first() takes 2 positional
+                     arguments but 3 were given » et casse TOUT le rendu du payload
+                     (le script s'arrête, `continue_on_error` ne couvre pas le rendu
+                     d'un template). Bug resté invisible du 05/08 au 06/08 : la liste
+                     des RDV n'a jamais été poussée une seule fois. #}
+                  {{ (ns.rows | sort | unique | list)[:8] | join('~') }}
+
+  tab5_reveil_annonce:
+    alias: "Tab5 — spoken alarm briefing"
+    description: >-
+      Prononcé sur le Tab5 quelques secondes après le début de la sonnerie,
+      si switch.tab5_alarm_tts est actif. Appelé PAR LE FIRMWARE
+      (script.tab5_alarm_speak), jamais par un déclencheur horaire : c'est le
+      Tab5 qui sait à quelle heure il a sonné.
+    # Un passage par écran qui sonne (ADR-0071) : deux réveils à la même heure parlent
+    # chacun sur leur écran ; en single, le second était abandonné.
+    mode: parallel
+    max: 5
+    fields:
+      appareil:
+        name: "Device · appareil"
+        description: "device_id de l'écran qui sonne (tab5_evenements.yaml) ; vide : le premier écran connecté"
+        selector:
+          device:
+            filter:
+              model: tab5-ha-hmi
+    sequence:
+      - variables: *agendas_reveil
+      - variables:
+          # Horaires de travail du jour, lus dans le même calendrier que celui
+          # qui sert à calculer l'heure de réveil — le briefing dit donc
+          # exactement ce que la tablette a utilisé pour décider.
+          debut_jour: "{{ now().strftime('%Y-%m-%d 00:00:00') }}"
+          fin_jour: "{{ (now() + timedelta(days=1)).strftime('%Y-%m-%d 00:00:00') }}"
+          # L'écran qui sonne (son device_id, passé par tab5_evenements.yaml) ; appelé à
+          # la main sans appareil : le premier écran connecté (tab5_cibles).
+          ecran_reveil: >-
+            {%- from 'tab5_tablette.jinja' import tab5_cibles -%}
+            {{ (tab5_cibles(appareil | default('', true)).split(',') | select | list + [''])[0] }}
+          # Satellite vocal de cet écran, quel que soit le nom de l'appareil dans HA.
+          satellite: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(ecran_reveil, 'satellite') }}"
+          langue_reveil: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(ecran_reveil, 'langue') }}"
+      - condition: template
+        value_template: "{{ satellite != '' }}"
+      - if:
+          - condition: template
+            value_template: "{{ agendas | count > 0 }}"
+        then:
+          - action: calendar.get_events
+            continue_on_error: true
+            data:
+              start_date_time: "{{ debut_jour }}"
+              end_date_time: "{{ fin_jour }}"
+            target:
+              entity_id: "{{ agendas }}"
+            response_variable: ev_jour
+      - action: assist_satellite.announce
+        continue_on_error: true
+        data:
+          entity_id: "{{ satellite }}"
+          message: >-
+            {% from 'tab5_calendar.jinja' import ev_start, ev_end, ev_summary %}
+            {% set langue = states(langue_reveil) %}
+            {# Phrases par langue : bonjour + heure, travail (début, fin), repos,
+               rendez-vous (titre, heure), température. Une langue inconnue parle
+               français (@i18n). #}
+            {% set phrases = {
+                 'English': ['Good morning. It is %s.', ' You work from %s to %s.', ' No work today.', ' Appointment: %s, at %s.', ' It will be %d degrees.'],
+                 'Deutsch': ['Guten Morgen. Es ist %s.', ' Sie arbeiten von %s bis %s.', ' Heute keine Arbeit.', ' Termin: %s, um %s.', ' Es werden %d Grad.'],
+                 'Nederlands': ['Goedemorgen. Het is %s.', ' U werkt van %s tot %s.', ' Vandaag geen werk.', ' Afspraak: %s, om %s.', ' Het wordt %d graden.'],
+                 'Español': ['Buenos días. Son las %s.', ' Trabaja de %s a %s.', ' Hoy no hay trabajo.', ' Cita: %s, a las %s.', ' Hará %d grados.'],
+                 'Italiano': ['Buongiorno. Sono le %s.', ' Lavora dalle %s alle %s.', ' Oggi niente lavoro.', ' Appuntamento: %s, alle %s.', ' Ci saranno %d gradi.'],
+                 'Türkçe': ['Günaydın. Saat %s.', ' Bugün %s ile %s arası çalışıyorsunuz.', ' Bugün iş yok.', ' Randevu: %s, saat %s.', ' Hava %d derece olacak.'],
+               } %}
+            {% set fr = langue not in phrases %}
+            {% set p = ['Bonjour. Il est %s.', ' Vous travaillez de %s à %s.', " Pas de travail aujourd'hui.", ' Rendez-vous : %s, à %s.', ' Il fera %d degrés.'] if fr else phrases[langue] %}
+            {% set boulo = ev_jour[ag_travail].events if ev_jour is defined and ag_travail in ev_jour else [] %}
+            {% set fam = ev_jour[ag_rdv].events if ev_jour is defined and ag_rdv in ev_jour and ag_rdv != ag_travail else [] %}
+            {% set ns = namespace(debut='', fin='', rdv='', rdv_h='', best_ts=none) %}
+            {% for e in boulo %}
+              {% set st = ev_start(e) %}
+              {% set en = ev_end(e) %}
+              {% set summ = ev_summary(e) %}
+              {% if ns.debut == '' and (mots_travail | count == 0 or mots_travail | select('in', summ | lower) | list | count > 0) and 'T' in st %}
+                {% set d = st | as_datetime %}
+                {% set f = en | as_datetime %}
+                {% set ns.debut = d.strftime('%H heures %M') if fr else d.hour ~ ':' ~ '%02d' | format(d.minute) %}
+                {% set ns.fin = f.strftime('%H heures %M') if fr else f.hour ~ ':' ~ '%02d' | format(f.minute) %}
+              {% endif %}
+            {% endfor %}
+            {% for e in (fam + boulo) %}
+              {% set st = ev_start(e) %}
+              {% set summ = ev_summary(e) %}
+              {# Premier = le plus TÔT chronologiquement, pas le premier de la
+                 liste calendrier (ordre d'API non garanti). #}
+              {% if 'T' in st and not (mots_travail | count == 0 or mots_travail | select('in', summ | lower) | list | count > 0) %}
+                {% set ts = st | as_datetime | as_timestamp %}
+                {% if ns.best_ts is none or ts < ns.best_ts %}
+                  {% set d = st | as_datetime %}
+                  {% set ns.best_ts = ts %}
+                  {% set ns.rdv = summ %}
+                  {% set ns.rdv_h = d.strftime('%H heures %M') if fr else d.hour ~ ':' ~ '%02d' | format(d.minute) %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {# Source des prévisions choisie dans HA (sensor.tab5_meteo, lot 4c-3). #}
+            {% set tmax = state_attr('sensor.tab5_meteo', 'temperature') %}
+            {% set maintenant = (now().hour ~ ' heures ' ~ now().minute) if fr else (now().hour ~ ':' ~ '%02d' | format(now().minute)) %}
+            {{ p[0] | format(maintenant) }}
+            {%- if ns.debut != '' %}{{ p[1] | format(ns.debut, ns.fin) }}
+            {%- else %}{{ p[2] }}
+            {%- endif %}
+            {%- if ns.rdv != '' %}{{ p[3] | format(ns.rdv, ns.rdv_h) }}
+            {%- endif %}
+            {%- if tmax is not none %}{{ p[4] | format(tmax | round(0) | int) }}
+            {%- endif %}
+
+automation:
+  - id: tab5_rdv_push
+    alias: "Tab5 — push the upcoming appointments"
+    description: >-
+      Entretient la liste embarquée dans le Tab5. Cadence de 5 minutes : le
+      firmware tient le compte à rebours à la seconde, la poussée ne sert donc
+      qu'à découvrir les rendez-vous AJOUTÉS ou DÉPLACÉS. La reconnexion du
+      Tab5 est aussi un déclencheur, sinon la liste resterait vide après un
+      redémarrage de la tablette jusqu'au tick suivant.
+    # queued, plus single (audit du 07/10/2026, HA-17) : un passage peut attendre la
+    # liaison jusqu'à 10 s ; en single, un esphome.tab5_connected arrivé pendant ce temps
+    # était abandonné et la liste restait vide jusqu'au tick suivant. max 2 : le passage
+    # en cours et un en attente, qui relira tout ; au-delà, abandon sans avertissement.
+    mode: queued
+    max: 2
+    max_exceeded: silent
+    triggers:
+      - trigger: time_pattern
+        minutes: "/5"
+      # Agendas des rendez-vous et de travail choisis dans HA : un événement commence,
+      # finit, ou le suivant change. Miroir sensor.tab5_agendas (tab5_reglages.yaml) :
+      # un déclencheur `state:` ne prend pas d'entity_id calculé.
+      - trigger: state
+        entity_id: sensor.tab5_agendas
+        attribute: rendez_vous
+      - trigger: event
+        event_type: esphome.tab5_connected
+        id: tab5_connected
+      # Le délai d'annonce vient de changer : la liste, elle, n'a pas bougé —
+      # mais republier fait recalculer immédiatement le « prochain rendez-vous »
+      # affiché, au lieu d'attendre jusqu'à 5 minutes.
+      # NB : c'est le `number` « Rendez-vous : annoncer avant » exposé par le
+      # firmware (tab5-alarm.yaml). Son entity_id dépend du nom de l'appareil dans HA
+      # (`number.tab5_rdv_lead` était une invention, déclencheur mort jusqu'au
+      # 06/08/2026 ; préfixe de pièce `salon_…` chez l'auteur) : on suit son miroir,
+      # sensor.tab5_rendez_vous_annoncer_avant (tab5_reglages.yaml), qui le trouve
+      # par le modèle de l'appareil.
+      # Seulement un vrai changement de valeur : le `number` passe à `unavailable` à
+      # chaque déconnexion de la tablette, puis revient à sa valeur ; ces passages
+      # appelaient la tablette hors ligne (ERREUR « Not connected », test « HA
+      # neuf », 28/09/2026). La reconnexion a son propre déclencheur.
+      - trigger: state
+        entity_id: sensor.tab5_rendez_vous_annoncer_avant
+        not_from: [unavailable, unknown]
+        not_to: [unavailable, unknown]
+    conditions:
+      # Garde d'origine (audit sécurité du 30/09/2026) : tab5_connected ne compte que
+      # s'il vient d'une tablette, reconnue au modèle de son appareil comme dans
+      # tab5_evenements.yaml. Les autres déclencheurs passent. tests/test_garde_origine.py.
+      - alias: "tab5_connected : seulement depuis une tablette (modele tab5-ha-hmi)"
+        condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_origine -%}
+          {{ tab5_origine(trigger) == 'oui' }}
+    actions:
+      # Tab5 hors ligne (redémarrage, OTA) ou liaison pas encore authentifiée juste
+      # après esphome.tab5_connected : l'appel partait en erreur (« Not connected »,
+      # « Authenticated connection not ready yet » — 66 fois les 25-26/09/2026).
+      # Même attente que la poussée complète : passe tout de suite si la liaison
+      # est `on`, sinon s'arrête sans erreur après 10 s ; la reconnexion relance.
+      # Plusieurs écrans (25/10/2026) : sur tab5_connected, la liaison de l'écran qui se
+      # connecte, et la liste ne va qu'à lui (tab5_tablette.jinja, tab5_pret).
+      - variables:
+          appareil: >-
+            {%- from 'tab5_tablette.jinja' import tab5_appareil_connexion -%}
+            {{ tab5_appareil_connexion(trigger) }}
+      - wait_template: *tab5_connectee
+        timeout: "00:00:10"
+        continue_on_timeout: false
+      - action: script.tab5_rdv_prochains
+        data:
+          appareil: "{{ appareil }}"

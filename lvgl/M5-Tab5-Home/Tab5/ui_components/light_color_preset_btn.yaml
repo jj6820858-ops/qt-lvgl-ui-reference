@@ -1,0 +1,21 @@
+# [AI-CONTEXT] Pastille couleur ronde (78 px), template paramétré (!include+vars),
+# réutilisé 12x par la grille COULEURS de light_popup.yaml (#T164).
+# Vars: color_name (payload HA color_name:) ; la teinte de la pastille : lampe_teinte()
+# (tab5_tuiles_roue.cpp, la même liste que la roue, UI-8 — peut différer du CSS exact pour
+# rester lisible sur fond sombre, ex. purple → 0xA855F7).
+# Cible id(current_light_slot) (global partagé, pas une entité en dur).
+button:
+  width: ${ [78 * (corps_w | int) // 1202, 78 * (corps_h | int) // 598] | min }
+  height: ${ [78 * (corps_w | int) // 1202, 78 * (corps_h | int) // 598] | min }
+  radius: ${ [78 * (corps_w | int) // 1202, 78 * (corps_h | int) // 598] | min // 2 }
+  bg_color: !lambda 'return lv_color_hex(lampe_teinte("${color_name}"));'
+  bg_opa: 100%
+  border_width: 2
+  styles: style_border_glass_rim
+  border_opa: 45%
+  pressed:
+    bg_opa: 55%
+    styles: style_border_soft
+    border_opa: 100%
+  on_short_click:
+    - script.execute: { id: tab5_action, emplacement: !lambda 'return id(current_light_slot);', commande: couleur, valeur: "${color_name}" }

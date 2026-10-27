@@ -1,0 +1,591 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file packages/tab5_lecteur.yaml
+# @role Popup « Musique » de la tablette (ADR-0050, 10/10/2026) : un lecteur de musique
+#       façon Spotify pour n'importe quel media_player de Home Assistant (Apple TV, TV,
+#       Freebox, enceinte, la tablette elle-même…).
+#         - Les lecteurs proposés : la liste « Tab5 · music players · music
+#           players » (packages/tab5_reglages.yaml, plusieurs choix, 6 au plus, jamais
+#           devinés) ; sa mémoire input_text.tab5_choix_lecteurs. Plusieurs écrans
+#           (ADR-0072, 25/10/2026) : un écran peut avoir sa propre liste (« Tab5 · this
+#           screen · music players ») et a son propre lecteur montré ; la poussée sert
+#           chaque écran avec les siens, une commande vise la liste de l'écran qui l'émet.
+#         - Le lecteur montré : input_text.tab5_lecteur_actif (une pastille touchée,
+#           une tuile med ouverte), sinon le premier de la liste qui joue, sinon le
+#           premier de la liste. Un lecteur de la liste qui SE MET à jouer devient le
+#           lecteur montré quand celui-ci ne joue pas.
+#         - Poussée : script.tab5_lecteur_pousser (action tab5_maj_lecteur) quand le
+#           lecteur montré change (morceau, état, volume, position déplacée…), quand la
+#           liste change, à la connexion de la tablette et à l'ouverture du popup.
+#         - Commandes : la tablette émet esphome.tab5_lecteur (action, lecteur, valeur) ;
+#           packages/tab5_evenements.yaml lance script.tab5_lecteur_commande, qui
+#           n'agit que sur un lecteur de la liste ou sur le lecteur montré.
+#         - Appui long d'une tuile med sans option t : le blueprint « Tab5 —
+#           emplacements » retrouve le media_player de la tuile et lance
+#           script.tab5_lecteur_montrer.
+#         - Playlists favorites (ADR-0068, 18/10/2026) : le blueprint garde les lignes
+#           « Nom | lien » de son entrée « Playlists favorites », pousse les noms seuls et,
+#           quand la tablette touche une playlist (événement esphome.tab5_lecteur, action
+#           « playlist », valeur = rang), lance script.tab5_lecteur_playlist avec le lien.
+#           Le script choisit l'Apple TV (le lecteur montré s'il est de l'intégration
+#           apple_tv et que sa source_list contient « YouTube », sinon le premier lecteur de
+#           la liste qui l'est) et lance la playlist dans l'appli YouTube.
+# @verified Méthode vérifiée sur l'Apple TV 4K de l'auteur (tvOS, intégration apple_tv /
+#       pyatv), le 18/10/2026 entre 11 h 17 et 11 h 19, caméra devant la TV et historique
+#       de HA :
+#         - il n'y a pas d'appli YouTube Music sur tvOS : YouTube Music se joue dans l'appli
+#           YouTube. media_player.play_media, media_content_type « url »,
+#           media_content_id « youtube://www.youtube.com/watch?list=<L> » (HA appelle
+#           launch_app de pyatv) : la playlist démarre à son premier titre, puis
+#           media_next_track suit la playlist ; avec « v=<V>&list=<L> », elle démarre à ce
+#           titre (v est donc facultatif : ajouté seulement si le lien en a un). Un lien
+#           « https://… » est refusé par tvOS (« Open URL failed ») ; « youtube://watch/<id> »
+#           sans list joue un titre puis la lecture automatique de YouTube ;
+#         - après l'envoi, l'état passe à paused (ce qui jouait) en ~1 s, puis à playing avec
+#           le nouveau titre ~2-3 s après l'envoi : vérifié depuis YouTube en lecture,
+#           l'écran d'accueil de l'Apple TV et l'Apple TV en veille (off) ;
+#         - la fenêtre tvOS « Ouvrir dans « YouTube » ? » (bouton Ouvrir sélectionné, rien ne
+#           démarre sans OK) est apparue aux deux premiers liens de la matinée, plus ensuite
+#           (4 essais sur 4 sans) : gérée, pas supposée. Un « select » (remote.send_command)
+#           sans fenêtre ne fait qu'afficher les commandes de YouTube, la lecture continue ;
+#         - en veille, media_player.turn_on : l'état quitte off en 5 à 10 s ; le lien envoyé
+#           aussitôt après démarre en 2 à 3 s, sans délai de plus (7,8 s de l'appel à la
+#           lecture). Réveil demandé 4 s après la mise en veille : ignoré 20 s, lien
+#           refusé (« Open URL failed ») ; d'où un second turn_on après 10 s sans effet.
+# @payload_contract tab5_maj_lecteur (Tab5/paquets/tab5-api-logic.yaml, tab5_parse.h
+#       section 9) :
+#         lecteurs = « nom|genre » séparés par « ; », genre = device_class (tv, speaker,
+#           receiver) ou vide ;
+#         etat = « actif|nom|genre|état|titre|artiste|album|application|position|durée|
+#           volume|muet|aléatoire|répétition|fonctions|image » ; actif = index dans
+#           lecteurs (-1 : lecteur d'une tuile hors liste) ; vide = aucun lecteur.
+#       Les « | », « ; » et sauts de ligne des textes deviennent « / », « , » et espaces.
+#       Position avancée jusqu'à l'envoi en lecture (media_position + temps écoulé depuis
+#       media_position_updated_at), nan sans ; volume 0 à 100 ; fonctions = lettres de
+#       supported_features (MediaPlayerEntityFeature) : l PAUSE|PLAY, s SEEK, v
+#       VOLUME_SET, m VOLUME_MUTE, p PREVIOUS_TRACK, n NEXT_TRACK, a SHUFFLE_SET,
+#       r REPEAT_SET, o TURN_ON ; image = entity_picture (relatif : la tablette ajoute
+#       http://adresse-de-HA:8123).
+# @limits La pochette d'un HA servi en https sur 8123 n'arrive pas (la tablette
+#       complète un chemin relatif en http) : la note de musique s'affiche à la place.
+#       Le nom d'un lecteur sans friendly_name part vide : l'écran écrit « Lecteur N »,
+#       jamais un entity_id.
+#       Playlists : une Apple TV avec l'appli YouTube seulement (aucun autre lecteur) ; un
+#       lien sans « list= » est refusé (notification). La fenêtre tvOS est validée par
+#       « select » sur la télécommande du même appareil : sans remote.*, une fenêtre restée
+#       ouverte attend un OK à la main.
+# @security Aucun nom d'action ni d'entité ne vient de l'événement : l'index désigne un
+#       lecteur de la liste choisie, « -1 » le lecteur montré (choisi par une pastille ou
+#       par le blueprint, depuis une tuile med de la tablette).
+# @install Avec les autres packages (homeassistant.packages: !include_dir_named
+#       packages), après tab5_reglages.yaml et custom_templates/tab5_tablette.jinja.
+#       Rien à renseigner ici.
+# ============================================================================
+
+input_text:
+  # Mémoire du lecteur montré : écrite par une pastille du popup (choisir), par une
+  # tuile med ouverte (blueprint), ou quand un lecteur de la liste se met à jouer.
+  tab5_lecteur_actif:
+    name: "Tab5 · memory · shown player"
+    icon: mdi:content-save-outline
+    max: 255
+
+template:
+  # Miroirs : un déclencheur `state:` exige un entity_id écrit dans le YAML. Le premier
+  # dit quel lecteur montrer ; le second change dès que ce lecteur change (état, morceau,
+  # volume…) ou qu'un lecteur de la liste se met à jouer.
+  # Plusieurs écrans (ADR-0072, 25/10/2026) : chaque écran a sa liste (la sienne, sinon
+  # celle de la maison) et son lecteur montré, tab5_lecteur_montre(appareil)
+  # (custom_templates/tab5_tablette.jinja). Le miroir ci-dessous est celui de la maison
+  # (popup Musique, playlists) ; la signature suit le lecteur montré de chaque écran.
+  - sensor:
+      - name: "Tab5 · shown player"
+        unique_id: tab5_lecteur_montre
+        default_entity_id: sensor.tab5_lecteur_montre
+        icon: mdi:music
+        state: "{% from 'tab5_tablette.jinja' import tab5_lecteur_montre %}{{ tab5_lecteur_montre('') }}"
+      - name: "Tab5 · player signature"
+        unique_id: tab5_lecteur_signature
+        default_entity_id: sensor.tab5_signature_du_lecteur
+        icon: mdi:music-circle-outline
+        state: >-
+          {%- set a = states('sensor.tab5_lecteur_montre') -%}
+          {{ states(a) if a.startswith('media_player.') else 'Aucun' }}
+        attributes:
+          lecteur: "{{ states('sensor.tab5_lecteur_montre') }}"
+          # Lecteurs montrés : celui de la maison, puis celui de chaque écran (ADR-0072).
+          montres: >-
+            {%- from 'tab5_tablette.jinja' import tab5_ecrans, tab5_lecteur_montre -%}
+            {%- set n = namespace(l=[states('sensor.tab5_lecteur_montre')]) -%}
+            {%- for d in tab5_ecrans().split(',') | select -%}
+              {%- set a = tab5_lecteur_montre(d) -%}
+              {%- if a not in n.l -%}{%- set n.l = n.l + [a] -%}{%- endif -%}
+            {%- endfor -%}
+            {{ n.l }}
+          signature: >-
+            {%- from 'tab5_tablette.jinja' import tab5_ecrans, tab5_lecteur_montre -%}
+            {%- set n = namespace(s='', l=[states('sensor.tab5_lecteur_montre')]) -%}
+            {%- for d in tab5_ecrans().split(',') | select -%}
+              {%- set a = tab5_lecteur_montre(d) -%}
+              {%- if a not in n.l -%}{%- set n.l = n.l + [a] -%}{%- endif -%}
+            {%- endfor -%}
+            {%- for a in n.l if a.startswith('media_player.') -%}
+              {%- set n.s = n.s ~ ('#' if n.s else '') ~ a ~ '=' ~ states(a) -%}
+              {%- for k in ['friendly_name', 'media_title', 'media_artist', 'media_album_name', 'app_name',
+                            'media_duration', 'media_position_updated_at', 'volume_level', 'is_volume_muted',
+                            'shuffle', 'repeat', 'supported_features', 'entity_picture'] -%}
+                {%- set n.s = n.s ~ '|' ~ (state_attr(a, k) | string) -%}
+              {%- endfor -%}
+            {%- endfor -%}
+            {{ n.s }}
+          # Lecteurs des listes (la maison et chaque écran) qui jouent : celui qui s'y ajoute
+          # devient le lecteur choisi (automatisation ci-dessous), si celui de la maison ne
+          # joue pas.
+          en_lecture: >-
+            {%- from 'tab5_tablette.jinja' import tab5_lecteurs_tous -%}
+            {{ tab5_lecteurs_tous().split(',') | select | select('is_state', 'playing') | list }}
+          liste: >-
+            {%- from 'tab5_tablette.jinja' import tab5_lecteurs_tous -%}
+            {%- set n = namespace(s='') -%}
+            {%- for e in tab5_lecteurs_tous().split(',') | select -%}
+              {%- set n.s = n.s ~ e ~ '|' ~ (state_attr(e, 'friendly_name') | string) ~ '|'
+                   ~ (state_attr(e, 'device_class') | string) ~ ';' -%}
+            {%- endfor -%}
+            {{ n.s }}
+
+automation:
+  - id: tab5_lecteur
+    alias: "Tab5 — music player (push)"
+    description: >-
+      Pousse vers la tablette le lecteur de musique montré par son popup Musique quand il
+      change, quand la liste « Tab5 · music players » change et à la connexion de la
+      tablette (ADR-0050).
+    mode: queued
+    max: 5
+    triggers:
+      - trigger: state
+        entity_id: sensor.tab5_signature_du_lecteur
+      - trigger: event
+        event_type: esphome.tab5_connected
+    conditions:
+      # Garde d'origine (comme tab5_evenements.yaml) : tab5_connected d'une tablette
+      # tab5-ha-hmi seulement ; le miroir passe toujours.
+      - condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_origine -%}
+          {{ tab5_origine(trigger) == 'oui' }}
+    actions:
+      # Un lecteur de la liste vient de se mettre à jouer et le lecteur montré ne joue
+      # pas : on montre celui qui joue.
+      - variables:
+          avant: >-
+            {{ (trigger.from_state.attributes.en_lecture | default([], true))
+               if trigger.platform == 'state' and trigger.from_state is not none else [] }}
+          maintenant: >-
+            {{ (trigger.to_state.attributes.en_lecture | default([], true))
+               if trigger.platform == 'state' and trigger.to_state is not none else [] }}
+          nouveaux: "{{ maintenant | reject('in', avant) | list }}"
+          montre: "{{ states('sensor.tab5_lecteur_montre') }}"
+      - if: "{{ nouveaux | count > 0 and not is_state(montre, 'playing') and (nouveaux | first) != montre }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_lecteur_actif
+            data:
+              value: "{{ nouveaux | first }}"
+          # Le miroir change à son tour et relance cette automatisation : elle poussera.
+          - stop: "Lecteur montré changé"
+      # Connexion d'un écran (25/10/2026, plusieurs écrans) : attendre SA liaison (10 s
+      # au plus), puis le script ne sert que lui (`appareil`) ; avant, une autre tablette
+      # connectée suffisait et l'écran qui venait de se connecter n'était pas dans la liste.
+      - variables:
+          appareil: >-
+            {%- from 'tab5_tablette.jinja' import tab5_appareil_connexion -%}
+            {{ tab5_appareil_connexion(trigger) }}
+      - if: "{{ appareil != '' }}"
+        then:
+          - wait_template: >-
+              {%- from 'tab5_tablette.jinja' import tab5_pret -%}
+              {{ tab5_pret(appareil) == 'oui' }}
+            timeout: "00:00:10"
+            continue_on_timeout: true
+      - action: script.turn_on
+        target:
+          entity_id: script.tab5_lecteur_pousser
+        data:
+          variables:
+            appareil: "{{ appareil }}"
+
+script:
+  tab5_lecteur_pousser:
+    alias: "Tab5 — music player: push the state"
+    description: >-
+      Pousse la liste des lecteurs choisis et l'état du lecteur montré (action
+      tab5_maj_lecteur). Mode restart et 0,4 s d'attente : une rafale de changements
+      (morceau suivant : titre, artiste, pochette, durée…) part en une seule poussée.
+    mode: restart
+    sequence:
+      - condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_pret -%}
+          {{ tab5_pret(appareil | default('')) == 'oui' }}
+      - delay:
+          milliseconds: 400
+      # Chaque écran sa liste et son lecteur montré (ADR-0072) : un passage par écran.
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_cibles -%}
+            {{ tab5_cibles(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{% from 'tab5_tablette.jinja' import tab5_prefixe %}{{ tab5_prefixe(repeat.item) }}"
+                liste: >-
+                  {%- from 'tab5_tablette.jinja' import tab5_reglage -%}
+                  {{ tab5_reglage(repeat.item, 'lecteurs').split(',') | select | list }}
+                a: "{% from 'tab5_tablette.jinja' import tab5_lecteur_montre %}{{ tab5_lecteur_montre(repeat.item) }}"
+                lecteurs: >-
+                  {%- set n = namespace(l=[]) -%}
+                  {%- for e in liste[:6] -%}
+                    {%- set nom = (state_attr(e, 'friendly_name') or '') | string -%}
+                    {%- set genre = state_attr(e, 'device_class') if state_attr(e, 'device_class') in ['tv', 'speaker', 'receiver'] else '' -%}
+                    {%- set n.l = n.l + [nom | replace('|', '/') | replace(';', ',') | replace('\n', ' ') ~ '|' ~ genre] -%}
+                  {%- endfor -%}
+                  {{ n.l | join(';') }}
+                etat: >-
+                  {%- macro t(v) -%}{{ (v or '') | string | replace('|', '/') | replace(';', ',') | replace('\n', ' ') }}{%- endmacro -%}
+                  {%- macro drapeau(v) -%}{{ '' if v is none else ('1' if v else '0') }}{%- endmacro -%}
+                  {%- if a.startswith('media_player.') and expand(a) | count > 0 -%}
+                    {%- set s = states(a) -%}
+                    {%- set f = state_attr(a, 'supported_features') | int(0) -%}
+                    {%- set genre = state_attr(a, 'device_class') if state_attr(a, 'device_class') in ['tv', 'speaker', 'receiver'] else '' -%}
+                    {%- set duree = state_attr(a, 'media_duration') -%}
+                    {%- set pos = state_attr(a, 'media_position') -%}
+                    {%- set maj = state_attr(a, 'media_position_updated_at') -%}
+                    {%- if pos is number -%}
+                      {%- if s == 'playing' and maj is not none -%}
+                        {%- set pos = pos + [0, now().timestamp() - as_timestamp(maj, now().timestamp())] | max -%}
+                      {%- endif -%}
+                      {%- set position = (pos | round(1)) | string -%}
+                    {%- else -%}
+                      {%- set position = 'nan' -%}
+                    {%- endif -%}
+                    {%- set vol = state_attr(a, 'volume_level') -%}
+                    {%- set lettres = ('l' if f | bitwise_and(1) or f | bitwise_and(16384) else '')
+                         ~ ('s' if f | bitwise_and(2) else '') ~ ('v' if f | bitwise_and(4) else '')
+                         ~ ('m' if f | bitwise_and(8) else '') ~ ('p' if f | bitwise_and(16) else '')
+                         ~ ('n' if f | bitwise_and(32) else '') ~ ('a' if f | bitwise_and(32768) else '')
+                         ~ ('r' if f | bitwise_and(262144) else '') ~ ('o' if f | bitwise_and(128) else '') -%}
+                    {{- liste.index(a) if a in liste[:6] else -1 }}|{{ t(state_attr(a, 'friendly_name')) }}|{{ genre }}|{{ s }}
+                    {{- '|' }}{{ t(state_attr(a, 'media_title')) }}|{{ t(state_attr(a, 'media_artist') or state_attr(a, 'media_album_artist')) }}
+                    {{- '|' }}{{ t(state_attr(a, 'media_album_name')) }}|{{ t(state_attr(a, 'app_name')) }}|{{ position }}
+                    {{- '|' }}{{ (duree | round(0) | int) if duree is number and duree > 0 else 'nan' }}
+                    {{- '|' }}{{ ((vol * 100) | round(0) | int) if vol is number else 'nan' }}
+                    {{- '|' }}{{ drapeau(state_attr(a, 'is_volume_muted')) }}|{{ drapeau(state_attr(a, 'shuffle')) }}
+                    {{- '|' }}{{ state_attr(a, 'repeat') if state_attr(a, 'repeat') in ['off', 'all', 'one'] else '' }}
+                    {{- '|' }}{{ lettres }}|{{ (state_attr(a, 'entity_picture') or '') | string | replace('|', '%7C') | replace(' ', '%20') }}
+                  {%- endif -%}
+            - action: "esphome.{{ tablette }}_tab5_maj_lecteur"
+              continue_on_error: true
+              data:
+                lecteurs: "{{ lecteurs }}"
+                etat: "{{ etat }}"
+
+  tab5_lecteur_commande:
+    alias: "Tab5 — music player: tablet command"
+    description: >-
+      Lancé par packages/tab5_evenements.yaml à l'événement esphome.tab5_lecteur.
+      N'agit que sur un lecteur de la liste « Tab5 · music players » ou sur le
+      lecteur montré (ADR-0050).
+    mode: queued
+    max: 10
+    fields:
+      commande:
+        description: "Donnée « action » de l'événement : lecture, precedent, suivant, aleatoire, repetition, muet, volume, position, allumer, choisir ou ouvrir ; « playlist » (ADR-0068) est au blueprint, qui seul connaît les liens : ignorée ici"
+      lecteur:
+        description: "Index dans la liste, « -1 » (le lecteur montré) ou la clé d'une tuile (« tRT », ouvrir)"
+      valeur:
+        description: "1/0 (aléatoire, muet), off/all/one (répétition), 0 à 100 (volume), secondes (position)"
+      appareil:
+        description: "device_id de l'écran qui a émis l'événement (ADR-0072) : l'index désigne un lecteur de SA liste"
+    sequence:
+      - variables:
+          liste: >-
+            {%- from 'tab5_tablette.jinja' import tab5_reglage -%}
+            {{ tab5_reglage(appareil | default(''), 'lecteurs').split(',') | select | list }}
+          i: "{{ (lecteur | default('') | string) | int(-99) }}"
+          montre: "{% from 'tab5_tablette.jinja' import tab5_lecteur_montre %}{{ tab5_lecteur_montre(appareil | default('')) }}"
+          cible: >-
+            {%- if 0 <= i < [liste | count, 6] | min -%}{{ liste[i] }}
+            {%- elif montre.startswith('media_player.') and expand(montre) | count > 0 -%}{{ montre }}
+            {%- endif -%}
+          a: "{{ commande | default('') | string }}"
+          v: "{{ valeur | default('') | string }}"
+      - choose:
+          # Ouverture du popup : l'état frais. Une tuile (lecteur « tRT ») : le blueprint
+          # lance aussi script.tab5_lecteur_montrer ; les deux poussées n'en font qu'une
+          # (tab5_lecteur_pousser, mode restart).
+          - conditions: "{{ a == 'ouvrir' }}"
+            sequence:
+              - action: script.turn_on
+                target:
+                  entity_id: script.tab5_lecteur_pousser
+                data:
+                  variables:
+                    appareil: "{{ appareil | default('') }}"
+          # Pastille touchée : ce lecteur de la liste devient le lecteur montré.
+          - conditions: "{{ a == 'choisir' and 0 <= i < [liste | count, 6] | min }}"
+            sequence:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.tab5_lecteur_actif
+                data:
+                  value: "{{ liste[i] }}"
+          - conditions: "{{ cible != '' and a == 'lecture' }}"
+            sequence:
+              - action: media_player.media_play_pause
+                continue_on_error: true
+                target:
+                  entity_id: "{{ cible }}"
+          - conditions: "{{ cible != '' and a == 'precedent' }}"
+            sequence:
+              - action: media_player.media_previous_track
+                continue_on_error: true
+                target:
+                  entity_id: "{{ cible }}"
+          - conditions: "{{ cible != '' and a == 'suivant' }}"
+            sequence:
+              - action: media_player.media_next_track
+                continue_on_error: true
+                target:
+                  entity_id: "{{ cible }}"
+          - conditions: "{{ cible != '' and a == 'aleatoire' }}"
+            sequence:
+              - action: media_player.shuffle_set
+                continue_on_error: true
+                target:
+                  entity_id: "{{ cible }}"
+                data:
+                  shuffle: "{{ v == '1' }}"
+          - conditions: "{{ cible != '' and a == 'repetition' and v in ['off', 'all', 'one'] }}"
+            sequence:
+              - action: media_player.repeat_set
+                continue_on_error: true
+                target:
+                  entity_id: "{{ cible }}"
+                data:
+                  repeat: "{{ v }}"
+          - conditions: "{{ cible != '' and a == 'muet' }}"
+            sequence:
+              - action: media_player.volume_mute
+                continue_on_error: true
+                target:
+                  entity_id: "{{ cible }}"
+                data:
+                  is_volume_muted: "{{ v == '1' }}"
+          - conditions: "{{ cible != '' and a == 'volume' and v | is_number }}"
+            sequence:
+              - action: media_player.volume_set
+                continue_on_error: true
+                target:
+                  entity_id: "{{ cible }}"
+                data:
+                  volume_level: "{{ ([0, [100, v | float(0)] | min] | max / 100) | round(2) }}"
+          - conditions: "{{ cible != '' and a == 'position' and v | is_number }}"
+            sequence:
+              - action: media_player.media_seek
+                continue_on_error: true
+                target:
+                  entity_id: "{{ cible }}"
+                data:
+                  seek_position: "{{ [0, v | float(0)] | max }}"
+          - conditions: "{{ cible != '' and a == 'allumer' }}"
+            sequence:
+              - action: media_player.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ cible }}"
+          # « playlist » (ADR-0068) : aucune branche, rien ne se passe ici. Le blueprint
+          # « Tab5 — emplacements » retrouve le lien de la playlist et lance
+          # script.tab5_lecteur_playlist.
+
+  tab5_lecteur_montrer:
+    alias: "Tab5 — music player: show a tile's player"
+    description: >-
+      Lancé par le blueprint « Tab5 — emplacements » quand la tablette ouvre le lecteur
+      depuis une tuile med : ce media_player devient le lecteur montré (ADR-0050).
+    mode: queued
+    max: 3
+    fields:
+      entite:
+        description: "media_player de la tuile (résolu par le blueprint)"
+    sequence:
+      - condition: template
+        value_template: "{{ (entite | default('') | string).startswith('media_player.') and expand(entite) | count > 0 }}"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.tab5_lecteur_actif
+        data:
+          value: "{{ entite }}"
+      - action: script.turn_on
+        target:
+          entity_id: script.tab5_lecteur_pousser
+
+  tab5_lecteur_playlist:
+    alias: "Tab5 — music player: start a favourite playlist"
+    description: >-
+      Lancé par le blueprint « Tab5 — emplacements » quand la tablette touche une playlist
+      de la page Playlists du popup Musique (ADR-0068) : lance le lien YouTube ou YouTube
+      Music dans l'appli YouTube d'une Apple TV de la liste « Tab5 · music players ».
+      Méthode vérifiée le 18/10/2026 (en-tête du package).
+    mode: restart
+    fields:
+      lien:
+        description: "Lien de la playlist, tel qu'écrit dans l'entrée « Playlists favorites » du blueprint (music.youtube.com, www.youtube.com, m.youtube.com, youtu.be)"
+    sequence:
+      - variables:
+          l: "{{ lien | default('') | string | trim }}"
+          # Identifiants YouTube : lettres, chiffres, « - » et « _ » ; les autres
+          # paramètres (si=, pp=, index=…) sont ignorés.
+          id_liste: "{{ l | regex_findall('[?&]list=([A-Za-z0-9_-]+)') | first | default('') }}"
+          id_titre: >-
+            {%- set v = l | regex_findall('[?&]v=([A-Za-z0-9_-]+)') -%}
+            {%- set court = l | regex_findall('youtu[.]be/([A-Za-z0-9_-]+)') -%}
+            {{ (v or court) | first | default('') }}
+          # Le titre (v) est facultatif : sans lui, la playlist part de son premier titre.
+          url: >-
+            youtube://www.youtube.com/watch?{{ ('v=' ~ id_titre ~ '&') if id_titre else '' }}list={{ id_liste }}
+          # Les lecteurs de la maison et de chaque écran (ADR-0072).
+          liste: >-
+            {%- from 'tab5_tablette.jinja' import tab5_lecteurs_tous -%}
+            {{ tab5_lecteurs_tous().split(',') | select | list }}
+          apple_tv: "{{ integration_entities('apple_tv') }}"
+          montre: "{{ states('sensor.tab5_lecteur_montre') }}"
+          # Le lecteur montré s'il convient, sinon le premier de la liste qui convient :
+          # intégration apple_tv et l'appli YouTube dans sa source_list.
+          cible: >-
+            {%- set ns = namespace(c='') -%}
+            {%- for e in [montre] + liste -%}
+              {%- if not ns.c and e is string and e.startswith('media_player.') and e in apple_tv
+                     and 'YouTube' in (state_attr(e, 'source_list') or []) -%}
+                {%- set ns.c = e -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {{ ns.c }}
+          # La télécommande du même appareil : valide la fenêtre tvOS « Ouvrir dans … ? ».
+          telecommande: >-
+            {{ (device_entities(device_id(cible)) | select('match', 'remote[.]') | first | default(''))
+               if cible else '' }}
+          titre_notif: "Tab5 : playlist · playlist"
+      - if: "{{ id_liste == '' }}"
+        then:
+          - action: persistent_notification.create
+            continue_on_error: true
+            data:
+              notification_id: tab5_lecteur_playlist
+              title: "{{ titre_notif }}"
+              message: >-
+                Ce lien n'est pas celui d'une playlist (il n'a pas « list= ») : copiez-le
+                dans YouTube ou YouTube Music (Partager → Copier le lien) et remplacez-le
+                dans l'entrée « Playlists favorites » du blueprint « Tab5 — emplacements ».
+                This link is not a playlist's (no « list= »): copy it in YouTube or YouTube
+                Music (Share → Copy link) and replace it in the « Favourite playlists »
+                input of the « Tab5 — emplacements » blueprint.
+          - stop: "Lien sans list="
+      - if: "{{ cible == '' }}"
+        then:
+          - action: persistent_notification.create
+            continue_on_error: true
+            data:
+              notification_id: tab5_lecteur_playlist
+              title: "{{ titre_notif }}"
+              message: >-
+                Aucune Apple TV avec l'appli YouTube dans la liste « Tab5 · music players » : ajoutez-y votre Apple TV (intégration Apple TV) et installez
+                l'appli YouTube sur l'Apple TV. No Apple TV with the YouTube app in the
+                « Tab5 · music players » list: add your Apple TV (Apple TV
+                integration) and install the YouTube app on it.
+          - stop: "Aucune Apple TV"
+      - if: "{{ is_state(cible, 'unavailable') }}"
+        then:
+          - action: persistent_notification.create
+            continue_on_error: true
+            data:
+              notification_id: tab5_lecteur_playlist
+              title: "{{ titre_notif }}"
+              message: >-
+                {{ state_attr(cible, 'friendly_name') or cible }} : indisponible dans Home
+                Assistant, vérifiez que l'Apple TV est branchée et connectée. Unavailable
+                in Home Assistant: check that the Apple TV is plugged in and online.
+          - stop: "Apple TV indisponible"
+      - action: persistent_notification.dismiss
+        continue_on_error: true
+        data:
+          notification_id: tab5_lecteur_playlist
+      # Dès le début : le popup montre l'Apple TV tout de suite (tab5_lecteur_pousser suit
+      # son état), plutôt qu'à la fin, ~3 à 30 s plus tard.
+      - action: input_text.set_value
+        continue_on_error: true
+        target:
+          entity_id: input_text.tab5_lecteur_actif
+        data:
+          value: "{{ cible }}"
+      # En veille : l'allumer. L'état quitte off en 5 à 10 s (mesuré le 18/10/2026). Une
+      # Apple TV qui vient de s'endormir (réveil demandé 4 s après la mise en veille)
+      # ignore ce premier réveil : 20 s sans sortir de off, puis le lien est refusé
+      # (« Open URL failed »). D'où une seconde demande après 10 s sans effet.
+      - if: "{{ states(cible) in ['off', 'standby'] }}"
+        then:
+          - action: media_player.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ cible }}"
+          - wait_template: "{{ states(cible) not in ['off', 'standby'] }}"
+            timeout: "00:00:10"
+            continue_on_timeout: true
+          - if: "{{ not wait.completed }}"
+            then:
+              - action: media_player.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ cible }}"
+              - wait_template: "{{ states(cible) not in ['off', 'standby'] }}"
+                timeout: "00:00:15"
+                continue_on_timeout: true
+      # La playlist : paused (ce qui jouait) en ~1 s, puis playing avec le nouveau titre
+      # ~2-3 s après l'envoi. last_changed change au passage paused → playing.
+      - variables:
+          debut: "{{ now().timestamp() }}"
+      - action: media_player.play_media
+        continue_on_error: true
+        target:
+          entity_id: "{{ cible }}"
+        data:
+          media_content_type: url
+          media_content_id: "{{ url }}"
+      - wait_template: >-
+          {{ is_state(cible, 'playing') and as_timestamp(states[cible].last_changed, 0) > debut | float(0) }}
+        timeout: "00:00:06"
+        continue_on_timeout: true
+      # Toujours pas en lecture : la fenêtre tvOS « Ouvrir dans « YouTube » ? » attend un
+      # OK, ou le titre s'est chargé en pause. « select » valide la fenêtre (sans fenêtre, il
+      # n'affiche que les commandes de YouTube, la lecture continue) ; puis, au besoin,
+      # media_play.
+      - if: "{{ not wait.completed }}"
+        then:
+          - if: "{{ telecommande != '' }}"
+            then:
+              - action: remote.send_command
+                continue_on_error: true
+                target:
+                  entity_id: "{{ telecommande }}"
+                data:
+                  command: select
+          - wait_template: >-
+              {{ is_state(cible, 'playing') and as_timestamp(states[cible].last_changed, 0) > debut | float(0) }}
+            timeout: "00:00:05"
+            continue_on_timeout: true
+          - if: "{{ not wait.completed }}"
+            then:
+              - action: media_player.media_play
+                continue_on_error: true
+                target:
+                  entity_id: "{{ cible }}"

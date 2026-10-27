@@ -1,0 +1,363 @@
+# Usage engine: provider data model shared by every screen, plus the
+# Claude provider (minimal probe POST to /v1/messages, unified rate-limit
+# headers read from the response). Runs in a dedicated FreeRTOS task (the
+# tokentide_poller external component) so the UI never stutters during the
+# request - ESPHome's http_request action would block the main loop for
+# the whole TLS+HTTP round trip.
+# The cleaner GET api/oauth/usage endpoint rejects long-lived
+# setup-tokens with 403 (tested 2026-07-21), so headers it is.
+#
+# Every provider is optional: Claude is off when claude_token is empty,
+# Codex and Gemini are opt-in packages (provider-openai.yaml,
+# provider-gemini.yaml). Screens read, per provider, *_present (configured
+# in this build), *_state, the 5h/7d used percentages, reset epochs and
+# elapsed fractions below. The device status (status_text, status_alert,
+# limit_level, worst_*_pct) covers every present provider and drives the
+# status line of every screen, the LED and the saver: status_text names
+# each provider with a problem, the others fold the providers into one value.
+
+substitutions:
+  # Where the tokentide_poller component comes from. Pinned to the release
+  # tag matching tokentide_version: a new release is a new ref, so the
+  # component cache can never lag behind the packages (mixing a fresh
+  # package with a stale component clone breaks validation). Local dev
+  # entry points override this with the in-repo "components" directory.
+  tokentide_components_source: "github://eldios/tokentide@v${tokentide_version}"
+  # Provider display labels, available to every theme page.
+  claude_label: "Claude"
+  codex_label: "Codex"
+  gemini_label: "Gemini"
+  # Provider colours, the same on every screen: primary accent, dark shade,
+  # light highlight.
+  claude_color: "0xD97757"
+  claude_color_dark: "0x95452F"
+  claude_color_light: "0xF2A88D"
+  codex_color: "0xF1F2E8"
+  codex_color_dark: "0x9CA3AF"
+  codex_color_light: "0xEEE1B5"
+  gemini_color: "0x669DF6"
+  gemini_color_dark: "0x2B5BB5"
+  gemini_color_light: "0xAECBFA"
+
+external_components:
+  - source: ${tokentide_components_source}
+    components: [tokentide_poller]
+    refresh: 1d
+
+globals:
+  # Provider states, shared by every provider: 0 = not configured, 1 = ok,
+  # 2 = auth error, 3 = network/HTTP error, 4 = signed in, no quota data.
+  # Percentages are 0-100 with -1 = unknown (Claude's are the usage_5h /
+  # usage_7d sensors, NaN = unknown), epochs 0 = unknown, elapsed fractions
+  # 0..1 with -1 = unknown.
+  - id: claude_present
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: claude_state
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: reset_5h_epoch
+    type: long
+    restore_value: no
+    initial_value: "0"
+  - id: reset_7d_epoch
+    type: long
+    restore_value: no
+    initial_value: "0"
+  - id: poll_in_flight
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  # Claude's own limit level from the unified status header: 0 = ok, 1 =
+  # near limit (allowed_warning), 2 = limit reached (rejected).
+  - id: claude_limit_level
+    type: int
+    restore_value: no
+    initial_value: "0"
+  # Device status from every present provider, refreshed every second:
+  # limit_level is the worst provider's (same scale as above), status_alert
+  # marks a status that needs attention, worst_*_pct are the highest known
+  # used percentages per window (-1 unknown).
+  - id: limit_level
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: status_text
+    type: std::string
+    restore_value: no
+    initial_value: '"${str_waiting}"'
+  - id: status_alert
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: worst_5h_pct
+    type: float
+    restore_value: no
+    initial_value: "-1"
+  - id: worst_7d_pct
+    type: float
+    restore_value: no
+    initial_value: "-1"
+  # Codex (ChatGPT) and Gemini provider slots: declared here so screens
+  # can reference these ids in every build; the opt-in provider packages
+  # fill them.
+  - id: codex_present
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: codex_5h_pct
+    type: float
+    restore_value: no
+    initial_value: "-1"
+  - id: codex_7d_pct
+    type: float
+    restore_value: no
+    initial_value: "-1"
+  - id: reset_codex_5h_epoch
+    type: long
+    restore_value: no
+    initial_value: "0"
+  - id: reset_codex_7d_epoch
+    type: long
+    restore_value: no
+    initial_value: "0"
+  # Codex reports its window lengths; these defaults hold until it does.
+  - id: window_codex_5h_s
+    type: long
+    restore_value: no
+    initial_value: "18000"
+  - id: window_codex_7d_s
+    type: long
+    restore_value: no
+    initial_value: "604800"
+  - id: codex_state
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: gemini_present
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: gemini_5h_pct
+    type: float
+    restore_value: no
+    initial_value: "-1"
+  - id: gemini_7d_pct
+    type: float
+    restore_value: no
+    initial_value: "-1"
+  - id: reset_gemini_5h_epoch
+    type: long
+    restore_value: no
+    initial_value: "0"
+  - id: reset_gemini_7d_epoch
+    type: long
+    restore_value: no
+    initial_value: "0"
+  - id: gemini_state
+    type: int
+    restore_value: no
+    initial_value: "0"
+  # Time elapsed per window, refreshed every second below.
+  - id: elapsed_5h
+    type: float
+    restore_value: no
+    initial_value: "-1"
+  - id: elapsed_7d
+    type: float
+    restore_value: no
+    initial_value: "-1"
+  - id: elapsed_codex_5h
+    type: float
+    restore_value: no
+    initial_value: "-1"
+  - id: elapsed_codex_7d
+    type: float
+    restore_value: no
+    initial_value: "-1"
+  - id: elapsed_gemini_5h
+    type: float
+    restore_value: no
+    initial_value: "-1"
+  - id: elapsed_gemini_7d
+    type: float
+    restore_value: no
+    initial_value: "-1"
+
+esphome:
+  on_boot:
+    - priority: 750
+      then:
+        - lambda: "id(claude_present) = id(usage_probe)->is_configured();"
+
+sensor:
+  - platform: template
+    id: usage_5h
+    name: "Claude 5h Utilization"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: template
+    id: usage_7d
+    name: "Claude 7d Utilization"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: never
+
+text_sensor:
+  - platform: template
+    id: usage_status
+    name: "Claude Limit Status"
+    update_interval: never
+  - platform: template
+    id: anthropic_status
+    name: "Anthropic Status"
+    entity_category: diagnostic
+    update_interval: never
+
+tokentide_poller:
+  id: usage_probe
+  token: ${claude_token}
+  # Anthropic status page (statuspage.io indicator). "unknown" means the
+  # check itself failed - keep the previous state rather than lying.
+  on_anthropic_status:
+    - lambda: |-
+        if (indicator == "unknown") return;
+        id(anthropic_status).publish_state(indicator);
+        if (indicator == "none") {
+          lv_obj_add_flag(id(status_dot), LV_OBJ_FLAG_HIDDEN);
+        } else {
+          uint32_t color = 0xF5D90A;                       // minor/maintenance
+          if (indicator == "major")    color = 0xF76B15;
+          if (indicator == "critical") color = 0xE5484D;
+          lv_obj_set_style_bg_color(id(status_dot), lv_color_hex(color), 0);
+          lv_obj_clear_flag(id(status_dot), LV_OBJ_FLAG_HIDDEN);
+        }
+  on_result:
+    - lambda: |-
+        // Any response carrying the unified headers is data, whatever the
+        // status code: a probe rejected with 429 at the limit still sends
+        // them (utilization then reads over 100%), and the limit is
+        // exactly when the meter matters. Error paths apply only when the
+        // headers are absent. code -1: Claude is not configured.
+        if (code == -1) {
+          id(claude_state) = tokentide_poller::STATE_OFF;
+        } else if (code == 200 || u5 >= 0 || u7 >= 0) {
+          id(claude_state) = tokentide_poller::STATE_OK;
+          if (u5 >= 0) id(usage_5h).publish_state(u5 * 100.0f);
+          if (u7 >= 0) id(usage_7d).publish_state(u7 * 100.0f);
+          id(reset_5h_epoch) = (long) r5;
+          id(reset_7d_epoch) = (long) r7;
+          // Localized display mapping for the unified status header.
+          if (status == "allowed")              { id(claude_limit_level) = 0; id(usage_status).publish_state("${str_status_ok}"); }
+          else if (status == "allowed_warning") { id(claude_limit_level) = 1; id(usage_status).publish_state("${str_status_warning}"); }
+          else if (status == "rejected")        { id(claude_limit_level) = 2; id(usage_status).publish_state("${str_status_limit}"); }
+          else if (code == 429)                 { id(claude_limit_level) = 2; id(usage_status).publish_state("${str_status_limit}"); }
+          else                                  { id(claude_limit_level) = 0; id(usage_status).publish_state(status.empty() ? "${str_status_ok}" : status); }
+        } else if (code == 401 || code == 403) {
+          // Blank the percentages like the other providers: without a
+          // valid token they are no longer current.
+          id(usage_5h).publish_state(NAN);
+          id(usage_7d).publish_state(NAN);
+          id(claude_state) = tokentide_poller::STATE_AUTH_ERROR;
+          id(usage_status).publish_state("${str_token_error}");
+        } else if (code == 0) {
+          id(claude_state) = tokentide_poller::STATE_NET_ERROR;
+          id(usage_status).publish_state("${str_net_error}");
+        } else {
+          id(claude_state) = tokentide_poller::STATE_NET_ERROR;
+          id(usage_status).publish_state("HTTP " + to_string(code));
+        }
+        id(poll_in_flight) = false;
+
+script:
+  - id: update_status
+    then:
+      - lambda: |-
+          using namespace tokentide_poller;
+          auto pct = [](float v) -> float { return std::isnan(v) ? -1.0f : v; };
+          ProviderReading p[3];
+          p[0] = { id(claude_present), id(claude_state), id(claude_limit_level),
+                   pct(id(usage_5h).state), pct(id(usage_7d).state), id(elapsed_5h), id(elapsed_7d) };
+          p[1] = { id(codex_present), id(codex_state), -1,
+                   id(codex_5h_pct), id(codex_7d_pct), id(elapsed_codex_5h), id(elapsed_codex_7d) };
+          p[2] = { id(gemini_present), id(gemini_state), -1,
+                   id(gemini_5h_pct), id(gemini_7d_pct), id(elapsed_gemini_5h), id(elapsed_gemini_7d) };
+          StatusSummary s = summarize_providers(p, 3);
+          id(limit_level) = s.limit_level;
+          id(worst_5h_pct) = s.worst_5h;
+          id(worst_7d_pct) = s.worst_7d;
+          // Every provider with a problem, most severe first, each named:
+          // "Gemini: limit reached | Claude: token expired".
+          static const char *const names[3] = { "${claude_label}", "${codex_label}", "${gemini_label}" };
+          ProviderProblem probs[3];
+          int n = provider_problems(p, 3, probs);
+          std::string txt;
+          for (int i = 0; i < n; i++) {
+            const char *msg = "";
+            switch (probs[i].status) {
+              case STATUS_LIMIT:       msg = "${str_status_limit}"; break;
+              case STATUS_TOKEN_ERROR: msg = "${str_token_error}"; break;
+              // Claude's own error text carries the HTTP code when there is one.
+              case STATUS_NET_ERROR:
+                msg = probs[i].provider == 0 && id(usage_status).has_state()
+                    ? id(usage_status).state.c_str() : "${str_net_error}";
+                break;
+              case STATUS_NEAR_LIMIT:
+              case STATUS_OFF_PACE:    msg = "${str_status_warning}"; break;
+              default:                 break;
+            }
+            if (i > 0) txt += " | ";
+            txt += names[probs[i].provider];
+            txt += ": ";
+            txt += msg;
+          }
+          if (n == 0) {
+            switch (s.status) {
+              case STATUS_OK:      txt = "${str_status_ok}"; break;
+              case STATUS_NO_DATA: txt = "${str_no_data}"; break;
+              default:             txt = "${str_waiting}"; break;
+            }
+          }
+          if (id(poll_in_flight)) txt = "${str_refreshing}";
+          id(status_text) = txt;
+          id(status_alert) = !id(poll_in_flight) && s.status >= STATUS_OFF_PACE;
+  - id: poll_usage
+    mode: single
+    then:
+      - lambda: "id(poll_in_flight) = true;"
+      - script.execute: update_status
+      - tokentide_poller.poll: usage_probe
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          using namespace tokentide_poller;
+          auto now = id(sntp_time).now();
+          int64_t t = now.is_valid() ? (int64_t) now.timestamp : 0;
+          id(elapsed_5h) = window_elapsed(id(reset_5h_epoch), WINDOW_5H_S, t);
+          id(elapsed_7d) = window_elapsed(id(reset_7d_epoch), WINDOW_7D_S, t);
+          id(elapsed_codex_5h) = window_elapsed(id(reset_codex_5h_epoch), id(window_codex_5h_s), t);
+          id(elapsed_codex_7d) = window_elapsed(id(reset_codex_7d_epoch), id(window_codex_7d_s), t);
+          id(elapsed_gemini_5h) = window_elapsed(id(reset_gemini_5h_epoch), WINDOW_5H_S, t);
+          id(elapsed_gemini_7d) = window_elapsed(id(reset_gemini_7d_epoch), WINDOW_7D_S, t);
+          id(update_status).execute();
+  - interval: ${poll_interval}s
+    startup_delay: 15s
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - script.execute: poll_usage
+  - interval: 15min
+    startup_delay: 90s
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - tokentide_poller.check_status: usage_probe

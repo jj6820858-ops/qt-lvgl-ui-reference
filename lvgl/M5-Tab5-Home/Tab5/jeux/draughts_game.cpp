@@ -1,0 +1,1237 @@
+/**
+ * [AI-CONTEXT]
+ * @file draughts_game.cpp
+ * @role Jeu « Dames Tab » — UI LVGL, NVS, orchestration IA. Les règles (génération
+ *      des coups, application, nulles) sont dans draughts_engine.cpp, moteur pur
+ *      testé sur PC (tools/test_draughts_engine.cpp).
+ * @architecture_constraint Plein écran 1280×720. Widgets PRÉALLOUÉS à chaque
+ *      ouverture (pool), réutilisés par show/hide. Jeu fermé, il ne reste rien :
+ *      objets LVGL détruits, état rendu (struct Mem / Cold ici, idem pour l'IA ;
+ *      audit du 26/09/2026, lot 4). Hot-path
+ *      timer : pas de std::string / to_string. Pièces capturées retirées en FIN
+ *      de rafle (FMJD). Flying kings = international uniquement.
+ * @ai_instruction RèglesInternational10 ≠ RulesEnglish8 — branchement via
+ *      Pos.variant. ai_step() via Ai::step(), jamais de recherche bloquante.
+ */
+#include "draughts_game.h"
+#include "game_common.h"
+#include "draughts_ai.h"
+#include "esphome/core/preferences.h"
+#include "esphome/components/lvgl/lvgl_esphome.h"
+#include <cstdio>
+#include <cstring>
+#include <cmath>
+#include <cstdint>
+
+namespace Draughts {
+
+using Engine::Pos;
+using Engine::Move;
+using Engine::Piece;
+using Engine::Side;
+using Engine::Variant;
+using Engine::MAX_N;
+using Engine::MAX_SQ;
+using Engine::MAX_MOVES;
+using Engine::EMPTY;
+using Engine::W_MAN;
+using Engine::W_KING;
+using Engine::B_MAN;
+using Engine::B_KING;
+using Engine::SIDE_WHITE;
+using Engine::SIDE_BLACK;
+using Engine::VAR_INTL10;
+using Engine::VAR_ENG8;
+
+// Pièces, couronnes et surbrillances n'existent que sur les cases foncées : 50 sur
+// 100, 5 par rangée (audit ressources du 26/09/2026, lot 5 — 150 objets LVGL de
+// moins). dark_slot() : index de case de la grille MAX_N -> 0..49, ou -1 (claire).
+// Un damier 8×8 occupe le coin haut-gauche de la grille : sous-ensemble exact.
+static constexpr int MAX_DARK = MAX_SQ / 2;
+static inline int dark_slot(int wi) {
+    const int r = wi / MAX_N, c = wi % MAX_N;
+    return Engine::is_dark_sq(r, c) ? r * (MAX_N / 2) + c / 2 : -1;
+}
+
+// "DAM1"
+static constexpr uint32_t SAVE_MAGIC = 0x44414D31u;
+static constexpr uint32_t PREF_KEY   = 0x44414D54u;  // "DAMT"
+
+// ===========================================================================
+// État UI / partie
+// ===========================================================================
+
+enum UiState : uint8_t {
+    ST_OFF = 0,
+    ST_HUB,
+    ST_SETUP,
+    ST_PLAYING,
+    ST_THINKING,
+    ST_GAMEOVER,
+    ST_STATS,
+    ST_SETTINGS,
+    ST_CONFIRM_RESET
+};
+
+// Ce qui reste global jeu fermé, et rien d'autre :
+// - l'état ouvert/fermé, lu par le registre (tab5_registry.cpp) ;
+static UiState g_state = ST_OFF;
+// - le slot NVS : le recréer à chaque ouverture ferait fuir un backend de préférences ;
+static NvsSlot<DraughtsSave> g_nvs(PREF_KEY, SAVE_MAGIC);
+// - IMU shake : on_imu() met à jour l'échantillon précédent même jeu fermé (le
+//   registre l'appelle pour tous les jeux) ; repartir de (0, 0, 1) à l'ouverture
+//   pourrait faire passer le premier écart pour une secousse (faux indice) ;
+static float g_imu_ax = 0, g_imu_ay = 0, g_imu_az = 1;
+// - l'anti-rebond de la secousse (800 ms), qui court d'une ouverture à l'autre.
+static uint32_t g_last_shake_ms = 0;
+
+static constexpr int HIST_MAX = 24;   // historique coups (notation)
+static constexpr int UNDO_MAX = 32;   // pile d'annulation
+static constexpr int N_SLOTS = 6;     // panel menus (slots)
+// Empreintes de répétition : au plus 80 demi-coups (nulle anglaise) + le départ.
+static constexpr int REP_MAX = 82;
+
+// Tout le reste n'existe que jeu ouvert : créé par open(), rendu par close(),
+// avec les objets LVGL qu'il pointe (game_common.h, « Mémoire d'un jeu »).
+struct Mem {
+    UI ui;
+    lv_timer_t* timer = nullptr;
+    DraughtsSave save{};  // relue de la NVS à chaque ouverture
+
+    Pos pos;
+    int  n_legal = 0;            // coups de Cold::legal
+    int  sel = -1;               // case sélectionnée (−1 = aucune)
+    int  hint_from = -1, hint_to = -1;
+    uint32_t hint_until = 0;
+    int  winner = -1;            // 0/1/2
+    char status[64] = "";
+
+    // Setup brouillon (avant Nouvelle partie)
+    uint8_t cfg_variant = 0;
+    uint8_t cfg_mode = 0;
+    uint8_t cfg_human = 0;
+    uint8_t cfg_level = 1;
+
+    // Historique coups (notation)
+    char hist[HIST_MAX][12];
+    int  hist_n = 0;
+
+    // Undo : nombre de positions de Cold::undo
+    int undo_n = 0;
+
+    // Animation capture fade
+    int fade_sq[Engine::MAX_CAPS];
+    int fade_n = 0;
+    uint32_t fade_until = 0;
+
+    // Géométrie damier
+    int board_n = 10;
+    int cell = 60;
+    int board_x = 40;
+    int board_y = 26;
+    int panel_x = 980;
+
+    // Widgets préalloués (à chaque ouverture). Cases : grille MAX_N complète ;
+    // pièces, couronnes et surbrillances : cases foncées seules (dark_slot).
+    lv_obj_t* sq_obj[MAX_SQ] = {};
+    lv_obj_t* piece_obj[MAX_DARK] = {};
+    lv_obj_t* king_ring[MAX_DARK] = {};
+    lv_obj_t* hl_obj[MAX_DARK] = {};
+    // Ce que chaque case foncée affiche (clé de sync_pieces, 0 = rien). Sans lui,
+    // chaque coup restylait les 40 pièces : plus de 32 zones à redessiner, et LVGL
+    // repeignait alors tout l'écran (LV_INV_BUF_SIZE, lv_refr.c).
+    uint8_t drawn[MAX_DARK] = {};
+    lv_obj_t* side_panel = nullptr;
+    lv_obj_t* btn_undo = nullptr;
+    lv_obj_t* btn_hint = nullptr;
+    lv_obj_t* hud_trait = nullptr;
+    lv_obj_t* hud_var = nullptr;
+    lv_obj_t* hud_lvl = nullptr;
+    lv_obj_t* hud_cap = nullptr;
+    lv_obj_t* hud_status = nullptr;
+    lv_obj_t* hist_lbl[8] = {};
+    lv_obj_t* side_btns[4] = {};
+    lv_obj_t* side_btns_l[4] = {};
+
+    // Panel menus (slots)
+    SlotMenu<N_SLOTS> slots;   // game_common.h
+    lv_obj_t* p_title = nullptr;
+    lv_obj_t* p_sub = nullptr;
+
+    // Triple répétition (voir rep_record())
+    uint32_t rep[REP_MAX];
+    int rep_n = 0;
+    // Sous-titre de l'écran de fin si nulle : clé française (tr_noop), traduite à
+    // l'affichage par go_gameover().
+    const char* draw_reason = nullptr;
+};
+
+// Tampons froids, touchés une fois par coup : bloc COLD (PSRAM d'abord), comme
+// l'ancien EXT_RAM_BSS_ATTR.
+struct Cold {
+    // Coups legaux de l'interface (4,7 Ko) : recalcules une fois par coup,
+    // l'IA a ses propres tampons.
+    Move legal[MAX_MOVES];
+    // Undo : pile de positions (+ historique count)
+    Pos undo[UNDO_MAX];
+};
+static Mem*  gs = nullptr;
+static Cold* gc = nullptr;
+
+// ===========================================================================
+// NVS
+// ===========================================================================
+
+void persist_load() {
+    if (!gs) return;  // la sauvegarde n'est en mémoire que jeu ouvert
+    if (!g_nvs.load(gs->save)) {
+        gs->save = DraughtsSave{};
+        gs->save.magic = SAVE_MAGIC;
+        gs->save.variant = VAR_INTL10;
+        gs->save.mode = 0;
+        gs->save.human_color = SIDE_WHITE;
+        gs->save.ai_level = Ai::LVL_AMATEUR;
+        gs->save.imu_hint = 1;
+    }
+    gs->cfg_variant = gs->save.variant;
+    gs->cfg_mode = gs->save.mode;
+    gs->cfg_human = gs->save.human_color;
+    gs->cfg_level = gs->save.ai_level;
+}
+
+void persist_save() {
+    if (!gs || !g_nvs.ready()) return;
+    gs->save.variant = gs->cfg_variant;
+    gs->save.mode = gs->cfg_mode;
+    gs->save.human_color = gs->cfg_human;
+    gs->save.ai_level = gs->cfg_level;
+    g_nvs.save(gs->save);
+}
+
+static void save_position() {
+    gs->save.has_game = 1;
+    gs->save.side = gs->pos.side;
+    gs->save.must_from = gs->pos.must_from;
+    gs->save.board_n = gs->pos.n;
+    gs->save.no_progress = gs->pos.no_progress;
+    gs->save.setup_variant = gs->pos.variant;
+    gs->save.setup_mode = gs->cfg_mode;
+    gs->save.setup_human = gs->cfg_human;
+    gs->save.setup_level = gs->cfg_level;
+    memset(gs->save.board, 0, sizeof(gs->save.board));
+    memcpy(gs->save.board, gs->pos.sq, (size_t)(gs->pos.n * gs->pos.n));
+    persist_save();
+}
+
+static void clear_saved_game() {
+    gs->save.has_game = 0;
+    persist_save();
+}
+
+// Triple répétition (FFJD/FMJD) : empreintes des positions (cases + trait) depuis le
+// dernier coup irréversible — prise ou coup de pion, après lesquels aucune position
+// antérieure ne peut revenir. Au plus 80 demi-coups (nulle anglaise) + le départ
+// (REP_MAX ; empreintes dans Mem::rep).
+
+static uint32_t pos_hash(const Pos& p) {
+    uint32_t h = 2166136261u;  // FNV-1a
+    const int N = p.n * p.n;
+    for (int i = 0; i < N; i++) { h ^= p.sq[i]; h *= 16777619u; }
+    h ^= p.side;
+    h *= 16777619u;
+    return h;
+}
+
+// À appeler après chaque coup appliqué à Mem::pos, et sur la position de départ.
+static void rep_record() {
+    if (gs->pos.no_progress == 0) gs->rep_n = 0;
+    if (gs->rep_n < REP_MAX) gs->rep[gs->rep_n++] = pos_hash(gs->pos);
+}
+
+static bool rep_threefold() {
+    if (gs->rep_n == 0) return false;
+    const uint32_t h = gs->rep[gs->rep_n - 1];
+    int seen = 0;
+    for (int i = 0; i < gs->rep_n; i++)
+        if (gs->rep[i] == h) seen++;
+    return seen >= 3;
+}
+
+static bool load_position() {
+    if (!gs->save.has_game) return false;
+    if (gs->save.board_n != 8 && gs->save.board_n != 10) return false;
+    memset(&gs->pos, 0, sizeof(gs->pos));
+    gs->pos.n = gs->save.board_n;
+    gs->pos.variant = gs->save.setup_variant;
+    gs->pos.side = gs->save.side;
+    gs->pos.must_from = gs->save.must_from;
+    gs->pos.no_progress = gs->save.no_progress;
+    memcpy(gs->pos.sq, gs->save.board, (size_t)(gs->pos.n * gs->pos.n));
+    // Le compteur de fin de partie réduite n'est pas sauvegardé (layout NVS inchangé) :
+    // il repart de zéro à la reprise, ce qui ne peut que retarder la nulle.
+    Engine::refresh_endgame(gs->pos);
+    gs->cfg_variant = gs->save.setup_variant;
+    gs->cfg_mode = gs->save.setup_mode;
+    gs->cfg_human = gs->save.setup_human;
+    gs->cfg_level = gs->save.setup_level;
+    return true;
+}
+
+static void record_result(int winner) {
+    // Stats vs Tab seulement
+    if (gs->cfg_mode != 0) return;
+    uint8_t v = gs->pos.variant;
+    uint8_t lv = gs->cfg_level;
+    if (v >= DRAUGHTS_N_VARIANTS || lv >= DRAUGHTS_N_LEVELS) return;
+    // winner 0=blancs, 1=noirs, 2=nulle — du point de vue humain
+    if (winner == 2) {
+        gs->save.draws[v][lv]++;
+    } else {
+        bool human_white = (gs->cfg_human == SIDE_WHITE);
+        bool human_won = human_white ? (winner == 0) : (winner == 1);
+        if (human_won) gs->save.wins[v][lv]++;
+        else gs->save.losses[v][lv]++;
+    }
+    clear_saved_game();
+}
+
+// ===========================================================================
+// Helpers LVGL
+// ===========================================================================
+
+
+
+
+
+
+
+static void panel_on(bool on) { show(gs->ui.panel, on); }
+
+// Entrée de menu à position fixe (build_ui) ; `on` = false la masque.
+static void slot_list(int i, const char* title, const char* desc, uint32_t col, bool on) {
+    if (i < 0 || i >= N_SLOTS) return;
+    show(gs->slots.box[i], on);
+    if (!on) return;
+    set_text_if(gs->slots.title[i], title);
+    set_text_if(gs->slots.desc[i], desc);
+    lv_obj_set_style_text_color(gs->slots.title[i], lv_color_hex(col), LV_PART_MAIN);
+    set_border(gs->slots.box[i], col, 2, LV_OPA_50);
+}
+
+// Noms affichés, déjà traduits (tr) : ne servent qu'à l'écran.
+static const char* level_name(uint8_t lv) {
+    switch (lv) {
+        case 0: return tr("Débutant");
+        case 1: return tr("Amateur");
+        case 2: return tr("Confirmé");
+        case 3: return tr("Expert");
+        default: return "?";
+    }
+}
+static const char* variant_name(uint8_t v) {
+    return tr(v == VAR_ENG8 ? "Anglaises 8×8" : "Internationales 10×10");
+}
+static const char* mode_name(uint8_t m) {
+    switch (m) {
+        case 0: return tr("Joueur contre Tab");
+        case 1: return tr("Joueur contre joueur");
+        case 2: return tr("Tab contre Tab");
+        default: return "?";
+    }
+}
+
+static void sq_to_name(int sq, int n, char* buf, int buflen) {
+    int r = sq / n, c = sq % n;
+    // Rang 1 en bas (blancs)
+    int rank = n - r;
+    // rank vaut 1..10 : le modulo borne l'analyse du compilateur (-Wformat-truncation)
+    snprintf(buf, buflen, "%c%u", (char)('a' + c), (unsigned) rank % 100u);
+}
+
+static void move_to_notation(const Move& m, int n, char* buf, int buflen) {
+    char a[4], b[4];  // « a10 » au plus (n <= 10) : borne connue du compilateur, pas de -Wformat-truncation
+    sq_to_name(m.from, n, a, sizeof(a));
+    sq_to_name(m.to, n, b, sizeof(b));
+    if (m.n_caps > 0) snprintf(buf, buflen, "%sx%s", a, b);
+    else snprintf(buf, buflen, "%s-%s", a, b);
+}
+
+// ===========================================================================
+// Layout damier
+// ===========================================================================
+
+static void compute_layout() {
+    gs->board_n = gs->pos.n;
+    // Panneau latéral 280 px ; damier centré dans le reste
+    gs->panel_x = 1280 - 300;
+    int avail_w = gs->panel_x - 20;
+    int avail_h = 672 - 16;
+    int cell_w = avail_w / gs->board_n;
+    int cell_h = avail_h / gs->board_n;
+    gs->cell = cell_w < cell_h ? cell_w : cell_h;
+    if (gs->cell > 64) gs->cell = 64;
+    if (gs->cell < 40) gs->cell = 40;
+    int bw = gs->cell * gs->board_n;
+    int bh = gs->cell * gs->board_n;
+    gs->board_x = (avail_w - bw) / 2 + 10;
+    gs->board_y = (672 - bh) / 2;
+}
+
+static void layout_squares() {
+    compute_layout();
+    const int n = gs->board_n;
+    for (int r = 0; r < MAX_N; r++) {
+        for (int c = 0; c < MAX_N; c++) {
+            int i = r * MAX_N + c;  // widgets indexés 10×10 max
+            // Remap : on utilise idx r*n+c pour la logique, widgets sur grille MAX_N
+            int wi = r * MAX_N + c;
+            bool used = (r < n && c < n);
+            show(gs->sq_obj[wi], used);
+            const int d = dark_slot(wi);
+            if (d >= 0) {
+                show(gs->hl_obj[d], false);
+                show(gs->piece_obj[d], false);
+                show(gs->king_ring[d], false);
+                gs->drawn[d] = 0;   // pièce masquée : la prochaine sync la restyle
+            }
+            if (!used) continue;
+            int x = gs->board_x + c * gs->cell;
+            int y = gs->board_y + r * gs->cell;
+            lv_obj_set_pos(gs->sq_obj[wi], x, y);
+            lv_obj_set_size(gs->sq_obj[wi], gs->cell - 1, gs->cell - 1);
+            bool dark = Engine::is_dark_sq(r, c);
+            set_bg(gs->sq_obj[wi], dark ? Pal::DARK_SQ : Pal::LIGHT_SQ, LV_OPA_COVER);
+            if (d < 0) continue;   // case claire : ni pièce ni surbrillance
+
+            lv_obj_set_pos(gs->hl_obj[d], x + 2, y + 2);
+            lv_obj_set_size(gs->hl_obj[d], gs->cell - 5, gs->cell - 5);
+
+            int pr = (gs->cell - 1) / 2 - 4;
+            if (pr < 10) pr = 10;
+            int px = x + (gs->cell - 1 - 2 * pr) / 2;
+            int py = y + (gs->cell - 1 - 2 * pr) / 2;
+            lv_obj_set_pos(gs->piece_obj[d], px, py);
+            lv_obj_set_size(gs->piece_obj[d], 2 * pr, 2 * pr);
+            lv_obj_set_style_radius(gs->piece_obj[d], LV_RADIUS_CIRCLE, LV_PART_MAIN);
+
+            lv_obj_set_pos(gs->king_ring[d], px + 3, py + 3);
+            lv_obj_set_size(gs->king_ring[d], 2 * pr - 6, 2 * pr - 6);
+            lv_obj_set_style_radius(gs->king_ring[d], LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        }
+    }
+    if (gs->side_panel) {
+        lv_obj_set_pos(gs->side_panel, gs->panel_x, 8);
+        lv_obj_set_size(gs->side_panel, 288, 656);
+    }
+    if (gs->btn_undo) {
+        // 96 px : « Annuler » (75 px en roboto_22) ; le damier commence à x 170 (10×10).
+        lv_obj_set_pos(gs->btn_undo, 8, 280);
+        lv_obj_set_size(gs->btn_undo, 96, 120);
+    }
+    if (gs->btn_hint) {
+        lv_obj_set_pos(gs->btn_hint, gs->panel_x - 104, 280);
+        lv_obj_set_size(gs->btn_hint, 96, 120);
+    }
+}
+
+static int widget_i(int r, int c) { return r * MAX_N + c; }
+
+// Ne restyle que les cases dont le contenu a changé (clé drawn[]) : un coup en
+// touche 2 à 3, plus les prises.
+static void sync_pieces() {
+    const int n = gs->pos.n;
+    const bool fade_on = gs->fade_n > 0 && esphome::millis() < gs->fade_until;
+    for (int wi = 0; wi < MAX_SQ; wi++) {
+        const int d = dark_slot(wi);
+        if (d < 0) continue;   // case claire : jamais de pièce
+        const int r = wi / MAX_N, c = wi % MAX_N;
+        uint8_t key = 0;       // 0 = case vide (ou hors damier 8×8) : rien d'affiché
+        uint8_t pc = EMPTY;
+        bool fading = false;   // pièce prise, encore visible 180 ms
+        int i = -1;
+        if (r < n && c < n) {
+            i = r * n + c;
+            pc = gs->pos.sq[i];
+            if (fade_on)
+                for (int k = 0; k < gs->fade_n; k++) if (gs->fade_sq[k] == i) fading = true;
+            if (pc != EMPTY || fading) {
+                const bool w = (pc != EMPTY) && Engine::is_white(pc);  // prise : pion sombre
+                key = (uint8_t)(1 | (w << 1) | (Engine::is_king(pc) << 2) |
+                                (fading << 3) | ((i == gs->sel) << 4));
+            }
+        }
+        if (key == gs->drawn[d]) continue;
+        gs->drawn[d] = key;
+        if (key == 0) {
+            show(gs->piece_obj[d], false);
+            show(gs->king_ring[d], false);
+            continue;
+        }
+        const bool white = key & 2, king = key & 4;
+        set_bg(gs->piece_obj[d], white ? Pal::PIECE_W : Pal::PIECE_B, fading ? LV_OPA_50 : LV_OPA_COVER);
+        set_border(gs->piece_obj[d], white ? Pal::PIECE_W_RIM : Pal::PIECE_B_RIM, 2, LV_OPA_COVER);
+        show(gs->piece_obj[d], true);
+        show(gs->king_ring[d], king);
+        if (king) {
+            set_bg(gs->king_ring[d], 0, LV_OPA_TRANSP);
+            set_border(gs->king_ring[d], Pal::KING_RING, 3, LV_OPA_COVER);
+        }
+        if (i == gs->sel) set_border(gs->piece_obj[d], Pal::HL_SEL, 3, LV_OPA_COVER);
+    }
+}
+
+static void clear_highlights() {
+    for (int d = 0; d < MAX_DARK; d++) show(gs->hl_obj[d], false);
+}
+
+// Surbrillance de la case (r, c) du damier courant ; nullptr pour une case claire
+// (show/set_bg l'ignorent).
+static lv_obj_t* hl_at(int r, int c) {
+    const int d = dark_slot(widget_i(r, c));
+    return d < 0 ? nullptr : gs->hl_obj[d];
+}
+
+static void show_highlights_for_sel() {
+    clear_highlights();
+    if (gs->sel < 0) return;
+    const int n = gs->pos.n;
+    for (int i = 0; i < gs->n_legal; i++) {
+        if (gc->legal[i].from != (uint8_t)gs->sel) continue;
+        // Surbrille chaque étape du path pour rafles guidées
+        for (int k = 0; k < gc->legal[i].n_path; k++) {
+            int sq = gc->legal[i].path[k];
+            lv_obj_t* h = hl_at(sq / n, sq % n);
+            set_bg(h, gc->legal[i].n_caps ? Pal::HL_CAP : Pal::HL_MOVE, LV_OPA_60);
+            show(h, true);
+        }
+    }
+    if (gs->hint_from >= 0 && esphome::millis() < gs->hint_until) {
+        lv_obj_t* h = hl_at(gs->hint_from / n, gs->hint_from % n);
+        set_bg(h, Pal::HL_SEL, LV_OPA_70);
+        show(h, true);
+        h = hl_at(gs->hint_to / n, gs->hint_to % n);
+        set_bg(h, Pal::HL_MOVE, LV_OPA_80);
+        show(h, true);
+    }
+}
+
+static void refresh_legal() {
+    gs->n_legal = Engine::gen_moves(gs->pos, gc->legal, MAX_MOVES);
+}
+
+static void update_hud() {
+    char buf[48];
+    const char* side = tr((gs->pos.side == SIDE_WHITE) ? "Blancs" : "Noirs");
+    if (g_state == ST_THINKING) snprintf(buf, sizeof(buf), "%s", tr("Le Tab réfléchit..."));
+    else snprintf(buf, sizeof(buf), tr("Trait : %s"), side);
+    set_text_if(gs->hud_trait, buf);
+    set_text_if(gs->hud_var, variant_name(gs->pos.variant));
+    snprintf(buf, sizeof(buf), tr("IA : %s"), level_name(gs->cfg_level));
+    set_text_if(gs->hud_lvl, buf);
+
+    int max_cap = 0;
+    for (int i = 0; i < gs->n_legal; i++)
+        if (gc->legal[i].n_caps > max_cap) max_cap = gc->legal[i].n_caps;
+    if (max_cap > 0) snprintf(buf, sizeof(buf), tr("Prise x%d"), max_cap);
+    else snprintf(buf, sizeof(buf), "—");
+    set_text_if(gs->hud_cap, buf);
+    set_text_if(gs->hud_status, gs->status);
+}
+
+static void update_hist_panel() {
+    for (int i = 0; i < 8; i++) {
+        int src = gs->hist_n - 8 + i;
+        if (src < 0) set_text_if(gs->hist_lbl[i], "");
+        else set_text_if(gs->hist_lbl[i], gs->hist[src]);
+    }
+}
+
+static void push_hist(const Move& m) {
+    char buf[12];
+    move_to_notation(m, gs->pos.n, buf, sizeof(buf));
+    if (gs->hist_n < HIST_MAX) {
+        memcpy(gs->hist[gs->hist_n], buf, sizeof(buf));   // même taille (12) : pas de strncpy tronquant
+        gs->hist[gs->hist_n][11] = 0;
+        gs->hist_n++;
+    } else {
+        for (int i = 1; i < HIST_MAX; i++) memcpy(gs->hist[i - 1], gs->hist[i], 12);
+        memcpy(gs->hist[HIST_MAX - 1], buf, sizeof(buf));
+        gs->hist[HIST_MAX - 1][11] = 0;
+    }
+    update_hist_panel();
+}
+
+static void push_undo() {
+    if (gs->undo_n < UNDO_MAX) gc->undo[gs->undo_n++] = gs->pos;
+    else {
+        for (int i = 1; i < UNDO_MAX; i++) gc->undo[i - 1] = gc->undo[i];
+        gc->undo[UNDO_MAX - 1] = gs->pos;
+    }
+}
+
+// ===========================================================================
+// Déclarations forward UI
+// ===========================================================================
+static void go_hub();
+static void go_setup();
+static void go_stats();
+static void go_settings();
+static void go_gameover();
+static void start_new_game();
+static void resume_game();
+static void enter_playing();
+static void after_human_or_ai_move();
+static void try_start_ai();
+static void apply_player_move(const Move& m);
+static void do_undo();
+static void do_hint();
+static bool is_human_turn();
+
+static bool is_human_turn() {
+    if (gs->cfg_mode == 1) return true;                 // PvP
+    if (gs->cfg_mode == 2) return false;                // TvT
+    // PvT
+    return gs->pos.side == gs->cfg_human;
+}
+
+// ===========================================================================
+// Menus
+// ===========================================================================
+
+static void go_hub() {
+    g_state = ST_HUB;
+    Ai::abort();
+    panel_on(true);
+    set_text_if(gs->p_title, "Dames Tab");   // nom de la console : jamais traduit
+    set_text_if(gs->p_sub, tr("Dames internationales — dames volantes"));
+    slot_list(0, tr("Nouvelle partie"), tr("Variante, mode, niveau"), Pal::KING_RING, true);
+    // Sans sauvegarde, l'entrée reste là, grisée (slot_cb l'ignore) : masquée, elle
+    // laissait un trou dans le menu (vu sur le rendu hors tablette, 27/09/2026).
+    slot_list(1, tr(gs->save.has_game ? "Reprendre" : "Reprendre (vide)"),
+              tr(gs->save.has_game ? "Position sauvegardée" : "Aucune partie en cours"),
+              gs->save.has_game ? Pal::HL_MOVE : Pal::TXT_OFF, true);
+    slot_list(2, tr("Statistiques"), tr("Victoires, nulles, défaites contre le Tab"), Pal::HL_CAP, true);
+    slot_list(3, tr("Réglages"), tr("Secousse = indice, remise à zéro des stats"), Pal::TXT_DIM, true);
+    slot_list(4, tr("Quitter"), tr("Retour au tableau de bord"), Pal::DANGER, true);
+    gs->slots.hide_from(5);
+}
+
+static void go_setup() {
+    g_state = ST_SETUP;
+    panel_on(true);
+    set_text_if(gs->p_title, tr("Nouvelle partie"));
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%s · %s", variant_name(gs->cfg_variant), mode_name(gs->cfg_mode));
+    set_text_if(gs->p_sub, buf);
+    slot_list(0, variant_name(gs->cfg_variant), tr("Touchez : internationales 10×10 ou anglaises 8×8"), Pal::LIGHT_SQ, true);
+    slot_list(1, mode_name(gs->cfg_mode), tr("Joueur contre Tab / contre joueur / Tab contre Tab"), Pal::HL_MOVE, true);
+    snprintf(buf, sizeof(buf), tr("Vous jouez les %s"), tr(gs->cfg_human == 0 ? "Blancs" : "Noirs"));
+    slot_list(2, buf, tr("Couleur (contre le Tab)"), Pal::PIECE_W, gs->cfg_mode == 0);
+    slot_list(3, level_name(gs->cfg_level), tr("Niveau IA"), Pal::KING_RING, gs->cfg_mode != 1);
+    slot_list(4, tr("Jouer !"), tr("Lance la partie"), Pal::HL_CAP, true);
+    slot_list(5, tr("Retour"), "", Pal::TXT_DIM, true);
+}
+
+static void go_stats() {
+    g_state = ST_STATS;
+    panel_on(true);
+    set_text_if(gs->p_title, tr("Statistiques"));
+    set_text_if(gs->p_sub, tr("Bilan contre le Tab (par variante et niveau)"));
+    char buf[72];
+    uint8_t v = gs->cfg_variant;
+    for (int lv = 0; lv < 4; lv++) {
+        snprintf(buf, sizeof(buf), tr("%s — %u V · %u N · %u D"),
+                 level_name((uint8_t)lv),
+                 (unsigned)gs->save.wins[v][lv],
+                 (unsigned)gs->save.draws[v][lv],
+                 (unsigned)gs->save.losses[v][lv]);
+        slot_list(lv, buf, variant_name(v), Pal::TXT, true);
+    }
+    slot_list(4, tr("Changer de variante"), variant_name(v), Pal::HL_MOVE, true);
+    slot_list(5, tr("Retour"), "", Pal::TXT_DIM, true);
+}
+
+static void go_settings() {
+    g_state = ST_SETTINGS;
+    panel_on(true);
+    set_text_if(gs->p_title, tr("Réglages"));
+    set_text_if(gs->p_sub, tr("Options locales (NVS)"));
+    slot_list(0, tr(gs->save.imu_hint ? "Secousse = indice : ACTIVÉE" : "Secousse = indice : DÉSACTIVÉE"),
+              "IMU BMI270", Pal::HL_MOVE, true);
+    slot_list(1, tr("Remettre les statistiques à zéro"), tr("Demande confirmation"), Pal::DANGER, true);
+    slot_list(2, tr("Retour"), "", Pal::TXT_DIM, true);
+    gs->slots.hide_from(3);
+}
+
+static void go_gameover() {
+    g_state = ST_GAMEOVER;
+    panel_on(true);
+    const char* msg = tr_noop("Partie nulle");
+    if (gs->winner == 0) msg = tr_noop("Victoire des Blancs");
+    else if (gs->winner == 1) msg = tr_noop("Victoire des Noirs");
+    set_text_if(gs->p_title, tr(msg));
+    char buf[64];
+    // Une nulle dit pourquoi : sans raison affichée, la règle des 25 coups passait
+    // pour un bug (partie « finie sans raison », 25/09/2026).
+    if (gs->winner == 2 && gs->draw_reason != nullptr)
+        snprintf(buf, sizeof(buf), "%s", tr(gs->draw_reason));
+    else
+        snprintf(buf, sizeof(buf), "%s · %s", variant_name(gs->pos.variant), mode_name(gs->cfg_mode));
+    set_text_if(gs->p_sub, buf);
+    slot_list(0, tr("Revanche"), tr("Mêmes réglages"), Pal::KING_RING, true);
+    slot_list(1, "Hub", tr("Menu principal"), Pal::TXT_DIM, true);   // « Hub » : déjà anglais
+    gs->slots.hide_from(2);
+}
+
+static void start_new_game() {
+    Engine::pos_init(gs->pos, (Variant)gs->cfg_variant);
+    gs->hist_n = 0;
+    gs->undo_n = 0;
+    gs->rep_n = 0;
+    rep_record();
+    gs->sel = -1;
+    gs->hint_from = -1;
+    gs->winner = -1;
+    gs->fade_n = 0;
+    snprintf(gs->status, sizeof(gs->status), "%s", tr("Nouvelle partie"));
+    layout_squares();
+    enter_playing();
+    save_position();
+}
+
+static void resume_game() {
+    if (!load_position()) { go_hub(); return; }
+    gs->hist_n = 0;
+    gs->undo_n = 0;
+    gs->rep_n = 0;   // les positions d'avant la sauvegarde ne sont pas connues
+    rep_record();
+    gs->sel = -1;
+    gs->hint_from = -1;
+    gs->winner = -1;
+    snprintf(gs->status, sizeof(gs->status), "%s", tr("Partie reprise"));
+    layout_squares();
+    enter_playing();
+}
+
+static void enter_playing() {
+    g_state = ST_PLAYING;
+    panel_on(false);
+    refresh_legal();
+    sync_pieces();
+    clear_highlights();
+    update_hud();
+    update_hist_panel();
+    after_human_or_ai_move();
+}
+
+static void finish_if_terminal() {
+    int w = -1;
+    gs->draw_reason = nullptr;
+    if (Engine::is_terminal(gs->pos, &w)) {
+        if (w == 2) {
+            if (gs->pos.eg_limit && gs->pos.eg_plies >= gs->pos.eg_limit)
+                gs->draw_reason = (gs->pos.eg_limit == Engine::ENDGAME_PLIES_SMALL)
+                                    ? tr_noop("Fin de partie : 5 coups chacun")
+                                    : tr_noop("Fin de partie : 16 coups chacun");
+            else
+                gs->draw_reason = (gs->pos.variant == VAR_ENG8) ? tr_noop("40 coups sans pion ni prise")
+                                                            : tr_noop("25 coups sans pion ni prise");
+        }
+    } else if (rep_threefold()) {
+        w = 2;
+        gs->draw_reason = tr_noop("Position répétée 3 fois");
+    } else {
+        return;
+    }
+    gs->winner = w;
+    record_result(w);
+    go_gameover();
+}
+
+static void try_start_ai() {
+    if (g_state != ST_PLAYING && g_state != ST_THINKING) return;
+    if (is_human_turn()) return;
+    int w = -1;
+    if (Engine::is_terminal(gs->pos, &w)) { finish_if_terminal(); return; }
+    g_state = ST_THINKING;
+    snprintf(gs->status, sizeof(gs->status), "%s", tr("Le Tab réfléchit..."));
+    update_hud();
+    Ai::begin(gs->pos, (Ai::Level)gs->cfg_level);
+}
+
+static void after_human_or_ai_move() {
+    finish_if_terminal();
+    if (g_state == ST_GAMEOVER) return;
+    if (!is_human_turn()) try_start_ai();
+    else {
+        g_state = ST_PLAYING;
+        snprintf(gs->status, sizeof(gs->status), "%s",
+                 tr(gs->n_legal && gc->legal[0].n_caps ? "Prise obligatoire" : "À vous"));
+        update_hud();
+    }
+}
+
+static void apply_player_move(const Move& m) {
+    push_undo();
+    // Prep fade
+    gs->fade_n = m.n_caps;
+    for (int i = 0; i < m.n_caps; i++) gs->fade_sq[i] = m.caps[i];
+    gs->fade_until = esphome::millis() + 180;
+
+    push_hist(m);
+    Engine::apply_move(gs->pos, m);
+    rep_record();
+    gs->sel = -1;
+    refresh_legal();
+    sync_pieces();
+    clear_highlights();
+    save_position();
+    update_hud();
+    after_human_or_ai_move();
+}
+
+static void do_undo() {
+    if (g_state != ST_PLAYING && g_state != ST_THINKING) return;
+    Ai::abort();
+    if (gs->undo_n <= 0) {
+        snprintf(gs->status, sizeof(gs->status), "%s", tr("Rien à annuler"));
+        update_hud();
+        return;
+    }
+    // Annule aussi la réponse IA : si PvT et dernier coup = humain aurait
+    // besoin de 2 pops. On pop jusqu'au tour humain.
+    gs->pos = gc->undo[--gs->undo_n];
+    if (gs->cfg_mode == 0 && !is_human_turn() && gs->undo_n > 0) {
+        gs->pos = gc->undo[--gs->undo_n];
+    }
+    if (gs->hist_n > 0) gs->hist_n--;
+    if (gs->cfg_mode == 0 && gs->hist_n > 0) gs->hist_n--;  // retire aussi le coup IA
+    gs->rep_n = 0;   // prudent : le décompte des répétitions repart de cette position
+    rep_record();
+    gs->sel = -1;
+    g_state = ST_PLAYING;
+    refresh_legal();
+    sync_pieces();
+    clear_highlights();
+    update_hist_panel();
+    save_position();
+    snprintf(gs->status, sizeof(gs->status), "%s", tr("Coup annulé"));
+    update_hud();
+    after_human_or_ai_move();
+}
+
+static void do_hint() {
+    if (g_state != ST_PLAYING) return;
+    if (!is_human_turn()) return;
+    refresh_legal();
+    if (gs->n_legal <= 0) return;
+    // Choisit une prise max ou le premier coup
+    int best = 0;
+    for (int i = 1; i < gs->n_legal; i++)
+        if (gc->legal[i].n_caps > gc->legal[best].n_caps) best = i;
+    gs->hint_from = gc->legal[best].from;
+    gs->hint_to = gc->legal[best].to;
+    gs->hint_until = esphome::millis() + 2500;
+    gs->sel = gs->hint_from;
+    show_highlights_for_sel();
+    snprintf(gs->status, sizeof(gs->status), "%s", tr("Indice affiché"));
+    update_hud();
+}
+
+// ===========================================================================
+// Input
+// ===========================================================================
+
+static void on_square_tap(int r, int c) {
+    if (g_state != ST_PLAYING) return;
+    if (!is_human_turn()) return;
+    const int n = gs->pos.n;
+    if (r < 0 || c < 0 || r >= n || c >= n) return;
+    if (!Engine::is_dark_sq(r, c)) return;
+    int sq = r * n + c;
+
+    // Destination d'un coup légal depuis la sélection ?
+    if (gs->sel >= 0) {
+        // Cherche un coup from=sel dont path contient sq (étape ou finale)
+        int match = -1;
+        int match_partial = -1;
+        for (int i = 0; i < gs->n_legal; i++) {
+            if (gc->legal[i].from != (uint8_t)gs->sel) continue;
+            if (gc->legal[i].to == (uint8_t)sq) { match = i; break; }
+            // Tap intermédiaire : si un seul coup max passe par cette case
+            for (int k = 0; k < gc->legal[i].n_path; k++) {
+                if (gc->legal[i].path[k] == (uint8_t)sq) {
+                    if (match_partial < 0) match_partial = i;
+                    else if (match_partial >= 0 &&
+                             gc->legal[match_partial].to != gc->legal[i].to)
+                        match_partial = -2;  // ambigu
+                }
+            }
+        }
+        if (match >= 0) {
+            apply_player_move(gc->legal[match]);
+            return;
+        }
+        // Ambiguïté résolue : un seul chemin
+        if (match_partial >= 0) {
+            // Filtre les légaux à ceux passant par sq ; si un seul to, joue-le
+            int only = -1;
+            for (int i = 0; i < gs->n_legal; i++) {
+                if (gc->legal[i].from != (uint8_t)gs->sel) continue;
+                bool ok = false;
+                for (int k = 0; k < gc->legal[i].n_path; k++)
+                    if (gc->legal[i].path[k] == (uint8_t)sq) ok = true;
+                if (!ok) continue;
+                if (only < 0) only = i;
+                else if (gc->legal[only].to != gc->legal[i].to) { only = -2; break; }
+            }
+            if (only >= 0) { apply_player_move(gc->legal[only]); return; }
+        }
+        // Re-sélection pièce alliée
+    }
+
+    uint8_t pc = gs->pos.sq[sq];
+    if (pc != EMPTY && Engine::piece_side(pc) == (Side)gs->pos.side) {
+        // Vérifie qu'un coup légal part de cette case
+        bool ok = false;
+        for (int i = 0; i < gs->n_legal; i++)
+            if (gc->legal[i].from == (uint8_t)sq) { ok = true; break; }
+        if (ok) {
+            gs->sel = sq;
+            show_highlights_for_sel();
+            sync_pieces();
+            return;
+        }
+    }
+    gs->sel = -1;
+    clear_highlights();
+    sync_pieces();
+}
+
+static void field_event_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    if (g_state != ST_PLAYING) return;
+    lv_indev_t* in = lv_indev_active();
+    if (!in) return;
+    lv_point_t pt;
+    lv_indev_get_point(in, &pt);
+    // Coordonnées relatives au field
+    lv_area_t a;
+    lv_obj_get_coords(gs->ui.field, &a);
+    int x = pt.x - a.x1;
+    int y = pt.y - a.y1;
+    int c = (x - gs->board_x) / gs->cell;
+    int r = (y - gs->board_y) / gs->cell;
+    on_square_tap(r, c);
+}
+
+static void undo_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    do_undo();
+}
+static void hint_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    do_hint();
+}
+
+static void side_btn_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    if (g_state != ST_PLAYING && g_state != ST_THINKING) return;
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (i == 0) {  // Abandon
+        gs->winner = (gs->cfg_human == SIDE_WHITE) ? 1 : 0;
+        if (gs->cfg_mode != 0) gs->winner = (gs->pos.side == SIDE_WHITE) ? 1 : 0;
+        record_result(gs->winner);
+        go_gameover();
+    } else if (i == 1) {  // Nouvelle
+        go_setup();
+    } else if (i == 2) {  // Menu
+        save_position();
+        go_hub();
+    }
+}
+
+static void slot_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+
+    switch (g_state) {
+        case ST_HUB:
+            if (i == 0) go_setup();
+            else if (i == 1 && gs->save.has_game) resume_game();
+            else if (i == 2) go_stats();
+            else if (i == 3) go_settings();
+            else if (i == 4) close();
+            break;
+        case ST_SETUP:
+            if (i == 0) gs->cfg_variant = gs->cfg_variant ? 0 : 1;
+            else if (i == 1) gs->cfg_mode = (uint8_t)((gs->cfg_mode + 1) % 3);
+            else if (i == 2 && gs->cfg_mode == 0) gs->cfg_human ^= 1;
+            else if (i == 3 && gs->cfg_mode != 1)
+                gs->cfg_level = (uint8_t)((gs->cfg_level + 1) % 4);
+            else if (i == 4) {
+                persist_save();
+                start_new_game();
+                break;
+            } else if (i == 5) { go_hub(); break; }
+            go_setup();
+            break;
+        case ST_STATS:
+            if (i == 4) { gs->cfg_variant ^= 1; go_stats(); }
+            else if (i == 5) go_hub();
+            break;
+        case ST_SETTINGS:
+            if (i == 0) { gs->save.imu_hint ^= 1; persist_save(); go_settings(); }
+            else if (i == 1) {
+                g_state = ST_CONFIRM_RESET;
+                set_text_if(gs->p_title, tr("Remettre les stats à zéro ?"));
+                set_text_if(gs->p_sub, tr("Irréversible"));
+                slot_list(0, tr("Confirmer la remise à zéro"), "", Pal::DANGER, true);
+                slot_list(1, tr("Annuler"), "", Pal::TXT_DIM, true);   // bouton de dialogue : Cancel
+                gs->slots.hide_from(2);
+            } else if (i == 2) go_hub();
+            break;
+        case ST_CONFIRM_RESET:
+            if (i == 0) {
+                memset(gs->save.wins, 0, sizeof(gs->save.wins));
+                memset(gs->save.draws, 0, sizeof(gs->save.draws));
+                memset(gs->save.losses, 0, sizeof(gs->save.losses));
+                persist_save();
+                go_settings();
+            } else go_settings();
+            break;
+        case ST_GAMEOVER:
+            if (i == 0) start_new_game();
+            else go_hub();
+            break;
+        default: break;
+    }
+}
+
+static void hud_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    if (g_state == ST_PLAYING || g_state == ST_THINKING) {
+        save_position();
+        go_hub();
+    }
+}
+
+// ===========================================================================
+// Build UI
+// ===========================================================================
+
+// Appelée à chaque ouverture : close() a détruit les objets de l'ouverture précédente.
+static void build_ui() {
+    set_bg(gs->ui.root, Pal::VOID_BG, LV_OPA_COVER);
+    set_bg(gs->ui.hud, Pal::HUD_BG, LV_OPA_COVER);
+    set_bg(gs->ui.field, Pal::FLOOR_BG, LV_OPA_COVER);
+    set_bg(gs->ui.panel, Pal::VOID_BG, (lv_opa_t)230);
+
+    // Cases (grille 10×10), puis surbrillances / pièces / couronnes des seules cases
+    // foncées. Créées après les cases, donc dessinées par-dessus.
+    // Cases NON cliquables : le tap est géré par field_event_cb (coordonnées).
+    for (int i = 0; i < MAX_SQ; i++) gs->sq_obj[i] = mk_rect(gs->ui.field);
+    for (int d = 0; d < MAX_DARK; d++) {
+        gs->hl_obj[d] = mk_rect(gs->ui.field);
+        lv_obj_set_style_radius(gs->hl_obj[d], 6, LV_PART_MAIN);
+        show(gs->hl_obj[d], false);
+        gs->piece_obj[d] = mk_rect(gs->ui.field);
+        gs->king_ring[d] = mk_rect(gs->ui.field);
+        show(gs->piece_obj[d], false);
+        show(gs->king_ring[d], false);
+        gs->drawn[d] = 0;
+    }
+
+    // Panneau latéral gameplay
+    gs->side_panel = mk_rect(gs->ui.field);
+    set_bg(gs->side_panel, Pal::PANEL_BG, LV_OPA_COVER);
+    set_border(gs->side_panel, Pal::BTN_EDGE, 1, LV_OPA_40);
+
+    for (int i = 0; i < 8; i++) {
+        gs->hist_lbl[i] = mk_label(gs->side_panel, gs->ui.f_small, Pal::TXT_DIM);
+        lv_obj_set_pos(gs->hist_lbl[i], 12, 16 + i * 28);
+    }
+
+    // « Menu » s'écrit pareil dans les deux langues (comme dans NON_TRADUITS de tools/i18n_keys.py).
+    static const char* SBTNS[] = {tr_noop("Abandon"), tr_noop("Nouvelle"), "Menu"};
+    for (int i = 0; i < 3; i++) {
+        gs->side_btns[i] = mk_rect(gs->side_panel);
+        lv_obj_add_flag(gs->side_btns[i], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_pos(gs->side_btns[i], 16, 280 + i * 70);
+        lv_obj_set_size(gs->side_btns[i], 256, 58);
+        set_bg(gs->side_btns[i], Pal::BTN, LV_OPA_COVER);
+        set_border(gs->side_btns[i], Pal::BTN_EDGE, 1, LV_OPA_60);
+        lv_obj_set_style_radius(gs->side_btns[i], 8, LV_PART_MAIN);
+        gs->side_btns_l[i] = mk_label(gs->side_btns[i], gs->ui.f_mid, Pal::TXT);
+        set_text_if(gs->side_btns_l[i], tr(SBTNS[i]));
+        lv_obj_center(gs->side_btns_l[i]);
+        lv_obj_add_event_cb(gs->side_btns[i], side_btn_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
+
+    // Boutons latéraux Annuler / Indice (mêmes clés que Go et le Roi Noir)
+    gs->btn_undo = mk_rect(gs->ui.field);
+    lv_obj_add_flag(gs->btn_undo, LV_OBJ_FLAG_CLICKABLE);
+    set_bg(gs->btn_undo, Pal::BTN, LV_OPA_COVER);
+    set_border(gs->btn_undo, Pal::HL_CAP, 2, LV_OPA_60);
+    lv_obj_set_style_radius(gs->btn_undo, 10, LV_PART_MAIN);
+    {
+        lv_obj_t* l = mk_label(gs->btn_undo, gs->ui.f_small, Pal::TXT);
+        set_text_if(l, tr_ctx("coup", "Annuler"));
+        lv_obj_center(l);
+    }
+    lv_obj_add_event_cb(gs->btn_undo, undo_cb, LV_EVENT_CLICKED, nullptr);
+
+    gs->btn_hint = mk_rect(gs->ui.field);
+    lv_obj_add_flag(gs->btn_hint, LV_OBJ_FLAG_CLICKABLE);
+    set_bg(gs->btn_hint, Pal::BTN, LV_OPA_COVER);
+    set_border(gs->btn_hint, Pal::HL_MOVE, 2, LV_OPA_60);
+    lv_obj_set_style_radius(gs->btn_hint, 10, LV_PART_MAIN);
+    {
+        lv_obj_t* l = mk_label(gs->btn_hint, gs->ui.f_small, Pal::TXT);
+        set_text_if(l, tr("Indice"));
+        lv_obj_center(l);
+    }
+    lv_obj_add_event_cb(gs->btn_hint, hint_cb, LV_EVENT_CLICKED, nullptr);
+
+    // HUD
+    gs->hud_trait = mk_label(gs->ui.hud, gs->ui.f_small, Pal::TXT);
+    lv_obj_set_pos(gs->hud_trait, 16, 12);
+    gs->hud_var = mk_label(gs->ui.hud, gs->ui.f_small, Pal::TXT_DIM);
+    lv_obj_set_pos(gs->hud_var, 280, 12);
+    gs->hud_lvl = mk_label(gs->ui.hud, gs->ui.f_small, Pal::KING_RING);
+    lv_obj_set_pos(gs->hud_lvl, 520, 12);
+    gs->hud_cap = mk_label(gs->ui.hud, gs->ui.f_small, Pal::HL_CAP);
+    lv_obj_set_pos(gs->hud_cap, 780, 12);
+    gs->hud_status = mk_label(gs->ui.hud, gs->ui.f_small, Pal::HL_MOVE);
+    lv_obj_set_pos(gs->hud_status, 960, 12);
+
+    // Panel menus
+    gs->p_title = mk_label(gs->ui.panel, gs->ui.f_big, Pal::KING_RING);
+    lv_obj_set_pos(gs->p_title, 80, 40);
+    gs->p_sub = mk_label(gs->ui.panel, gs->ui.f_small, Pal::TXT_DIM);
+    lv_obj_set_pos(gs->p_sub, 80, 100);
+
+    gs->slots.build(gs->ui.panel, slot_cb, gs->ui.f_mid, Pal::TXT, gs->ui.f_small, Pal::TXT_DIM,
+                    [](lv_obj_t* b, int i) {
+        lv_obj_set_pos(b, 80, 160 + i * 80);
+        lv_obj_set_size(b, 1120, 70);
+        set_bg(b, Pal::PANEL_BG, LV_OPA_COVER);
+        lv_obj_set_style_radius(b, 10, LV_PART_MAIN);
+    });
+    for (int i = 0; i < N_SLOTS; i++) {
+        lv_obj_set_pos(gs->slots.title[i], 24, 8);
+        lv_obj_set_pos(gs->slots.desc[i], 24, 40);
+    }
+}
+
+// ===========================================================================
+// Timer
+// ===========================================================================
+
+static void tick_cb(lv_timer_t* /*t*/) {
+    if (g_state == ST_OFF) return;
+
+    // Fade capture
+    if (gs->fade_n > 0 && esphome::millis() >= gs->fade_until) {
+        gs->fade_n = 0;
+        sync_pieces();
+    }
+    // Hint timeout
+    if (gs->hint_from >= 0 && esphome::millis() >= gs->hint_until) {
+        gs->hint_from = -1;
+        if (g_state == ST_PLAYING) show_highlights_for_sel();
+    }
+
+    if (g_state == ST_THINKING) {
+        Ai::step();
+        if (Ai::ready()) {
+            const Move& m = Ai::best();
+            push_undo();
+            gs->fade_n = m.n_caps;
+            for (int i = 0; i < m.n_caps; i++) gs->fade_sq[i] = m.caps[i];
+            gs->fade_until = esphome::millis() + 180;
+            push_hist(m);
+            Engine::apply_move(gs->pos, m);
+            rep_record();
+            gs->sel = -1;
+            refresh_legal();
+            sync_pieces();
+            clear_highlights();
+            save_position();
+            g_state = ST_PLAYING;
+            after_human_or_ai_move();
+        } else {
+            update_hud();
+        }
+    }
+}
+
+void ai_step() {
+    if (g_state == ST_THINKING) Ai::step();
+}
+
+// ===========================================================================
+// API
+// ===========================================================================
+
+void on_imu(float ax, float ay, float az) {
+    if (ax != ax || ay != ay || az != az) return;
+    // Jeu fermé, seuls les globaux IMU ci-dessus sont écrits : rien d'autre n'existe.
+    const float mag = accel_delta_norm(ax, ay, az, g_imu_ax, g_imu_ay, g_imu_az);
+    if (!gs || g_state != ST_PLAYING || !gs->save.imu_hint) return;
+    if (shake_fire(mag, 1.2f, g_last_shake_ms, esphome::millis(), 800)) do_hint();
+}
+
+bool is_open() { return g_state != ST_OFF; }
+
+void open(const UI& ui) {
+    if (g_state != ST_OFF) return;
+    if (!ui.root || !ui.field || !ui.hud || !ui.panel) return;
+    gs = game_mem_new<Mem>(MemPref::Internal);
+    gc = game_mem_new<Cold>(MemPref::Psram);
+    // L'IA prend son état avant go_hub(), qui l'interrompt (Ai::abort).
+    if (!gs || !gc || !Ai::acquire()) {
+        ESP_LOGW("dames", "memoire introuvable (%u + %u o + IA) : jeu non ouvert",
+                 (unsigned) sizeof(Mem), (unsigned) sizeof(Cold));
+        game_mem_free(gc);
+        game_mem_free(gs);
+        if (ui.lvgl) ui.lvgl->show_page(ui.home_idx, LV_SCREEN_LOAD_ANIM_NONE, 0);
+        return;
+    }
+    gs->ui = ui;
+    persist_load();
+    build_ui();
+    Engine::pos_init(gs->pos, (Variant)gs->cfg_variant);
+    layout_squares();
+
+    // La page LVGL est déjà active (navigation via lvgl.page.show dans le YAML).
+
+    lv_obj_add_flag(gs->ui.hud, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(gs->ui.hud, hud_cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_flag(gs->ui.field, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(gs->ui.field, field_event_cb, LV_EVENT_CLICKED, nullptr);
+
+    go_hub();
+    if (!gs->timer) gs->timer = lv_timer_create(tick_cb, 33, nullptr);
+}
+
+void close() {
+    if (g_state == ST_OFF) return;
+    Ai::release();  // abort + rend l'état de l'IA et ses listes de coups
+    if (g_state == ST_PLAYING || g_state == ST_THINKING) save_position();
+    persist_save();
+    if (gs->timer) { lv_timer_delete(gs->timer); gs->timer = nullptr; }
+    if (gs->ui.hud) lv_obj_remove_event_cb(gs->ui.hud, hud_cb);
+    if (gs->ui.field) lv_obj_remove_event_cb(gs->ui.field, field_event_cb);
+    // Navigation retour vers le sélecteur arcade (page LVGL).
+    if (gs->ui.lvgl) gs->ui.lvgl->show_page(gs->ui.home_idx, LV_SCREEN_LOAD_ANIM_NONE, 0);
+    g_state = ST_OFF;
+
+    // Rien ne reste réservé : les objets LVGL du jeu (dont le slot dont le callback
+    // nous appelle peut-être), puis les blocs qui les pointaient.
+    ui_destroy(nullptr, {gs->ui.field, gs->ui.hud, gs->ui.panel});
+    game_mem_free(gc);
+    game_mem_free(gs);
+}
+
+}  // namespace Draughts

@@ -1,0 +1,63 @@
+# Status LED behavior for boards with a simple LED (the hardware package
+# provides output id led_output). Exposed as a normal HA light entity plus
+# an auto-mode select:
+#   Off         - LED forced off
+#   Manual      - firmware never touches it, drive it from HA
+#   Limit alert - blink while any provider is near its limit, solid once
+#                 one reaches it
+#   Heartbeat   - short flash on every completed poll
+globals:
+  - id: led_mode_idx
+    type: int
+    restore_value: no
+    initial_value: "2"
+
+light:
+  - platform: monochromatic
+    id: status_led
+    name: "LED"
+    output: led_output
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 0ms
+
+select:
+  - platform: template
+    id: led_mode
+    name: "LED Mode"
+    entity_category: config
+    options: ["Off", "Manual", "Limit alert", "Heartbeat"]
+    initial_option: "Limit alert"
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lambda: |-
+          if (x == "Off") id(led_mode_idx) = 0;
+          else if (x == "Manual") id(led_mode_idx) = 1;
+          else if (x == "Limit alert") id(led_mode_idx) = 2;
+          else id(led_mode_idx) = 3;
+
+interval:
+  - interval: 250ms
+    then:
+      - lambda: |-
+          static bool led_is_on = false;
+          static bool prev_in_flight = false;
+          static uint32_t flash_until = 0;
+          int mode = id(led_mode_idx);
+          if (mode == 1) return;   // manual: HA owns the entity
+          bool want = false;
+          uint32_t now_ms = millis();
+          if (mode == 2) {
+            int lvl = id(limit_level);
+            if (lvl >= 2) want = true;
+            else if (lvl == 1) want = (now_ms / 500) % 2 == 0;
+          } else if (mode == 3) {
+            bool in_flight = id(poll_in_flight);
+            if (prev_in_flight && !in_flight) flash_until = now_ms + 200;
+            prev_in_flight = in_flight;
+            want = now_ms < flash_until;
+          }
+          if (want == led_is_on) return;
+          led_is_on = want;
+          if (want) id(status_led).turn_on().set_transition_length(0).perform();
+          else id(status_led).turn_off().set_transition_length(0).perform();

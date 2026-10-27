@@ -1,0 +1,72 @@
+# Gitignore settings for ESPHome
+# This is an example and may include too much for your use-case.
+# You can modify this file to suit your needs.
+/.esphome/
+secrets.yaml
+Tab5/user_entities.yaml
+# Clé privée qui signe le firmware (lot 6b, ADR-0020) : jamais dans git. Toute clé
+# (.pem, .key) par précaution ; tools/verifier_secrets_config.py refuse aussi un
+# en-tête de clé privée dans un fichier suivi.
+*.pem
+*.key
+# Clé API que le mode démo donne à une tablette jamais ajoutée à HA (lot 6b).
+tools/demo/cle_demo.txt
+
+# Bytecode Python (composants ESPHome custom)
+__pycache__/
+*.pyc
+
+# Ignorer les scripts de l'IA et tests locaux
+/ia_tools_scripts/
+/archives/
+config_out.txt
+test_*.yaml
+
+# Logs
+*.log
+home-assistant_*.log
+
+# Configurations et logs locaux ESPHome
+config_dump.yaml
+esphome_live_logs.txt
+
+# Anciennes copies privees de la config HA, OBSOLETES depuis le 26/09/2026 (lot 3 de
+# l'audit « ouverture ») : la production tourne sur packages/tab5_push.yaml et
+# optionnel/volet_serre_tracking.yaml. Gardees ignorees pour qu'une copie
+# locale restante ne soit jamais commitee.
+HomeAssistant_Config/automations_tab5.yaml
+HomeAssistant_Config/scripts_tab5.yaml
+HomeAssistant_Config/template_sensors_meteo_tab5.yaml
+
+# Audio TTS experimental, anterieur au pipeline Voice HA — inutilise par le firmware
+Tab5/tts_library/
+Tab5/tts_library_v2/
+
+# Cache TTS Piper local (HA / moteur) — pas utilise par le firmware
+audio_lib/
+
+# Garde-fou : lien symbolique recursif Tab5/Tab5 -> Tab5 cree par accident.
+# Supprime le 30/07/2026 ; la regle reste pour que la recidive ne soit jamais
+# versionnee. (NB 06/09/2026 : E: n'a jamais ete une jonction vers H:, c'est un
+# volume distinct — la racine unique du workspace est H:\AuxFilsDesIdees.)
+Tab5/Tab5/
+
+# Identifiants HA reels de l'auteur (nom -> valeur), cherches par
+# tools/render_ha_config.py --check, et copie produite par ce script. Les fichiers
+# publics n'ont ni valeur reelle ni placeholder (ADR-0024) ; modele suivi :
+# HomeAssistant_Config/placeholders.example.yaml
+HomeAssistant_Config/placeholders.yaml
+HomeAssistant_Config/rendered/
+
+
+# Dossier de travail de l'IDE Qoder, posé dans chaque dépôt ouvert. Le moteur
+# le ramassait dans le diff de ses tâches autonomes : la porte d'arborescence
+# refusait le livrable (9 tâches sur 14 abandonnées le 24/08).
+.qoder/
+
+# Dossiers de travail locaux de Claude Code (audit du 07/10/2026, OUT-10) : les
+# worktrees des sessions parallèles et les brouillons non publiés (mesures, notes).
+# Rien d'autre sous .claude/ n'est suivi ; settings.local.json est déjà ignoré par
+# la config git globale.
+/.claude/worktrees/
+/.claude/brouillons/

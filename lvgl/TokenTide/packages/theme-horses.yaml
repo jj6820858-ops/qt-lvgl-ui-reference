@@ -1,0 +1,668 @@
+# Horses: galloping riders show usage; furlong posts show elapsed time.
+# Grandstand silks follow the configured providers.
+
+substitutions:
+  theme_sprite_base: "https://raw.githubusercontent.com/eldios/tokentide/v${tokentide_version}/assets/sprites"
+  theme_sprite_size: "big"
+  theme_tap_script: "note_activity"
+  theme_long_press_script: "theme_next"
+
+globals:
+  - id: theme_horses_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+image:
+  - file: ${theme_sprite_base}/ho-horse-claude-mini-1-${theme_sprite_size}-r.png
+    id: ho_spr_claude_1
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-fan-claude-1-${theme_sprite_size}.png
+    id: ho_spr_fan_claude_1
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-horse-claude-mini-2-${theme_sprite_size}-r.png
+    id: ho_spr_claude_2
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-fan-claude-2-${theme_sprite_size}.png
+    id: ho_spr_fan_claude_2
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-horse-codex-mini-1-${theme_sprite_size}-r.png
+    id: ho_spr_codex_1
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-fan-codex-1-${theme_sprite_size}.png
+    id: ho_spr_fan_codex_1
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-horse-codex-mini-2-${theme_sprite_size}-r.png
+    id: ho_spr_codex_2
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-fan-codex-2-${theme_sprite_size}.png
+    id: ho_spr_fan_codex_2
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-horse-gemini-mini-1-${theme_sprite_size}-r.png
+    id: ho_spr_gemini_1
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-fan-gemini-1-${theme_sprite_size}.png
+    id: ho_spr_fan_gemini_1
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-horse-gemini-mini-2-${theme_sprite_size}-r.png
+    id: ho_spr_gemini_2
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-fan-gemini-2-${theme_sprite_size}.png
+    id: ho_spr_fan_gemini_2
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-checker-${theme_sprite_size}.png
+    id: ho_spr_checker
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-fence-${theme_sprite_size}.png
+    id: ho_spr_fence
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-dust-1-${theme_sprite_size}.png
+    id: ho_spr_dust_1
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-dust-2-${theme_sprite_size}.png
+    id: ho_spr_dust_2
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-post-ok-${theme_sprite_size}.png
+    id: ho_spr_post_ok
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-post-trouble-${theme_sprite_size}.png
+    id: ho_spr_post_trouble
+    type: RGB565
+    transparency: alpha_channel
+  # Legend symbols: 1x copies of the usage and time sprites.
+  - file: ${theme_sprite_base}/ho-horse-claude-mini-1-small-r.png
+    id: ho_spr_legend_claude
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-horse-codex-mini-1-small-r.png
+    id: ho_spr_legend_codex
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-horse-gemini-mini-1-small-r.png
+    id: ho_spr_legend_gemini
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/ho-post-ok-small.png
+    id: ho_spr_legend_time
+    type: RGB565
+    transparency: alpha_channel
+lvgl:
+  pages:
+    - id: theme_horses_page
+      bg_color: 0x0d0d10
+      scrollbar_mode: "off"
+      scrollable: false
+      on_load:
+        - lambda: "id(theme_horses_active) = true;"
+        # Lay the page out immediately: the interval alone would leave the
+        # placeholder geometry on screen for up to one tick.
+        - script.execute: theme_horses_redraw
+      on_unload:
+        - lambda: "id(theme_horses_active) = false;"
+      widgets:
+        - obj:
+            id: ho_tap
+            x: 0
+            y: 0
+            width: 100%
+            height: 100%
+            bg_opa: TRANSP
+            border_width: 0
+            on_short_click:
+              - script.execute: ${theme_tap_script}
+            on_long_press:
+              - script.execute: ${theme_long_press_script}
+        # Grandstand sprites stay behind the hanging placard.
+        - obj:
+            id: ho_scene
+            x: 8
+            y: 22
+            width: 304
+            height: 38
+            clickable: false
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollbar_mode: "off"
+            scrollable: false
+            widgets:
+              - obj: { id: ho_ground, x: 0, y: 0, width: 10, height: 2, bg_color: 0x29241f, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+              - image: { id: ho_crowd_0, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_1, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_2, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_3, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_4, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_5, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_6, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_7, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_8, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_9, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_10, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_11, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_12, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_13, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_14, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_15, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_16, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_17, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_18, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_19, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_20, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_21, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_22, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_23, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_24, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_25, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_26, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_27, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_28, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_crowd_29, src: ho_spr_fan_claude_1 }
+              - image: { id: ho_fence, src: ho_spr_fence }
+              - obj: { id: ho_ban_field, x: 0, y: 0, width: 10, height: 10, bg_color: 0x493226, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+              - obj: { id: ho_ban_inset, x: 0, y: 0, width: 10, height: 10, bg_color: 0xeee1b5, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+              - obj: { id: ho_ban_cord_l, x: 0, y: 0, width: 2, height: 4, bg_color: 0x696e68, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+              - obj: { id: ho_ban_cord_r, x: 0, y: 0, width: 2, height: 4, bg_color: 0x696e68, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj:
+            id: ho_lane_0
+            hidden: true
+            width: 1
+            height: 16
+            bg_color: 0x1b1714
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            clickable: false
+            scrollbar_mode: "off"
+            scrollable: false
+            widgets:
+              - obj: { id: ho_turf_0, width: 1, height: 1, bg_color: 0x3d352c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_over_0, width: 1, height: 1, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_rail_0, width: 1, height: 1, bg_color: 0x5c5042, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_trail_0, width: 1, height: 1, bg_color: 0xd97757, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_edge_0, width: 1, height: 1, bg_color: 0x9ca38c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - image: { id: ho_check_0, src: ho_spr_checker }
+              - image: { id: ho_dust_0, src: ho_spr_dust_1 }
+              - image: { id: ho_rider_0, src: ho_spr_claude_1 }
+        - image: { id: ho_post_0, src: ho_spr_post_ok, hidden: true }
+        - obj:
+            id: ho_lane_1
+            hidden: true
+            width: 1
+            height: 16
+            bg_color: 0x1b1714
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            clickable: false
+            scrollbar_mode: "off"
+            scrollable: false
+            widgets:
+              - obj: { id: ho_turf_1, width: 1, height: 1, bg_color: 0x3d352c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_over_1, width: 1, height: 1, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_rail_1, width: 1, height: 1, bg_color: 0x5c5042, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_trail_1, width: 1, height: 1, bg_color: 0xd97757, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_edge_1, width: 1, height: 1, bg_color: 0x9ca38c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - image: { id: ho_check_1, src: ho_spr_checker }
+              - image: { id: ho_dust_1, src: ho_spr_dust_1 }
+              - image: { id: ho_rider_1, src: ho_spr_claude_1 }
+        - image: { id: ho_post_1, src: ho_spr_post_ok, hidden: true }
+        - obj:
+            id: ho_lane_2
+            hidden: true
+            width: 1
+            height: 16
+            bg_color: 0x1b1714
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            clickable: false
+            scrollbar_mode: "off"
+            scrollable: false
+            widgets:
+              - obj: { id: ho_turf_2, width: 1, height: 1, bg_color: 0x3d352c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_over_2, width: 1, height: 1, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_rail_2, width: 1, height: 1, bg_color: 0x5c5042, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_trail_2, width: 1, height: 1, bg_color: 0xd97757, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_edge_2, width: 1, height: 1, bg_color: 0x9ca38c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - image: { id: ho_check_2, src: ho_spr_checker }
+              - image: { id: ho_dust_2, src: ho_spr_dust_1 }
+              - image: { id: ho_rider_2, src: ho_spr_claude_1 }
+        - image: { id: ho_post_2, src: ho_spr_post_ok, hidden: true }
+        - obj:
+            id: ho_lane_3
+            hidden: true
+            width: 1
+            height: 16
+            bg_color: 0x1b1714
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            clickable: false
+            scrollbar_mode: "off"
+            scrollable: false
+            widgets:
+              - obj: { id: ho_turf_3, width: 1, height: 1, bg_color: 0x3d352c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_over_3, width: 1, height: 1, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_rail_3, width: 1, height: 1, bg_color: 0x5c5042, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_trail_3, width: 1, height: 1, bg_color: 0xd97757, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_edge_3, width: 1, height: 1, bg_color: 0x9ca38c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - image: { id: ho_check_3, src: ho_spr_checker }
+              - image: { id: ho_dust_3, src: ho_spr_dust_1 }
+              - image: { id: ho_rider_3, src: ho_spr_claude_1 }
+        - image: { id: ho_post_3, src: ho_spr_post_ok, hidden: true }
+        - obj:
+            id: ho_lane_4
+            hidden: true
+            width: 1
+            height: 16
+            bg_color: 0x1b1714
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            clickable: false
+            scrollbar_mode: "off"
+            scrollable: false
+            widgets:
+              - obj: { id: ho_turf_4, width: 1, height: 1, bg_color: 0x3d352c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_over_4, width: 1, height: 1, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_rail_4, width: 1, height: 1, bg_color: 0x5c5042, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_trail_4, width: 1, height: 1, bg_color: 0xd97757, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_edge_4, width: 1, height: 1, bg_color: 0x9ca38c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - image: { id: ho_check_4, src: ho_spr_checker }
+              - image: { id: ho_dust_4, src: ho_spr_dust_1 }
+              - image: { id: ho_rider_4, src: ho_spr_claude_1 }
+        - image: { id: ho_post_4, src: ho_spr_post_ok, hidden: true }
+        - obj:
+            id: ho_lane_5
+            hidden: true
+            width: 1
+            height: 16
+            bg_color: 0x1b1714
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            clickable: false
+            scrollbar_mode: "off"
+            scrollable: false
+            widgets:
+              - obj: { id: ho_turf_5, width: 1, height: 1, bg_color: 0x3d352c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_over_5, width: 1, height: 1, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_rail_5, width: 1, height: 1, bg_color: 0x5c5042, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_trail_5, width: 1, height: 1, bg_color: 0xd97757, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - obj: { id: ho_edge_5, width: 1, height: 1, bg_color: 0x9ca38c, bg_opa: COVER, border_width: 0, radius: 0, pad_all: 0, clickable: false }
+              - image: { id: ho_check_5, src: ho_spr_checker }
+              - image: { id: ho_dust_5, src: ho_spr_dust_1 }
+              - image: { id: ho_rider_5, src: ho_spr_claude_1 }
+        - image: { id: ho_post_5, src: ho_spr_post_ok, hidden: true }
+        - label: { id: ho_banner_lbl, width: 140, text_align: CENTER, long_mode: CLIP, text_font: font_small, text_color: 0x1a1510, text: "Agents Horse Race" }
+        - obj:
+            id: ho_legend
+            x: 8
+            y: 2
+            width: SIZE_CONTENT
+            height: SIZE_CONTENT
+            clickable: false
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollbar_mode: "off"
+            scrollable: false
+            layout: { type: flex, flex_flow: row, flex_align_cross: center, pad_column: 2 }
+            widgets:
+              - image: { id: ho_legend_tokens_icon, src: ho_spr_legend_claude }
+              - label: { id: ho_legend_tokens, pad_right: 6, text_font: font_meta, text_color: 0xccc19c, text: "${str_tokens}" }
+              - image: { src: ho_spr_legend_time }
+              - label: { id: ho_legend_time, text_font: font_meta, text_color: 0xccc19c, text: "${str_time}" }
+        - label: { id: ho_status, x: 196, y: 2, width: 116, text_align: RIGHT, long_mode: SCROLL_CIRCULAR, text_font: font_small, text_color: 0xeee1b5, text: "${str_waiting}" }
+
+        - label: { id: ho_lbl_0, long_mode: CLIP, text_font: font_small, text_color: 0xeee1b5, text: "${claude_label} 5h" }
+        - label: { id: ho_val_0, width: 68, text_align: RIGHT, text_font: font_mid, text_color: 0xd97757, text: "--%" }
+        - label: { id: ho_eta_0, width: 142, text_align: RIGHT, long_mode: DOT, text_font: font_small, text_color: 0xccc19c, text: "${str_resets_in} --" }
+
+        - label: { id: ho_lbl_1, long_mode: CLIP, text_font: font_small, text_color: 0xeee1b5, text: "${claude_label} 7d" }
+        - label: { id: ho_val_1, width: 68, text_align: RIGHT, text_font: font_mid, text_color: 0xd97757, text: "--%" }
+        - label: { id: ho_eta_1, width: 142, text_align: RIGHT, long_mode: DOT, text_font: font_small, text_color: 0xccc19c, text: "${str_resets_in} --" }
+
+        - label: { id: ho_lbl_2, hidden: true, long_mode: CLIP, text_font: font_small, text_color: 0xeee1b5, text: "${codex_label} 5h" }
+        - label: { id: ho_val_2, hidden: true, width: 68, text_align: RIGHT, text_font: font_mid, text_color: 0xf1f2e8, text: "--%" }
+        - label: { id: ho_eta_2, hidden: true, width: 142, text_align: RIGHT, long_mode: DOT, text_font: font_small, text_color: 0xccc19c, text: "${str_resets_in} --" }
+
+        - label: { id: ho_lbl_3, hidden: true, long_mode: CLIP, text_font: font_small, text_color: 0xeee1b5, text: "${codex_label} 7d" }
+        - label: { id: ho_val_3, hidden: true, width: 68, text_align: RIGHT, text_font: font_mid, text_color: 0xf1f2e8, text: "--%" }
+        - label: { id: ho_eta_3, hidden: true, width: 142, text_align: RIGHT, long_mode: DOT, text_font: font_small, text_color: 0xccc19c, text: "${str_resets_in} --" }
+
+        - label: { id: ho_lbl_4, hidden: true, long_mode: CLIP, text_font: font_meta, text_color: 0xeee1b5, text: "${gemini_label} 5h" }
+        - label: { id: ho_val_4, hidden: true, width: 44, text_align: RIGHT, text_font: font_small, text_color: 0x669df6, text: "--%" }
+        - label: { id: ho_eta_4, hidden: true, width: 44, text_align: RIGHT, long_mode: DOT, text_font: font_meta, text_color: 0xccc19c, text: "--" }
+
+        - label: { id: ho_lbl_5, hidden: true, long_mode: CLIP, text_font: font_meta, text_color: 0xeee1b5, text: "7d" }
+        - label: { id: ho_val_5, hidden: true, width: 68, text_align: RIGHT, text_font: font_small, text_color: 0x669df6, text: "--%" }
+        - label: { id: ho_eta_5, hidden: true, width: 44, text_align: RIGHT, long_mode: DOT, text_font: font_meta, text_color: 0xccc19c, text: "--" }
+
+script:
+  - id: theme_horses_redraw
+    mode: single
+    then:
+      - lambda: |-
+          if (!id(theme_horses_active) || id(is_screen_off)) return;
+          lv_obj_t *scr = lv_scr_act();
+          int W = lv_obj_get_width(scr);
+          if (W <= 0) return;
+          const bool big = W >= 320;
+          auto show = [](lv_obj_t *o, bool on) {
+            if (on) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+            else    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+          };
+          auto pct = [](float v) -> float { return v < 0 ? 0 : (v > 100 ? 100 : v); };
+          struct ProvData {
+            const char *name;
+            const char *short_name;
+            uint32_t col;
+            int state;
+            bool u5_ok, u7_ok;
+            float u5_raw, u7_raw;
+            float e5, e7;
+            const std::string *eta5, *eta7;
+            const void *horse_dsc[2];
+            const void *legend_dsc;
+          };
+          bool c5k = !isnan(id(usage_5h).state);
+          bool c7k = !isnan(id(usage_7d).state);
+          bool x5k = id(codex_5h_pct) >= 0.0f;
+          bool x7k = id(codex_7d_pct) >= 0.0f;
+          bool g5k = id(gemini_5h_pct) >= 0.0f;
+          bool g7k = id(gemini_7d_pct) >= 0.0f;
+          ProvData all_p[3] = {
+            { "${claude_label}", "Cla", ${claude_color}, id(claude_state),
+              c5k, c7k, c5k ? id(usage_5h).state : 0.0f, c7k ? id(usage_7d).state : 0.0f,
+              id(elapsed_5h), id(elapsed_7d), &id(eta_5h_text), &id(eta_7d_text),
+              { id(ho_spr_claude_1)->get_lv_image_dsc(), id(ho_spr_claude_2)->get_lv_image_dsc() },
+              id(ho_spr_legend_claude)->get_lv_image_dsc() },
+            { "${codex_label}", "Cdx", ${codex_color}, id(codex_state),
+              x5k, x7k, x5k ? id(codex_5h_pct) : 0.0f, x7k ? id(codex_7d_pct) : 0.0f,
+              id(elapsed_codex_5h), id(elapsed_codex_7d), &id(eta_codex_5h_text), &id(eta_codex_7d_text),
+              { id(ho_spr_codex_1)->get_lv_image_dsc(), id(ho_spr_codex_2)->get_lv_image_dsc() },
+              id(ho_spr_legend_codex)->get_lv_image_dsc() },
+            { "${gemini_label}", "Gem", ${gemini_color}, id(gemini_state),
+              g5k, g7k, g5k ? id(gemini_5h_pct) : 0.0f, g7k ? id(gemini_7d_pct) : 0.0f,
+              id(elapsed_gemini_5h), id(elapsed_gemini_7d), &id(eta_gemini_5h_text), &id(eta_gemini_7d_text),
+              { id(ho_spr_gemini_1)->get_lv_image_dsc(), id(ho_spr_gemini_2)->get_lv_image_dsc() },
+              id(ho_spr_legend_gemini)->get_lv_image_dsc() }
+          };
+
+          const bool pres[3] = { id(claude_present), id(codex_present), id(gemini_present) };
+          int act[3] = { 0, 1, 2 };
+          int N = 0;
+          for (int i = 0; i < 3; i++) {
+            if (pres[i]) act[N++] = i;
+          }
+          const bool none_configured = (N == 0);
+          if (none_configured) { act[0] = 0; N = 1; }
+
+          static uint32_t t = 0;
+          t++;
+          bool gallop = (t % 2) == 0;
+          // Each spectator wears a configured provider's silks.
+          lv_obj_set_pos(id(ho_scene), big ? 8 : 4, big ? 20 : 0);
+          lv_obj_set_size(id(ho_scene), big ? 304 : 232, big ? 40 : 30);
+          lv_obj_set_pos(id(ho_ground), 0, big ? 38 : 28);
+          lv_obj_set_size(id(ho_ground), big ? 304 : 232, 2);
+          lv_obj_t *crowd[30] = { id(ho_crowd_0), id(ho_crowd_1), id(ho_crowd_2), id(ho_crowd_3), id(ho_crowd_4), id(ho_crowd_5), id(ho_crowd_6), id(ho_crowd_7), id(ho_crowd_8), id(ho_crowd_9), id(ho_crowd_10), id(ho_crowd_11), id(ho_crowd_12), id(ho_crowd_13), id(ho_crowd_14), id(ho_crowd_15), id(ho_crowd_16), id(ho_crowd_17), id(ho_crowd_18), id(ho_crowd_19), id(ho_crowd_20), id(ho_crowd_21), id(ho_crowd_22), id(ho_crowd_23), id(ho_crowd_24), id(ho_crowd_25), id(ho_crowd_26), id(ho_crowd_27), id(ho_crowd_28), id(ho_crowd_29) };
+          int ncrowd = big ? 19 : 29, cstep = big ? 16 : 8, cy = big ? 10 : 18;
+          int fy = big ? 24 : 22;
+          bool cheer = ((t / 3) % 2) == 1;
+          const void *fan[3][2] = {
+            { id(ho_spr_fan_claude_1)->get_lv_image_dsc(), id(ho_spr_fan_claude_2)->get_lv_image_dsc() },
+            { id(ho_spr_fan_codex_1)->get_lv_image_dsc(), id(ho_spr_fan_codex_2)->get_lv_image_dsc() },
+            { id(ho_spr_fan_gemini_1)->get_lv_image_dsc(), id(ho_spr_fan_gemini_2)->get_lv_image_dsc() }
+          };
+          for (int j = 0; j < 30; j++) {
+            show(crowd[j], !none_configured && j < ncrowd);
+            if (j < ncrowd) {
+              lv_obj_set_pos(crowd[j], j * cstep, cy);
+              lv_image_set_src(crowd[j], fan[act[j % N]][cheer ? 1 : 0]);
+            }
+          }
+          // One fence widget: the sprite repeats at its own width across the scene.
+          lv_image_set_inner_align(id(ho_fence), LV_IMAGE_ALIGN_TILE);
+          lv_obj_set_pos(id(ho_fence), 0, fy);
+          lv_obj_set_width(id(ho_fence), big ? 304 : 232);
+          // Hanging banner: cords, board, parchment inset, label on top.
+          int bx = big ? 78 : 0, bw = big ? 148 : 125, bh = big ? 24 : 18;
+          lv_obj_set_pos(id(ho_ban_cord_l), bx + 4, 0);
+          lv_obj_set_pos(id(ho_ban_cord_r), bx + bw - 6, 0);
+          lv_obj_set_pos(id(ho_ban_field), bx, 3);
+          lv_obj_set_size(id(ho_ban_field), bw, bh - 3);
+          lv_obj_set_pos(id(ho_ban_inset), bx + 2, 4);
+          lv_obj_set_size(id(ho_ban_inset), bw - 4, bh - 5);
+          lv_obj_set_pos(id(ho_banner_lbl), big ? 90 : 8, big ? 24 : 1);
+          lv_obj_set_width(id(ho_banner_lbl), big ? 140 : 117);
+          // The legend's horse takes the lead provider's colour.
+          show(id(ho_legend), big);
+          lv_obj_set_pos(id(ho_legend), 8, 2);
+          static const void *legend_src = nullptr;
+          if (all_p[act[0]].legend_dsc != legend_src) {
+            legend_src = all_p[act[0]].legend_dsc;
+            lv_image_set_src(id(ho_legend_tokens_icon), legend_src);
+          }
+          lv_obj_set_y(id(ho_status), big ? 2 : 0);
+          lv_obj_set_style_text_font(id(ho_status), id(font_meta), 0);
+
+          // Device status from the engine. The legend (the banner on the small
+          // panel) keeps its own width and the status scrolls in the room right of it.
+          static std::string st_last;
+          const std::string &st = id(status_text);
+          if (st != st_last) {
+            st_last = st;
+            lv_label_set_text(id(ho_status), st.c_str());
+            lv_obj_set_width(id(ho_status), LV_SIZE_CONTENT);
+            lv_obj_update_layout(id(ho_status));
+            const int right = big ? 312 : 236;
+            lv_obj_update_layout(id(ho_legend));
+            int left = big ? 8 + lv_obj_get_width(id(ho_legend)) : bx + bw;
+            int sw = lv_obj_get_width(id(ho_status));
+            int sw_max = right - left - 6;
+            if (sw > sw_max) { sw = sw_max; lv_obj_set_width(id(ho_status), sw); }
+            lv_obj_set_x(id(ho_status), right - sw);
+          }
+
+          lv_obj_set_style_text_color(id(ho_status), lv_color_hex(id(status_alert) ? 0xff6b6b : 0xeee1b5), 0);
+          lv_obj_t *lbls[6] = { id(ho_lbl_0), id(ho_lbl_1), id(ho_lbl_2), id(ho_lbl_3), id(ho_lbl_4), id(ho_lbl_5) };
+          lv_obj_t *vals[6] = { id(ho_val_0), id(ho_val_1), id(ho_val_2), id(ho_val_3), id(ho_val_4), id(ho_val_5) };
+          lv_obj_t *etas[6] = { id(ho_eta_0), id(ho_eta_1), id(ho_eta_2), id(ho_eta_3), id(ho_eta_4), id(ho_eta_5) };
+          lv_obj_t *lanes[6] = { id(ho_lane_0), id(ho_lane_1), id(ho_lane_2), id(ho_lane_3), id(ho_lane_4), id(ho_lane_5) };
+          lv_obj_t *turfs[6] = { id(ho_turf_0), id(ho_turf_1), id(ho_turf_2), id(ho_turf_3), id(ho_turf_4), id(ho_turf_5) };
+          lv_obj_t *overs[6] = { id(ho_over_0), id(ho_over_1), id(ho_over_2), id(ho_over_3), id(ho_over_4), id(ho_over_5) };
+          lv_obj_t *rails[6] = { id(ho_rail_0), id(ho_rail_1), id(ho_rail_2), id(ho_rail_3), id(ho_rail_4), id(ho_rail_5) };
+          lv_obj_t *trails[6] = { id(ho_trail_0), id(ho_trail_1), id(ho_trail_2), id(ho_trail_3), id(ho_trail_4), id(ho_trail_5) };
+          lv_obj_t *edges[6] = { id(ho_edge_0), id(ho_edge_1), id(ho_edge_2), id(ho_edge_3), id(ho_edge_4), id(ho_edge_5) };
+          lv_obj_t *checks[6] = { id(ho_check_0), id(ho_check_1), id(ho_check_2), id(ho_check_3), id(ho_check_4), id(ho_check_5) };
+          lv_obj_t *dusts[6] = { id(ho_dust_0), id(ho_dust_1), id(ho_dust_2), id(ho_dust_3), id(ho_dust_4), id(ho_dust_5) };
+          lv_obj_t *riders[6] = { id(ho_rider_0), id(ho_rider_1), id(ho_rider_2), id(ho_rider_3), id(ho_rider_4), id(ho_rider_5) };
+          lv_obj_t *posts[6] = { id(ho_post_0), id(ho_post_1), id(ho_post_2), id(ho_post_3), id(ho_post_4), id(ho_post_5) };
+          static std::string lbl_last[6], val_last[6], eta_last[6];
+          static int slot_prov_last[6] = { -1, -1, -1, -1, -1, -1 };
+          static int slot_trbl_last[6] = { -1, -1, -1, -1, -1, -1 };
+          static int slot_mode_last[6] = { -1, -1, -1, -1, -1, -1 };
+
+          const void *pace_ok_dsc = id(ho_spr_post_ok)->get_lv_image_dsc();
+          const void *pace_tr_dsc = id(ho_spr_post_trouble)->get_lv_image_dsc();
+          const int ry1_b[2] = { 76, 154 }, ry1_s[2] = { 40, 86 };
+          const int ry2_b[4] = { 62, 106, 150, 194 }, ry2_s[4] = { 31, 56, 81, 107 };
+          const int ry3_b[3] = { 60, 120, 180 }, ry3_s[3] = { 31, 66, 100 };
+          for (int i = 0; i < 6; i++) {
+            bool vis = (i < 2 * N);
+            show(lbls[i], vis); show(vals[i], vis); show(etas[i], vis); show(lanes[i], vis);
+            if (!vis) {
+              show(posts[i], false);
+              continue;
+            }
+
+            int p_idx = i / 2;
+            int win = i % 2;
+            int prov_id = act[p_idx];
+            const auto &p = all_p[prov_id];
+            bool u_ok = !none_configured && ((win == 0) ? p.u5_ok : p.u7_ok);
+            float u_raw = (win == 0) ? p.u5_raw : p.u7_raw;
+            float u_val = u_ok ? pct(u_raw) : 0.0f;
+            float el = (win == 0) ? p.e5 : p.e7;
+            bool t_ok = !none_configured && (el >= 0.0f);
+            float t_val = t_ok ? pct(el * 100.0f) : 0.0f;
+            const std::string &raw_eta = (win == 0) ? *p.eta5 : *p.eta7;
+            bool trouble = tokentide_poller::window_off_pace(u_ok, u_raw, el);
+
+            if (slot_prov_last[i] != prov_id) {
+              slot_prov_last[i] = prov_id;
+              lv_obj_set_style_text_color(vals[i], lv_color_hex(p.col), 0);
+              lv_obj_set_style_bg_color(trails[i], lv_color_hex(p.col), 0);
+            }
+            int trbl_i = trouble ? 1 : 0;
+            if (slot_trbl_last[i] != trbl_i) {
+              slot_trbl_last[i] = trbl_i;
+              lv_obj_set_style_text_color(etas[i], lv_color_hex(trouble ? 0xf2a88d : 0xccc19c), 0);
+              lv_image_set_src(posts[i], trouble ? pace_tr_dsc : pace_ok_dsc);
+            }
+            int mode_i = (N == 3) ? 3 : 2;
+            if (slot_mode_last[i] != mode_i) {
+              slot_mode_last[i] = mode_i;
+              if (N == 3) {
+                lv_obj_set_style_text_font(lbls[i], id(font_meta), 0);
+                lv_obj_set_style_text_font(vals[i], id(font_small), 0);
+                lv_obj_set_style_text_font(etas[i], id(font_meta), 0);
+              } else {
+                lv_obj_set_style_text_font(lbls[i], id(font_small), 0);
+                lv_obj_set_style_text_font(vals[i], id(font_mid), 0);
+                lv_obj_set_style_text_font(etas[i], id(font_meta), 0);
+              }
+            }
+
+            std::string v_str = "--%";
+            if (u_ok) {
+              char vb[8];
+              snprintf(vb, sizeof(vb), "%d%%", (int) lroundf(u_raw < 0.0f ? 0.0f : u_raw));
+              v_str = vb;
+            }
+            if (v_str != val_last[i]) { val_last[i] = v_str; lv_label_set_text(vals[i], v_str.c_str()); }
+
+            int tx = 0, ty = 0, tw = 0, th = big ? 16 : 8, pad = big ? 12 : 6;
+            if (N < 3) {
+              int ly = (N == 1) ? (big ? ry1_b[i] : ry1_s[i]) : (big ? ry2_b[i] : ry2_s[i]);
+              std::string l_str = std::string(none_configured ? "${str_setup}" : p.name) + (win == 0 ? " 5h" : " 7d");
+              if (l_str != lbl_last[i]) { lbl_last[i] = l_str; lv_label_set_text(lbls[i], l_str.c_str()); }
+
+              std::string e_str;
+              if (p.state == tokentide_poller::STATE_NO_DATA) {
+                e_str = "${str_no_data}";
+              } else if (t_ok) {
+                char eb[32];
+                snprintf(eb, sizeof(eb), big ? "${str_time} %d%% | %s" : "${str_time_short}:%d%% | %s",
+                         (int) lroundf(t_val), raw_eta.c_str());
+                e_str = eb;
+              } else {
+                e_str = std::string("${str_resets_in} ") + raw_eta;
+              }
+              if (e_str != eta_last[i]) { eta_last[i] = e_str; lv_label_set_text(etas[i], e_str.c_str()); }
+
+              lv_obj_set_pos(lbls[i], big ? 8 : 4, big ? ly + 4 : ly);
+              lv_obj_set_width(lbls[i], big ? 88 : 64);
+              lv_obj_set_pos(vals[i], big ? 98 : 68, ly - (big ? 1 : 3));
+              lv_obj_set_width(vals[i], big ? 68 : 48);
+              lv_obj_set_pos(etas[i], big ? 170 : 118, big ? ly + 4 : ly);
+              lv_obj_set_size(etas[i], big ? 142 : 118, big ? 20 : 16);
+
+              tx = big ? 16 : 8;
+              ty = ly + (big ? 28 : 19);
+              tw = big ? 288 : 224;
+            } else {
+              int ly = big ? ry3_b[p_idx] : ry3_s[p_idx];
+              int cx = (win == 0) ? (big ? 8 : 4) : (big ? 164 : 124);
+              int cw = big ? 148 : 112;
+
+              std::string l_str = (win == 0)
+                  ? (std::string(big ? p.name : p.short_name) + " 5h")
+                  : std::string("7d");
+              if (l_str != lbl_last[i]) { lbl_last[i] = l_str; lv_label_set_text(lbls[i], l_str.c_str()); }
+
+              std::string e_str;
+              for (char ch : raw_eta) {
+                // The small paired cells fit the leading countdown unit.
+                if (!big && ch == ' ') break;
+                if (ch != ' ') e_str.push_back(ch);
+              }
+              if (big && e_str.size() > 5) e_str = raw_eta.substr(0, raw_eta.find(' '));
+              if (p.state == tokentide_poller::STATE_NO_DATA) e_str = "${str_no_data}";
+              if (e_str != eta_last[i]) { eta_last[i] = e_str; lv_label_set_text(etas[i], e_str.c_str()); }
+
+              lv_obj_set_pos(lbls[i], cx, ly);
+              lv_obj_set_width(lbls[i], big ? 94 : 70);
+              lv_obj_set_pos(vals[i], cx + (big ? 100 : 74), ly - 1);
+              lv_obj_set_width(vals[i], big ? 48 : 38);
+              lv_obj_set_pos(etas[i], cx, ly + (big ? 20 : 13));
+              lv_obj_set_size(etas[i], cw, big ? 16 : 13);
+
+              tx = cx;
+              ty = ly + (big ? 38 : 26);
+              tw = cw;
+            }
+
+            int U = tw - 2 * pad;
+            int used = u_ok ? (int) lroundf(U * u_val / 100.0f) : 0;
+            int elapsed = t_ok ? (int) lroundf(U * t_val / 100.0f) : 0;
+            auto rect = [&](lv_obj_t *o, int x, int y, int w, int h, bool on) {
+              show(o, on && w > 0);
+              if (on && w > 0) { lv_obj_set_pos(o, x, y); lv_obj_set_size(o, w, h); }
+            };
+            lv_obj_set_pos(lanes[i], tx, ty);
+            lv_obj_set_size(lanes[i], tw, th);
+            rect(turfs[i], pad, 0, elapsed, th, t_ok);
+            rect(overs[i], pad + elapsed, 0, used - elapsed, th, trouble);
+            rect(rails[i], pad, 0, trouble ? used : elapsed, 1, t_ok);
+            lv_obj_set_style_bg_color(rails[i], lv_color_hex(trouble ? 0x95452f : 0x5c5042), 0);
+            rect(trails[i], pad, th - (big ? 2 : 1), used, big ? 2 : 1, u_ok);
+            rect(edges[i], pad, 0, 1, th, true);
+            // The finish post is two checker columns side by side, tiled.
+            lv_image_set_inner_align(checks[i], LV_IMAGE_ALIGN_TILE);
+            lv_obj_set_pos(checks[i], tw - pad, 0);
+            lv_obj_set_width(checks[i], big ? 8 : 4);
+            show(riders[i], u_ok);
+            if (u_ok) {
+              lv_image_set_src(riders[i], p.horse_dsc[gallop ? 1 : 0]);
+              lv_obj_set_pos(riders[i], used, 0);
+            }
+            show(dusts[i], u_ok && used > pad);
+            if (u_ok && used > pad) {
+              lv_image_set_src(dusts[i], (gallop ? id(ho_spr_dust_2) : id(ho_spr_dust_1))->get_lv_image_dsc());
+              lv_obj_set_pos(dusts[i], used - (big ? 12 : 6), th - (big ? 12 : 6));
+            }
+            // The post sits above the rider so equal usage and elapsed time stay visible.
+            show(posts[i], t_ok);
+            if (t_ok) lv_obj_set_pos(posts[i], tx + pad + elapsed - (big ? 6 : 3), ty - (big ? 4 : 2));
+          }
+
+interval:
+  - interval: 500ms
+    then:
+      - script.execute: theme_horses_redraw

@@ -1,0 +1,724 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file tab5-lvgl.yaml
+# @role Layout complet de l'interface LVGL (pages, widgets statiques, grille).
+# @architecture_constraint Ne jamais créer de tableaux C++ ou de logique métier complexe
+#                         (comme le calcul de pagination) dans ce fichier YAML.
+# @ai_instruction Ce fichier doit rester purement déclaratif (UI). Toute logique de swipe
+#                 doit être déléguée au C++.
+# @carte Depuis le lot 3 du portage 1024×600 (ADR-0061), positions et tailles de l'accueil
+#        sont des jetons acc_* et hor_* (Tab5/paquets/tab5-ui-tokens.yaml) : la mise en page
+#        du Tab5 ramenée à l'écran de la carte. Les valeurs citées dans les commentaires de
+#        ce fichier (x 20, y 333, 401 px…) sont celles du Tab5 ; une nouvelle position = un
+#        jeton, pas un littéral (tests/test_geometrie_partagee.py tient le Tab5 au pixel).
+# ============================================================================
+lvgl:
+
+  pages:
+
+    - id: page_main
+      scrollbar_mode: "OFF"
+      # L'écran ne défile jamais. Pendant un swipe des prévisions, le calque entrant
+      # part 110 px hors écran (animate_swipe_horizontal) : la page devenait alors
+      # défilable, le doigt encore posé la faisait glisser, et tout l'affichage
+      # restait décalé (vu le 29/09/2026). Le geste, lui, ne dépend pas du défilement.
+      scrollable: false
+
+      on_gesture:
+        then:
+          # [AI-CONTEXT] Pagination previsions (swipe gauche/droite, y>=333 carte centrale)
+          # deleguee a handle_swipe_gesture(). Console diag (page Système des Réglages) : appui long sur btn_control_console (choix « auto »).
+          - lambda: |-
+              lv_indev_t * indev = lv_indev_active();
+              if (indev) {
+                  lv_point_t pt;
+                  lv_indev_get_point(indev, &pt);
+                  lv_dir_t d = lv_indev_get_gesture_dir(indev);
+
+                  handle_swipe_gesture(d, pt.y,
+                      id(layer_forecast_daily), id(layer_forecast_hourly),
+                      g_day_slots, g_hour_slots,
+                      id(font_meteo_card), id(font_meteo_card_small),
+                      id(page_title_wrapper), id(lbl_page_title),
+                      g_central_ctx);
+              }
+
+      widgets:
+
+        # --- Top Left: Status Icons (Moved lower) ---
+
+        # --- Grille du haut (05/10/2026) ---
+        # Trois colonnes à 20 px des bords de l'écran, comme le bandeau central : gauche
+        # 20-425 (Domo, micro, Discu, Ok Nabu), horloge 440-841, droite 855-1260 (HA,
+        # Sys, TV, températures, clim) ; 15 px entre les boutons, 15 px à gauche de
+        # l'horloge et 14 px à droite (1280 − 2 × 20 − 2 × 405 = 430 = 401 + 29 : LVGL
+        # centre la tuile à 640 − 401 / 2 = 440, mesuré sur le rendu du 05/10/2026).
+        # Hauts alignés à y 20 (horloge, HA / Sys / TV) ; bas alignés à y 308 (Ok Nabu,
+        # pied des icônes des pots, tuile clim), 25 px au-dessus du bandeau central :
+        # le même écart qu'entre le bandeau et les titres des cartes météo (417 → 442).
+        # Boutons 125 × 90 et icônes MDI de 70 px (mdi_font_70, encre de 58 px) : 16 px
+        # d'air au-dessus et au-dessous de l'icône dans chaque bouton.
+
+        # --- Zone à gauche de l'horloge au choix (ADR-0051, 10/10/2026, demande d'Axel) ---
+        # Quatre contenus, l'un montré, les autres masqués par zone_gauche_appliquer()
+        # (tab5_zone_gauche.cpp) : zone_vocal (le micro et les boutons Domo / Discu, l'écran
+        # d'avant), zone_graphique (les heures qui viennent en courbe et barres de pluie) ou
+        # zone_lecteur (le lecteur de musique compact, lecteur_zone.yaml) ou zone_suivi (le
+        # premier capteur suivi en courbe, suivi_zone.yaml, ADR-0054).
+        # Le contenu suivant : tap sur la seconde température (btn_serre_games) ou le geste
+        # « zone_gauche_suivante » ; le départ et le cycle se choisissent dans le blueprint
+        # (clé « gauche »). Le cadre Ok Nabu, dessous, ne change pas.
+        # --- Voice Assistant Panel (Left) ---
+        # Conteneur posé au coin de l'écran, sans fond, bordure ni padding : ses enfants
+        # gardent leurs coordonnées d'écran d'avant (rendu inchangé). Il couvre le haut de la
+        # colonne jusqu'à y 230 (le cadre Ok Nabu commence à 236) ; non cliquable, il ne prend
+        # aucun toucher à ses boutons.
+        - obj:
+            id: zone_vocal
+            align: TOP_LEFT
+            x: 0
+            y: 0
+            width: ${acc_horloge_x}
+            height: ${acc_vocal_h}
+            styles: style_transparent
+            clickable: false
+            scrollable: false
+            scrollbar_mode: "OFF"
+            widgets:
+              # Micro au milieu de la colonne (160-285, encre centrée sur la rangée Domo / Discu :
+              # 12 px au-dessus d'elle, qui suit le cadre Ok Nabu).
+              - label: { id: icon_mic_status, text: "\U000F036C", align: TOP_LEFT, x: "${acc_micro_x}", y: "${acc_micro_y}", text_font: mdi_font_120, styles: style_text_dim }
+              - button:
+                  id: btn_assist_trigger
+                  align: TOP_LEFT
+                  x: ${acc_micro_x}
+                  y: ${acc_micro_y}
+                  width: ${acc_micro_l}
+                  height: ${acc_micro_l}
+                  styles: style_invisible
+                  on_short_click:
+                    - script.execute: tab5_assist_toggle
+                  on_long_press:
+                    # Appui long sur la zone micro -> popup Assistant vocal plein écran
+                    - script.execute: tab5_assist_open
+
+              # Bouton Domo (et Discu ci-dessous) : masqués sans pipeline de discussion dans HA
+              # (zone « discussion », zones_apply_ui) ; le micro reste au milieu.
+              # Icône seule (05/10/2026). Rangée centrée entre le bandeau d'état (encre jusqu'à
+              # y 34) et Ok Nabu (y 236 depuis le 09/10/2026, cadre de 72 px, cadre_bas_h) : 56 px
+              # d'air au-dessus, 56 au-dessous.
+              - button:
+                  id: btn_mode_domo
+                  align: TOP_LEFT
+                  x: ${acc_marge}
+                  y: ${acc_domo_y}
+                  width: ${acc_bouton_l}
+                  height: ${acc_bouton_h}
+                  styles: style_clim_btn_page
+                  on_short_click:
+                    - script.execute:
+                        id: tab5_set_assist_mode
+                        discussion: false
+                  widgets:
+                    - label: { text: "\U000F07D0", align: CENTER, text_font: mdi_font_70 }
+
+              # Bouton Discu
+              - button:
+                  id: btn_mode_discu
+                  align: TOP_LEFT
+                  x: ${acc_discu_x}
+                  y: ${acc_domo_y}
+                  width: ${acc_bouton_l}
+                  height: ${acc_bouton_h}
+                  styles: style_clim_btn_page
+                  on_short_click:
+                    - script.execute:
+                        id: tab5_set_assist_mode
+                        discussion: true
+                  widgets:
+                    - label: { text: "\U000F06A9", align: CENTER, text_font: mdi_font_70 }
+
+        # Graphique des heures qui viennent (ADR-0051) : une carte du verre des boutons de la
+        # colonne (style_clim_btn_page), x 20-425 comme elle, de y 42 (8 px sous l'encre du
+        # bandeau d'état) à 226 (10 px au-dessus du cadre Ok Nabu), centrée comme la rangée
+        # Domo / Discu. Masquée au démarrage ; son contenu (courbe, barres, repères, heures)
+        # est construit en C++ à sa première apparition. Tap : le popup Météo (ADR-0043).
+        - button:
+            id: zone_graphique
+            align: TOP_LEFT
+            x: ${acc_marge}
+            y: ${acc_zone_y}
+            width: ${acc_col_l}
+            height: ${acc_zone_h}
+            pad_all: 0
+            hidden: true
+            scrollable: false
+            scrollbar_mode: "OFF"
+            styles: style_clim_btn_page
+            on_short_click:
+              - lambda: 'if (!ui_appui_glisse()) id(tab5_ecran_ouvrir).execute((int) Ecran::METEO);'
+        # Lecteur compact (ADR-0051, lot 2, sur le lecteur de l'ADR-0050) : même emprise que
+        # le graphique, masqué au démarrage. Tap hors des boutons : le popup Musique.
+        - !include ../ui_components/lecteur_zone.yaml
+        # Capteur suivi (ADR-0054) : même emprise, masqué au démarrage. Tap : le popup Suivi.
+        - !include ../ui_components/suivi_zone.yaml
+
+        # Bouton OK Nabu : même place que la tuile clim, en miroir (toute la colonne,
+        # bas à y 308), texte à la taille de la date (45 px). Hauteur ajustée au texte le
+        # 09/10/2026 (demande d'Axel, 90 px avant : le texte « nageait ») : cadre_bas_h
+        # (72), un intérieur d'une ligne de zone (ligne_zone_h, 70 : la hauteur de la
+        # rangée sous l'horloge), tab5-ui-tokens.yaml. Le bouton
+        # Muet qui le précédait est retiré le 05/10/2026 : le son se coupe depuis le
+        # popup Assistant vocal (btn_assist_mute).
+        # Panneau à lignes depuis le 09/10/2026 (lot 3, ADR-0041) : comme la rangée sous
+        # l'horloge, jusqu'à trois lignes choisies dans le blueprint (section « Panneau
+        # Ok Nabu », clés nLI / np / nd ; tab5_rangee.cpp les dessine) — la ligne d'écoute
+        # (nabu_ecoute, « Ok Nabu: ON / OFF », la seule par défaut : l'écran d'avant) et des
+        # lignes de quatre capteurs (nabu_a, nabu_b, en alternance). Tap : le mot de réveil
+        # quand la ligne d'écoute est à l'écran, rien sur une ligne de capteurs (affichage
+        # seul, comme la rangée) ; ligne suivante : le tap des heures (« auto »). Les
+        # panneaux tiennent dans la bordure (401 × 70 au centre de 403 × 70), non
+        # cliquables : le toucher reste au bouton. Masqué sans aucune ligne (écoute masquée
+        # et aucun capteur).
+        - button:
+            id: btn_ok_nabu
+            align: TOP_LEFT
+            x: ${acc_marge}
+            y: ${acc_cadre_y}
+            width: ${acc_col_l}
+            height: ${cadre_bas_h}
+            pad_all: 0
+            scrollable: false
+            styles: style_clim_btn_page
+            on_short_click:
+              - if:
+                  condition:
+                    lambda: 'return nabu_ecoute_affichee();'
+                  then:
+                    - switch.toggle: tab5_wake_word_active
+            widgets:
+              - obj:
+                  id: nabu_ecoute
+                  align: CENTER
+                  width: ${acc_ligne_l}
+                  height: ${ligne_zone_h}
+                  styles: style_transparent
+                  clickable: false
+                  scrollable: false
+                  scrollbar_mode: "OFF"
+                  widgets:
+                    - label: { id: lbl_ok_nabu, text: "Ok Nabu: ON", align: CENTER, styles: [style_police_date, style_text_success] }
+              - !include { file: ../ui_components/rangee_panneau.yaml, vars: { id: nabu_a, el: "na" } }
+              - !include { file: ../ui_components/rangee_panneau.yaml, vars: { id: nabu_b, el: "nb" } }
+        # Pastilles du panneau Ok Nabu (une par ligne, masquées sous deux lignes), centrées
+        # sous lui à la hauteur de celles de la rangée.
+        - !include { file: ../ui_components/rangee_pastilles.yaml, vars: { nom: nabu, align: TOP_LEFT, x: "${acc_marge}", largeur: "${acc_col_l}" } }
+        # Mini-barre « en lecture » du lecteur de musique (ADR-0050) : par-dessus le cadre
+        # Ok Nabu quand le lecteur montré joue ; un tap ouvre le popup Musique.
+        - !include ../ui_components/lecteur_mini.yaml
+
+        # --- Centre: Horloge ---
+        # Marges égales (05/10/2026, demande d'Axel) : autant d'air entre le haut de la
+        # tuile et l'encre des chiffres qu'entre le bas des jambages de la date et le bas
+        # de la tuile (23 px en Roboto) ; sur les côtés, l'encre de HH:MM est centrée.
+        # Valeurs pour Roboto et une bordure de 1 px : theme_polices() (tab5_theme.cpp)
+        # repose cadres, « : » et date pour la police et la bordure du thème (05/10/2026).
+        - obj:
+            id: clock_tile
+            align: TOP_MID
+            x: 0
+            y: ${acc_haut_y}
+            width: ${acc_horloge_l}
+            height: ${acc_horloge_h}
+            styles: style_horloge_page
+            scrollbar_mode: "OFF"
+            widgets:
+              # Horloge à rouleau : UN conteneur qui rogne PAR CHIFFRE (H H : M M),
+              # 2 labels chacun (l'affiché + celui qui arrive), et le ":" fixe.
+              # De 22 à 23 mn, seul le dernier chiffre tourne.
+              # [AI-WARNING] Géométrie posée ICI seulement (01/10/2026). Jusque-là
+              # layout_clock_roller() la recalculait en C++ 2 s après le boot, et ces
+              # cadres provisoires de 105 px coupaient le bas des chiffres (encre de
+              # 27 à 123 px) pendant ~1,5 s au démarrage. Valeurs de roboto_130_b
+              # (Roboto 700, 130 px) : chiffre 75 px de large (tabulaire), « : »
+              # 37 px, encre des chiffres à 27-123 px du haut du label.
+              #   - cadre 75 × 104 à y 17 (clock_roller.yaml, gabarit des 4 rouleaux) :
+              #     l'encre + 3 px de marge en haut et 5 en bas ; l'encre visible (bpp 2 :
+              #     la 1re rangée des chiffres ronds est vide) à 23 px du haut de la tuile
+              #     (bordure 1 px), autant que sous le bas des jambages de la date. Plus
+              #     court que le label (152 px), sinon le chiffre qui arrive, posé
+              #     un cadre plus bas, déborderait sur la date ;
+              #   - label à y -23 : remonte l'encre dans le cadre ;
+              #   - x : HH:MM centré dans les 399 px de la tuile (bordure 1 px),
+              #     4 px de respiration de chaque côté du « : » ;
+              #   - date : ligne de base à y 177, 32 px au-dessus du bas de la tuile,
+              #     jambages jusqu'à 23 px ; label à y 135 en Roboto 45 (ascendante
+              #     42 px). Une police de thème repose ce y, et les cadres selon ses
+              #     jambages (theme_polices(), tools/police_theme.py).
+              # La hauteur du cadre EST la course du rouleau (lue par le C++).
+              # tests/test_horloge.py refait ces calculs depuis la police : changer
+              # la taille de police ou une valeur ici sans les autres le fait échouer.
+              # Ne pas remettre un label unique `lbl_time` : le C++ pilote ces
+              # 8 labels via g_clock_roller.
+              - !include { file: ../ui_components/clock_roller.yaml, vars: { d: h10, x: "${hor_h10_x}" } }
+              - !include { file: ../ui_components/clock_roller.yaml, vars: { d: h1, x: "${hor_h1_x}" } }
+              - label: { id: lbl_time_colon, text: ":", align: TOP_LEFT, x: "${hor_dp_x}", y: "${hor_dp_y}", styles: [style_police_horloge, style_horloge_text_soft] }
+              - !include { file: ../ui_components/clock_roller.yaml, vars: { d: m10, x: "${hor_m10_x}" } }
+              - !include { file: ../ui_components/clock_roller.yaml, vars: { d: m1, x: "${hor_m1_x}" } }
+              - label: { id: lbl_date, text: "", align: TOP_MID, y: "${hor_date_y}", styles: [style_police_date, style_horloge_text_soft] }
+
+        # Trois zones tactiles invisibles sur l'horloge (09/10/2026, lot A, ADR-0039 ;
+        # avant, une seule, btn_clock_calendar_zone : tap = réveil, long = calendrier).
+        # Chacune a un tap court et un appui long, choisis dans le blueprint (section
+        # « Horloge et boutons du haut », clé gestes ; Geste dans tab5_zones.h) :
+        #   - HEURES  (haut gauche)  : « auto » ligne suivante du panneau Ok Nabu (lot 3) / Réveil ;
+        #   - MINUTES (haut droite)  : « auto » appareil suivant de la tuile − / + / Réveil ;
+        #   - DATE    (bas)          : « auto » ligne suivante de la rangée / Calendrier.
+        # Elles couvrent toute la tuile (x 440..840, y 20..229), sans trou ni
+        # recouvrement :
+        #   - coupe verticale à x 640, le milieu de la tuile, qui tombe dans le « : »
+        #     (x 181..218 de la tuile, 621..658 de la page, selon la police du thème) ;
+        #     heures 440..639 (200 px), minutes 640..840 (201 px) ;
+        #   - coupe horizontale à y 158 = tuile + 1 (bordure) + police_theme.DATE_BASE
+        #     (177) − 40 : les cadres des chiffres finissent au-dessus, et l'encre de la
+        #     date (au plus 40 px au-dessus de sa ligne de base) commence en dessous, dans
+        #     les 21 thèmes (tests/test_polices_themes.py, tests/test_gestes.py).
+        - !include { file: ../ui_components/horloge_zone.yaml, vars: { id: btn_horloge_heures, x: "${acc_horloge_x}", y: "${acc_haut_y}", largeur: "${hor_heures_l}", hauteur: "${hor_chiffres_h}", court: GESTE_HEURES_COURT, long_appui: GESTE_HEURES_LONG } }
+        - !include { file: ../ui_components/horloge_zone.yaml, vars: { id: btn_horloge_minutes, x: "${acc_milieu}", y: "${acc_haut_y}", largeur: "${hor_minutes_l}", hauteur: "${hor_chiffres_h}", court: GESTE_MINUTES_COURT, long_appui: GESTE_MINUTES_LONG } }
+        - !include { file: ../ui_components/horloge_zone.yaml, vars: { id: btn_horloge_date, x: "${acc_horloge_x}", y: "${hor_coupe_y}", largeur: "${acc_horloge_l}", hauteur: "${hor_date_h}", court: GESTE_DATE_COURT, long_appui: GESTE_DATE_LONG } }
+        # Froid (ADR-0055, 10/10/2026, demande d'Axel) : « fridge-alert » dans le coin
+        # haut-droit de l'horloge, montrée (btn_froid_alerte) tant qu'un réfrigérateur ou un
+        # congélateur est au niveau grave, et qui clignote (froid_alerte_icone basculé toutes
+        # les 500 ms, sans fondu, tab5_froid.cpp). À droite de la tuile il n'y a que 14 px
+        # (x 841-854) : l'icône est DANS la tuile, à droite du cadre du dernier chiffre
+        # (x 297..372 de la tuile, 738..813 de la page), au-dessus de l'encre des chiffres
+        # (page y 43). Déclarée APRÈS les zones tactiles de l'horloge : visible, elle prend
+        # le tap de son coin (34 × 40 sur les 201 × 138 de la zone des minutes) et ouvre le
+        # popup Froid ; cachée, elle ne gêne rien. Couleur par style de rôle (règle 1).
+        - button:
+            id: btn_froid_alerte
+            align: TOP_LEFT
+            x: ${hor_froid_x}
+            y: ${acc_haut_y}
+            width: 34
+            height: 40
+            hidden: true
+            styles: style_invisible
+            on_short_click:
+              - lambda: 'if (!ui_appui_glisse()) id(tab5_ecran_ouvrir).execute((int) Ecran::FROID);'
+            widgets:
+              - label: { id: froid_alerte_icone, text: "\U000F11B1", align: TOP_RIGHT, x: -1, y: 1, text_font: mdi_font_26, styles: style_text_error }
+
+        # --- Top Left: Status Icons (Small) ---
+        # TV = icon_card_pc (épaule carte J0, moniteur) — pas d'icône TV ici
+        - label: { id: icon_pc, text: "\U000F0379", align: TOP_LEFT, x: 10, y: "${acc_bandeau_y}", text_font: mdi_font_26, styles: style_text_dim }
+        - label: { id: icon_phone, text: "\U000F011E", align: TOP_LEFT, x: 45, y: "${acc_bandeau_y}", text_font: mdi_font_26, styles: style_text_dim }
+        - label: { id: icon_wifi, text: "\U000F05A9", align: TOP_LEFT, x: 80, y: "${acc_bandeau_y}", text_font: mdi_font_26, styles: style_text_dim }
+        # Pastille réveil : cloche verte = armé avec une sonnerie calculée,
+        # ambre = armé mais aucun jour retenu (piège du mode « jours travaillés »
+        # pendant une semaine de congés), barrée et éteinte = réveil coupé.
+        # Repeinte par alarm_render_status_icon() depuis tab5_alarm_sync_ui.
+        - label: { id: icon_alarm_status, text: "\U000F0023", align: TOP_LEFT, x: 115, y: "${acc_bandeau_y}", text_font: mdi_font_26, styles: style_text_inactive }
+        # Production solaire (04/10/2026) : % de la puissance crête, poussé par le blueprint
+        # (clé « solaire » de tab5_maj_emplacements, section « Énergie »). Cachée tant
+        # qu'aucune valeur n'est reçue, ou sans solaire ; glyphe et couleur posés par
+        # solaire_peindre() (tab5_zones.cpp). Ordre et pas de 35 px : BandeauIcone.
+        - label: { id: icon_solaire, text: "\U000F0D9B", align: TOP_LEFT, x: 150, y: "${acc_bandeau_y}", text_font: mdi_font_26, styles: style_text_inactive, hidden: true }
+        # Batterie de la tablette (04/10/2026), en dernier comme sur un téléphone : la
+        # montrer ou la cacher (interrupteur « Tab5 Batterie montée », tab5-ha-controls.yaml)
+        # ne déplace aucune autre icône. Cachée jusqu'au premier tab5_zones_apply ;
+        # glyphe et couleur posés par batterie_peindre() (tab5_zones.cpp) : une prise
+        # quand la batterie n'est pas détectée (05/10/2026). Ordre et pas
+        # de 35 px : BandeauIcone (tab5_custom.h).
+        - label: { id: icon_batterie, text: "\U000F0091", align: TOP_LEFT, x: 185, y: "${acc_bandeau_y}", text_font: mdi_font_26, styles: style_text_inactive, hidden: true }
+
+        # --- Top Right Buttons (même habillage verre que Domo/Discu) ---
+        # Icône seule (05/10/2026). Chaque bouton a un tap et un appui long (06/10/2026,
+        # demande d'Axel) ; une mini icône (mdi_font_26, le jeu du bandeau d'état en haut à
+        # gauche) en haut à droite de la tuile dit ce que fait l'appui long, quand il fait
+        # quelque chose. Les trois restent à leur place : sans TV, la manette ouvre toujours
+        # l'Arcade. Les deux gestes au choix (appuis longs le 07/10/2026, taps le 09/10/2026 ;
+        # section « Horloge et boutons du haut » du blueprint) : geste_cible()
+        # (tab5_zones.cpp) dit ce que fait le geste, le script tab5_geste
+        # (tab5-navigation.yaml) le fait ; un tap changé change l'icône centrale. Un bouton =
+        # ui_components/bouton_haut.yaml (08/10/2026, audit YML-4 : géométrie, gestes et
+        # mini icône écrits une fois).
+        #
+        # Maison : tap « auto » = mode HA (ADR-0023, action mode_domo) : les cartes de la
+        # pièce de la page courante (ou de la plus proche qui a des appareils), fondu croisé
+        # avec la météo, titre de la pièce dans la carte centrale, bouton en couleur
+        # d'accent. Masqué sans aucun appareil. Tout est dans tuiles_mode_ha()
+        # (tab5_tuiles.cpp) ; la mention « prévisions périmées » suit tout de suite (masquée
+        # en mode HA, previsions_fraicheur_tick(), tab5_forecast.cpp). Appui long « auto » :
+        # popup Énergie (ADR-0028), quand HA pousse la production solaire.
+        - !include { file: ../ui_components/bouton_haut.yaml, vars: { id: btn_control_ha, x: "${acc_droite_x}", bouton: BOUTON_MAISON, icone_id: icon_ha, icone: "\U000F07D0", mini_id: icon_mini_ha, mini: "\U000F0D9B" } }
+        # Engrenage : tap « auto » = Réglages de la tablette sur leur page Écran (code
+        # reglages : tab5_reglages_ouvrir(REGLAGES_PAGE_ECRAN) par le registre), appui long
+        # = leur page Système (l'ancienne console système) en « auto » (avant le 06/10/2026,
+        # le flocon ouvrait la console d'un tap), sans mini icône en « auto ».
+        - !include { file: ../ui_components/bouton_haut.yaml, vars: { id: btn_control_console, x: "${acc_sys_x}", bouton: BOUTON_ENGRENAGE, icone_id: icon_engrenage, icone: "\U000F0493", mini_id: icon_mini_sys, mini: "\U000F018D" } }
+        # Manette : tap « auto » = Arcade (comme la seconde température), appui long « auto »
+        # = télécommande TV quand une TV est choisie dans le blueprint (zone TV) : la mini
+        # icône de l'écran le signale (glyphe de l'en-tête de tv_remote_popup.yaml). Avant le
+        # 06/10/2026, ce bouton était la télécommande et disparaissait sans TV.
+        - !include { file: ../ui_components/bouton_haut.yaml, vars: { id: btn_control_tv, x: "${acc_tv_x}", bouton: BOUTON_MANETTE, icone_id: icon_manette, icone: "\U000F0297", mini_id: icon_mini_tv, mini: "\U000F07C0" } }
+
+        # ==================== RANGÉE SOUS L'HORLOGE (ADR-0031) ====================
+        # Les plantes et jusqu'à trois lignes de capteurs décrites par HA, qui se
+        # relaient calées sur la carte centrale (tab5_rangee.cpp).
+        - !include ../ui_components/rangee.yaml
+
+        # Zone tactile invisible par-dessus la rangée (même géométrie que rangee_capteurs) :
+        # toucher -> ligne suivante ; appui long sur la ligne des plantes -> popup détails
+        # plantes (rien sur une ligne de capteurs : affichage seul). Masquée avec la rangée.
+        - button:
+            id: btn_rangee
+            align: TOP_MID
+            x: 0
+            y: ${acc_rangee_y}
+            width: ${acc_ligne_l}
+            height: ${ligne_zone_h}
+            styles: style_invisible
+            on_short_click:
+              - lambda: 'rangee_toucher();'
+            on_long_press:
+              - lambda: |-
+                  if (rangee_plantes_affichees()) animate_popup_open(id(pots_detail_popup));
+
+        # Pastilles de la rangée : une par ligne, sous elle (entre ses icônes, encre jusqu'à
+        # y 308, et la carte centrale, y 333), comme celles de la carte centrale ;
+        # masquées sous deux lignes (tab5_rangee.cpp, pastilles()).
+        - !include { file: ../ui_components/rangee_pastilles.yaml, vars: { nom: rangee, align: TOP_MID, x: "0", largeur: SIZE_CONTENT } }
+
+        # ==================== CLIMATE CONTROL (MIDDLE RIGHT) ====================
+
+        - !include ../ui_components/climate_card.yaml
+        # ==================== CENTRAL CARD (Alertes, Pluie, Planning) ====================
+        # Appui long sur un panneau de l'accueil (planning, pluie, vigilance, info, alertes HA)
+        # ou sur le titre d'une page (prévisions, pièce du mode HA) : la roue de navigation
+        # (ADR-0042, 09/10/2026), centrée sur la carte, dont le premier bouton est le popup
+        # « Alertes » qu'ouvrait cet appui long avant (lot 4 du plan des alertes).
+        - obj:
+            id: central_card
+            x: ${acc_marge}
+            y: ${acc_centrale_y}
+            width: ${central_carte_w}
+            height: ${acc_centrale_h}
+            styles: style_bandeau_page
+            scrollbar_mode: "OFF"
+            pad_left: 20
+            pad_right: 20
+            widgets:
+              - obj:
+                  id: alert_container
+                  align: CENTER
+                  width: SIZE_CONTENT
+                  height: SIZE_CONTENT
+                  styles: style_transparent
+                  scrollbar_mode: "OFF"  # le texte déborde en glissant (transition_widgets)
+                  hidden: true
+                  widgets:
+                    - obj:
+                        align: CENTER
+                        width: SIZE_CONTENT
+                        height: SIZE_CONTENT
+                        styles: style_transparent
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_main: CENTER
+                          flex_align_cross: CENTER
+                          pad_column: 15
+                        widgets:
+                          - label: { id: alerte_slot_0, text: "", text_font: mdi_font_alert, hidden: true }
+                          - label: { id: alerte_slot_1, text: "", text_font: mdi_font_alert, hidden: true }
+                          - label: { id: alerte_slot_2, text: "", text_font: mdi_font_alert, hidden: true }
+                          - label: { id: alerte_slot_3, text: "", text_font: mdi_font_alert, hidden: true }
+                    - !include { file: ../ui_components/central_bouton.yaml, vars: { id: btn_alerts_mf_tap, appui: [ script.execute: tab5_central_panel_next ] } }
+
+              # Pluie Wrapper
+              - obj:
+                  id: rain_wrapper
+                  align: CENTER
+                  width: SIZE_CONTENT
+                  height: SIZE_CONTENT
+                  styles: style_transparent
+                  scrollbar_mode: "OFF"  # le texte déborde en glissant (transition_widgets)
+                  hidden: true
+                  widgets:
+                    - obj:
+                        align: CENTER
+                        width: SIZE_CONTENT
+                        height: SIZE_CONTENT
+                        styles: style_transparent
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_main: CENTER
+                          flex_align_cross: CENTER
+                          pad_column: ${acc_pluie_ecart}
+                        widgets:
+                          - label: { id: icon_rain_predict, text: "\U000F0597", text_font: mdi_font_alert, styles: style_bandeau_text_temp_min }
+                          - obj:
+                              id: rain_bar_container
+                              width: SIZE_CONTENT
+                              height: ${acc_pluie_h}
+                              styles: style_transparent
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: CENTER
+                                flex_align_cross: END
+                              widgets:
+                                - !include { file: ../ui_components/rain_bar.yaml, vars: { n: 0, w: "${acc_pluie_5mn_l}" } }
+                                - !include { file: ../ui_components/rain_bar.yaml, vars: { n: 1, w: "${acc_pluie_5mn_l}" } }
+                                - !include { file: ../ui_components/rain_bar.yaml, vars: { n: 2, w: "${acc_pluie_5mn_l}" } }
+                                - !include { file: ../ui_components/rain_bar.yaml, vars: { n: 3, w: "${acc_pluie_5mn_l}" } }
+                                - !include { file: ../ui_components/rain_bar.yaml, vars: { n: 4, w: "${acc_pluie_5mn_l}" } }
+                                - !include { file: ../ui_components/rain_bar.yaml, vars: { n: 5, w: "${acc_pluie_5mn_l}" } }
+                                - !include { file: ../ui_components/rain_bar.yaml, vars: { n: 6, w: "${acc_pluie_10mn_l}" } }
+                                - !include { file: ../ui_components/rain_bar.yaml, vars: { n: 7, w: "${acc_pluie_10mn_l}" } }
+                                - !include { file: ../ui_components/rain_bar.yaml, vars: { n: 8, w: "${acc_pluie_10mn_l}" } }
+                          # Textes de la pluie, posés en bas (flex END) avec leur air dessous :
+                          # plus hauts que la rangée (icône, barres), ils débordaient en haut et
+                          # la boîte montrait une barre de défilement à droite du texte (vue au
+                          # rendu sur les deux cartes, 18/10/2026). Ni défilement ni barre.
+                          - obj:
+                              width: SIZE_CONTENT
+                              height: 100%
+                              styles: style_transparent
+                              scrollable: false
+                              scrollbar_mode: "OFF"
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: CENTER
+                                flex_align_cross: END
+                                pad_column: 6
+                              widgets:
+                                - label: { id: lbl_proc_pluie, text: "Synchronisation...", styles: [style_police_date, style_bandeau_text_soft], pad_bottom: "${acc_pluie_pad}" }
+                                - label: { id: lbl_pluie_val, text: "", styles: [style_police_date, style_bandeau_text_rain_value], pad_bottom: "${acc_pluie_pad_val}" }
+                                - label: { id: lbl_pluie_unit, text: "", styles: [style_police_date, style_bandeau_text_soft], pad_bottom: "${acc_pluie_pad}" }
+                    - !include { file: ../ui_components/central_bouton.yaml, vars: { id: btn_rain_tap, appui: [ script.execute: tab5_central_panel_next ] } }
+
+              # Réponse vocale IA (remplace le rotateur 8s le temps de l'affichage)
+              - obj:
+                  id: vocal_wrapper
+                  align: CENTER
+                  width: SIZE_CONTENT
+                  height: 100%
+                  styles: style_transparent
+                  hidden: true
+                  widgets:
+                    - label:
+                        id: lbl_vocal_text
+                        align: CENTER
+                        y: 0
+                        width: ${central_w}
+                        text: ""
+                        styles: style_police_date
+
+              # Planning Wrapper
+              - obj:
+                  id: planning_wrapper
+                  align: CENTER
+                  width: SIZE_CONTENT
+                  height: 100%
+                  styles: style_transparent
+                  scrollbar_mode: "OFF"  # le texte déborde en glissant (transition_widgets)
+                  widgets:
+                    - label: { id: lbl_planning_text, text: "", align: CENTER, y: 0, styles: [style_police_date, style_bandeau_text_soft] }
+                    - !include { file: ../ui_components/central_bouton.yaml, vars: { id: btn_planning_tap, appui: [ script.execute: tab5_central_panel_next ] } }
+
+              # Titre de page previsions (pages horaires / journalieres, masque sur accueil),
+              # rempli par update_central_forecast_page_ui() (tab5_central.cpp) : une ligne,
+              # la plage "Du mercredi 5 aout au dimanche 9 aout", centree, dans la police de
+              # la date (05/10/2026 : plus de chapeau « Previsions journalieres · 2/3 »).
+              # Mode pieces de HA : chapeau « Piece n/N » (roboto_22) + nom de la piece, a
+              # y -26 / +13 : 26 px + 53 px (ligne de Roboto 45) dans les 82 px de la carte.
+              # [AI-WARNING] Ce panneau doit rester structurellement IDENTIQUE a ses freres de
+              # central_card (planning / pluie / alertes / info) : wrapper SIZE_CONTENT + bouton
+              # invisible ${central_w}x80 pose en dernier. Le bouton n'est pas decoratif — c'est lui qui
+              # recoit l'appui, et cette structure est celle qui laisse le swipe paginer (verifie :
+              # sur l'accueil, ou le panneau planning est actif, la pagination marche). Une version
+              # 31/07/2026 sans bouton, avec un wrapper a largeur fixe, faisait deriver le contenu
+              # sous le doigt au lieu de paginer sur les pages previsions. Ne pas "simplifier".
+              - obj:
+                  id: page_title_wrapper
+                  align: CENTER
+                  width: SIZE_CONTENT
+                  height: 100%
+                  styles: style_transparent
+                  # Ni défilement ni barre (18/10/2026, demande d'Axel) : la boîte de ligne du
+                  # titre (le bas des jambages du nom ; avant, aussi le haut vide de l'ancienne
+                  # ligne « Pièce n/N ») dépasse de 2 à 3 px, plus selon la police du thème, et la boîte montrait
+                  # une barre de défilement à droite du titre de la pièce (vue au rendu sur le
+                  # Tab5 et la 7B). L'encre tient dans la carte. Marge nulle : style_transparent.
+                  scrollable: false
+                  scrollbar_mode: "OFF"
+                  hidden: true
+                  widgets:
+                    - label: { id: lbl_page_title, text: "", align: CENTER, y: 0, styles: [style_police_date, style_bandeau_text_soft] }
+                    - button:
+                        id: btn_page_title_tap
+                        align: CENTER
+                        width: ${central_w}
+                        height: ${acc_centrale_bouton_h}
+                        styles: style_invisible
+                        # Mode HA : un tap sur le titre de la pièce ouvre le popup Maison
+                        # (ADR-0037). Pages de prévisions : rien, comme avant.
+                        on_short_click:
+                          - if:
+                              condition:
+                                lambda: 'return maison_titre_appui_valide();'
+                              then:
+                                - script.execute: tab5_maison_ouvrir
+                        # Appui long : la roue de navigation (ADR-0042), comme les panneaux.
+                        on_long_press:
+                          - lambda: 'roue_navigation_ouvrir();'
+
+              # Info Wrapper (résumé test — panneau 3, tap météo = dismiss définitif)
+              - obj:
+                  id: info_wrapper
+                  align: CENTER
+                  width: SIZE_CONTENT
+                  height: 100%
+                  styles: style_transparent
+                  scrollbar_mode: "OFF"  # le texte déborde en glissant (transition_widgets)
+                  hidden: true
+                  widgets:
+                    - label: { id: lbl_info_text, text: "", align: CENTER, styles: [style_police_date, style_bandeau_text_soft] }
+                    - !include { file: ../ui_components/central_bouton.yaml, vars: { id: btn_info_tap, appui: [ script.execute: tab5_dismiss_info_tap ] } }
+
+              # Alertes HA individuelles (panneaux 4-7, tap = lu définitif + ligne suivante)
+              - !include { file: ../ui_components/ha_alert_panel.yaml, vars: { n: 0 } }
+
+              - !include { file: ../ui_components/ha_alert_panel.yaml, vars: { n: 1 } }
+
+              - !include { file: ../ui_components/ha_alert_panel.yaml, vars: { n: 2 } }
+
+              - !include { file: ../ui_components/ha_alert_panel.yaml, vars: { n: 3 } }
+
+        # ==================== PAGINATION BARS ====================
+        # Zone de pagination (points de navigation des pages forecast).
+        # y 420 (demande d'Axel du 09/10/2026, 414 puis 417 avant) : les points (4 px) sont
+        # en haut du conteneur (piste flex à START, flex_align_track par défaut), donc à
+        # y 420-423, 3 px sous le bas de la carte centrale (416) et 18 px au-dessus des
+        # onglets des tuiles (442). Les tuiles, posées après, restent au-dessus de ce
+        # conteneur là où il les recouvre (y 442-449).
+        - obj:
+            id: pagination_container
+            x: ${acc_pagination_x}
+            y: ${acc_pagination_y}
+            width: ${acc_pagination_l}
+            height: 30
+            styles: style_transparent
+            scrollbar_mode: "OFF"
+            clickable: true
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: CENTER
+              flex_align_cross: CENTER
+              pad_column: 8
+            widgets:
+              - obj: { id: pbar_0, width: 16, height: 4, radius: 2, styles: style_bg_dim, bg_opa: 40%, border_width: 0 }
+              - obj: { id: pbar_1, width: 16, height: 4, radius: 2, styles: style_bg_dim, bg_opa: 40%, border_width: 0 }
+              - obj: { id: pbar_2, width: 30, height: 4, radius: 2, styles: style_bg_soft, bg_opa: 100%, border_width: 0 }
+              - obj: { id: pbar_3, width: 16, height: 4, radius: 2, styles: style_bg_dim, bg_opa: 40%, border_width: 0 }
+              - obj: { id: pbar_4, width: 16, height: 4, radius: 2, styles: style_bg_dim, bg_opa: 40%, border_width: 0 }
+              # Pages 5 à 9 (ADR-0066) : une par pièce au-delà de la cinquième (mode météo) ou
+              # une par pièce (mode HA), masquées tant qu'elles n'existent pas (pastilles_peindre,
+              # tab5_tuiles.cpp ; un objet masqué ne prend pas de place dans la rangée FLEX).
+              - obj: { id: pbar_5, width: 16, height: 4, radius: 2, styles: style_bg_dim, bg_opa: 40%, border_width: 0, hidden: true }
+              - obj: { id: pbar_6, width: 16, height: 4, radius: 2, styles: style_bg_dim, bg_opa: 40%, border_width: 0, hidden: true }
+              - obj: { id: pbar_7, width: 16, height: 4, radius: 2, styles: style_bg_dim, bg_opa: 40%, border_width: 0, hidden: true }
+              - obj: { id: pbar_8, width: 16, height: 4, radius: 2, styles: style_bg_dim, bg_opa: 40%, border_width: 0, hidden: true }
+              - obj: { id: pbar_9, width: 16, height: 4, radius: 2, styles: style_bg_dim, bg_opa: 40%, border_width: 0, hidden: true }
+
+        # ==================== PRÉVISIONS PÉRIMÉES ====================
+        # Mention au-dessus des tuiles, à droite (08/10/2026) : masquée tant que les
+        # prévisions arrivent ; sinon « Prévisions de 11 h 42 », posé et montré par
+        # previsions_fraicheur_tick() (tab5_forecast.cpp). Bande libre de 25 px entre la
+        # carte centrale (bas à 416) et les onglets des tuiles (haut à 442), à droite des
+        # points de pagination (x 480-790). Non cliquable : un geste qui part là reste
+        # un swipe des prévisions.
+        - obj:
+            id: previsions_perimees
+            x: ${acc_perimees_x}
+            y: ${acc_perimees_y}
+            width: ${acc_perimees_l}
+            height: ${acc_perimees_h}
+            styles: style_transparent
+            scrollbar_mode: "OFF"
+            clickable: false
+            hidden: true
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: END
+              flex_align_cross: CENTER
+              pad_column: 6
+            widgets:
+              - label: { id: icon_previsions_perimees, text: "\U000F05CE", text_font: mdi_font_26, styles: style_text_warning }
+              - label: { id: lbl_previsions_perimees, text: "", styles: style_text_dim }
+
+        # ==================== BOTTOM CARDS (FORECAST) ====================
+
+        # --- °CK 1: J0 to J4 ---
+
+        - !include ../ui_components/forecast_daily.yaml
+        - !include ../ui_components/forecast_hourly.yaml
+        - !include ../ui_components/switches_card.yaml
+        # Liste de la tuile − / + (ADR-0033) : au-dessus des cartes, sous les popups.
+        - !include ../ui_components/reglables_liste.yaml
+        # Roue d'actions rapides (ADR-0036) : au-dessus des cartes, sous les popups (« Détails »).
+        - !include ../ui_components/roue_actions.yaml
+        - !include ../ui_components/climate_popup.yaml
+        - !include ../ui_components/light_popup.yaml
+        - !include ../ui_components/volet_popup.yaml
+        - !include ../ui_components/appareil_popup.yaml
+        - !include ../ui_components/tv_remote_popup.yaml
+        - !include ../ui_components/pots_popup.yaml
+        - !include ../ui_components/energie_popup.yaml
+        - !include ../ui_components/reglages_popup.yaml
+        - !include ../ui_components/historique_popup.yaml
+        - !include ../ui_components/alertes_popup.yaml
+        # Popup Maison (ADR-0037) : passe derrière un popup ouvert depuis une de ses lignes.
+        - !include ../ui_components/maison_popup.yaml
+        # Popup Météo (ADR-0043).
+        - !include ../ui_components/meteo_popup.yaml
+        # Popup Musique (ADR-0050) : après Maison, il passe devant elle (tuile med touchée).
+        - !include ../ui_components/lecteur_popup.yaml
+        # Popup Caméras (ADR-0049).
+        - !include ../ui_components/cameras_popup.yaml
+        # Popup Suivi (ADR-0054) : les capteurs suivis, une carte chacun.
+        - !include ../ui_components/suivi_popup.yaml
+        # Popup Froid (ADR-0055) : les réfrigérateurs et congélateurs, une carte chacun.
+        - !include ../ui_components/froid_popup.yaml
+        # Popup Serveur IA (ADR-0059) : le serveur de LLM local.
+        - !include ../ui_components/serveur_ia_popup.yaml
+        - !include ../ui_components/calendar_popup.yaml
+        - !include ../ui_components/assistant_popup.yaml
+        - !include ../ui_components/alarm_popup.yaml
+        # [AI-WARNING] Amorce du widget ligne : ne pas supprimer. ESPHome ne pose
+        # `#define LV_USE_LINE 1` dans le lv_conf.h généré que si un widget `line:` est
+        # dans la config. Les courbes et les traits dessinés en C++ (ui_ligne(),
+        # tab5_anim.cpp ; Énergie, Température, Froid, Suivi, Météo, Serveur IA, zone
+        # à gauche de l'horloge) en ont besoin. Jusqu'au 18/10/2026, l'amorce du flipper
+        # (pinball_game.yaml) suffisait ; sans le module des jeux (ADR-0065), la
+        # compilation échouait sur « lv_line_create was not declared ». Vide, masqué :
+        # il ne coûte rien au rendu.
+        - line:
+            id: lvgl_line_probe
+            hidden: true
+            points:
+              - [0, 0]
+              - [1, 0]
+        # EN DERNIER, volontairement : l'ordre de déclaration est l'ordre de
+        # dessin LVGL, et l'écran de sonnerie doit couvrir toutes les fenêtres
+        # ci-dessus. `lv_obj_move_to_index(…, -1)` le confirme à chaque affichage,
+        # mais partir déjà au bon rang évite un cadre de clignotement.
+        - !include ../ui_components/alarm_ring_overlay.yaml
+        # Les 8 jeux et le sélecteur arcade ont leurs propres pages LVGL, déclarées par
+        # le module des jeux (Tab5/paquets/tab5-arcade.yaml, ADR-0065), après celle-ci.

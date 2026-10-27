@@ -1,0 +1,25 @@
+# ═══════════════════════════════════════════════════════
+# [AI-CONTEXT] Template paramétré (!include+vars), réutilisé 4× par light_popup.yaml :
+# un raccourci de niveau de la carte LUMINOSITÉ. Envoie brightness_pct à la lumière
+# sélectionnée et place tout de suite l'arc et le % (affichage optimiste, le retour
+# HA via light_*_brightness corrige).
+# vars : x, pct (pourcentage, en CHAÎNE : "10"), arc (valeur 0-255 de l'arc pour ce
+#        pourcentage : 26 / 89 / 166 / 255).
+# Cible id(current_light_slot) (global partagé, pas une entité en dur).
+# Sorti de light_popup.yaml le 26/09/2026 (audit, lot 7.3), rendu inchangé.
+# Largeur : jeton lum_niveau_l (80 px sur le Tab5 ; 67 sur la 7B, où « 100 % » touchait les bords).
+# ═══════════════════════════════════════════════════════
+button:
+  align: TOP_LEFT
+  x: ${x}
+  y: ${ 452 * (corps_h | int) // 598 }
+  width: ${lum_niveau_l}
+  height: ${ 72 * (corps_h | int) // 598 }
+  styles: style_clim_btn
+  on_short_click:
+    - script.execute: { id: tab5_action, emplacement: !lambda 'return id(current_light_slot);', commande: luminosite_pct, valeur: "${pct}" }
+    - lambda: |-
+        lv_arc_set_value(id(arc_light_brightness), ${arc});
+        lv_label_set_text(id(lbl_light_brightness_val), "${pct} %");
+  widgets:
+    - label: { text: "${pct} %", align: CENTER }

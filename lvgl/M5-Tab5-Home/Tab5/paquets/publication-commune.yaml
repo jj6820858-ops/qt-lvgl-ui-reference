@@ -1,0 +1,39 @@
+# [AI-CONTEXT]
+# @file publication-commune.yaml
+# @role Mise à jour depuis Home Assistant, pour les firmwares PUBLIÉS seulement (lot 6c,
+#       ADR-0022). Inclus par publication-stable.yaml / publication-beta.yaml avec la
+#       variable `canal` ; jamais par une compilation locale (publication-locale.yaml).
+# @architecture_constraint Le manifeste est celui de la page de flashage (GitHub Pages,
+#       .github/workflows/publication.yml) : `<canal>/<variante>/manifest.json`. Chaque
+#       variante a le sien : sur le Tab5, sa révision d'écran (`tab5_ecran`) ; sur une
+#       autre carte, son nom (`tab5_carte`, ADR-0061 : `waveshare-7b`). [AI-WARNING] Ne
+#       jamais retomber sur le dossier d'un écran du Tab5 pour une autre carte : elle
+#       recevrait le firmware du Tab5 (même clé, donc accepté), fait pour un autre écran.
+# ============================================================================
+# L'entité « Firmware » compare la version du projet (`project: version`, donnée par le
+# tag de la release) à celle du manifeste, toutes les 6 h. « Installer » dans HA
+# télécharge l'image OTA et la vérifie : MD5 du manifeste, puis signature (le backend
+# OTA commun applique `signed_ota_verification`, comme pour `ota: esphome`). Le
+# certificat HTTPS n'est pas vérifié (`verify_ssl: false`, tab5-assist.yaml) : c'est la
+# signature qui garantit l'origine de l'image.
+# Mise à jour en cours : même `ota_en_cours` que l'OTA `esphome` (tab5-hardware.yaml),
+# lu par l'extinction auto de l'écran (tab5-ha-controls.yaml), qui attend la fin. Et même
+# dalle éteinte pendant la mise à jour sur la carte qui le demande (script tab5_dalle_ota du
+# fichier de la carte : la 7B seule).
+ota:
+  - platform: http_request
+    on_begin:
+      - globals.set: { id: ota_en_cours, value: 'true' }
+      - script.execute: { id: tab5_dalle_ota, debut: true }
+    on_abort:
+      - globals.set: { id: ota_en_cours, value: 'false' }
+      - script.execute: { id: tab5_dalle_ota, debut: false }
+    on_error:
+      - globals.set: { id: ota_en_cours, value: 'false' }
+      - script.execute: { id: tab5_dalle_ota, debut: false }
+
+update:
+  - platform: http_request
+    id: tab5_mise_a_jour
+    name: Firmware
+    source: https://axellum.github.io/M5-Tab5-ESPHome-LVGL/${canal}/${ (tab5_ecran | default('st7123') | lower) if (tab5_carte | default('tab5') | lower) == 'tab5' else (tab5_carte | lower) }/manifest.json

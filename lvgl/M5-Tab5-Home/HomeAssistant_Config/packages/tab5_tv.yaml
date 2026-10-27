@@ -1,0 +1,289 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file packages/tab5_tv.yaml
+# @role Lancement des applications de la TV Samsung depuis le Tab5.
+# @architecture_constraint Le catalogue d'app_id vit ICI, pas dans le firmware.
+#       Le Tab5 n'envoie qu'un nom court (`netflix`, `prime`, `youtube`,
+#       `canal`) : si Samsung change un id, on corrige ce fichier et on
+#       recharge HA — AUCUNE recompilation ni OTA du Tab5.
+#
+# @ai_warning `media_player.select_source` NE PEUT PAS lancer une app sur cette
+#       TV. Son `source_list` ne contient que ["TV", "HDMI"] — la doc HA le dit :
+#       seuls « certains modèles plus anciens » exposent leurs apps en sources.
+#       Tout autre nom lève `HomeAssistantError` (samsungtv/media_player.py,
+#       async_select_source). C'était le bug du popup Tab5 : 3 boutons sur 4
+#       morts, constaté dans les logs du 06/08/2026.
+#
+# @ai_warning `media_player.play_media` avec `media_content_type: app` ne marche
+#       PAS non plus ici, ET IL NE REMONTE AUCUNE ERREUR. HA passe par la
+#       commande WebSocket `ed.apps.launch`, que Samsung a désactivée sur les
+#       firmwares 2022+ (modèle 22_PONTUSM_QD). Vérifié le 06/08/2026 : appel
+#       sans exception, `running` reste `false`, et rien ne bouge à l'écran
+#       (confirmé de visu). Ne pas « simplifier » ce fichier en revenant dessus.
+#
+# @architecture_constraint SEUL mécanisme qui fonctionne : POST REST Tizen sur
+#       http://<tv>:8001/api/v2/applications/<app_id>. Prouvé le 06/08/2026 —
+#       Disney+ est passé de `running: false` à `running: true` sur ce POST,
+#       alors qu'il restait `false` par la voie WebSocket. Le DIAL (port 8080)
+#       sait interroger et ARRÊTER une app par son nom, mais son POST de
+#       lancement ne répond 201 que pour Netflix (404 ailleurs) : inutilisable.
+#
+# @ai_instruction La TV et son adresse se choisissent dans HA (ADR-0024), jamais
+#       dans ce fichier public : liste « Tab5 · Samsung TV » (par défaut la seule
+#       TV de l'intégration Samsung Smart TV) et texte « Tab5 · TV address »
+#       (adresse IP locale ou nom d'hôte). Adresse vide : celle que donne un suivi réseau
+#       (device_tracker d'un routeur, attribut `ip`) de la même adresse MAC que la
+#       TV, s'il y en a un. La télécommande (remote.*) est celle du même appareil.
+#       Tant que la TV ou son adresse manque, le script ne fait rien (une
+#       notification persistante dit quoi régler) : plus de `!secret`, donc plus
+#       de configuration HA refusée faute de secret (piège du 28/09/2026 : sans la
+#       ligne `tab5_tv_app_url` dans secrets.yaml, HA refusait TOUTE sa
+#       configuration). Adresse qui change : poser un bail DHCP fixe, puis
+#       vérifier avec `curl http://<ip>:8001/api/v2/applications/3201907018807`
+#       (doit répondre le JSON de Netflix).
+#
+# @ai_instruction Pour retrouver l'id d'une app : la TV ne sait PLUS lister ses
+#       applications (Samsung a retiré `ed.installedApp.get` sur les modèles
+#       2022+). On ne peut que VÉRIFIER un id candidat :
+#         curl http://<ip-de-la-tv>:8001/api/v2/applications/<id>
+#       → renvoie {"id","name","running","version"} si installée, 404 sinon.
+#       Le nom exact d'une app peut se lire par DIAL :
+#         curl http://<ip-de-la-tv>:8080/ws/app/CANAL+
+# @install Nécessite homeassistant.packages: !include_dir_named packages. Rien
+#       à écrire dans secrets.yaml ; sans TV Samsung, le package reste inerte.
+#       Migration depuis la 3.1 : l'IP de la ligne `tab5_tv_app_url` de secrets.yaml
+#       va dans « Tab5 · TV address » ; la ligne peut ensuite partir.
+# ============================================================================
+
+input_text:
+  # IP ou nom de la TV, tapé dans HA (Paramètres → Appareils et services →
+  # Entrées, ou sur un tableau de bord). Le port 8001 est ajouté s'il manque.
+  tab5_tv_adresse:
+    name: "Tab5 · TV address"
+    icon: mdi:ip-network
+    max: 100
+  # Mémoire de la liste « Tab5 · Samsung TV » : écrite par la liste.
+  tab5_choix_tv:
+    name: "Tab5 · memory · Samsung TV"
+    icon: mdi:content-save-outline
+    max: 255
+
+template:
+  # Liste « Tab5 · Samsung TV » : à déclencheurs, comme celles de tab5_reglages.yaml.
+  # Par défaut, la seule TV de l'intégration Samsung Smart TV (samsungtv).
+  - triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+      - trigger: event
+        event_type: entity_registry_updated
+      - trigger: state
+        entity_id: input_text.tab5_choix_tv
+    # Audit du 07/10/2026, HA-18 : pas pour une mise à jour du registre qui ne touche que
+    # capabilities / supported_features / options / suggested_object_id (419 des 485
+    # entity_registry_updated chez l'auteur du 01 au 08/10/2026), que la liste ne lit
+    # pas. Une création, une suppression, un renommage, un nom ou une classe passent.
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.platform != 'event' or trigger.event.event_type != 'entity_registry_updated'
+             or trigger.event.data.action != 'update'
+             or (trigger.event.data.changes | default({}, true)).keys()
+                | reject('in', ['capabilities', 'supported_features', 'options', 'suggested_object_id'])
+                | list | count > 0 }}
+    variables:
+      tvs: "{{ states.media_player | map(attribute='entity_id') | list }}"
+      samsung: "{{ integration_entities('samsungtv') | select('match', 'media_player[.]') | list }}"
+    select:
+      - name: "Tab5 · Samsung TV"
+        unique_id: tab5_tv_samsung
+        default_entity_id: select.tab5_tv_samsung
+        icon: mdi:television
+        options: >-
+          {%- set m = states('input_text.tab5_choix_tv') -%}
+          {{ tvs + ([m] if m.startswith('media_player.') and m not in tvs else []) + ['Not set'] }}
+        state: >-
+          {%- set m = states('input_text.tab5_choix_tv') -%}
+          {{ m if m.startswith('media_player.') else ('Not set' if m in ['Not set', 'none', 'None', 'Aucun', 'Aucune'] or samsung | count != 1 else samsung[0]) }}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_tv
+            data:
+              value: "{{ option }}"
+
+rest_command:
+  # Lance une application Tizen par son id. Corps vide obligatoire : sans
+  # Content-Length, la TV répond 411 Length Required. `hote` (ip:port) et `app_id`
+  # viennent du script ci-dessous : l'adresse est un réglage de HA, pas un secret.
+  tab5_tv_lancer_app:
+    url: "http://{{ hote }}/api/v2/applications/{{ app_id }}"
+    method: post
+    payload: ""
+    timeout: 10
+
+script:
+  tab5_tv_app:
+    alias: "Tab5 — launch an app on the TV"
+    description: >-
+      Appelé par le popup télécommande du Tab5. Prend un nom court, le traduit
+      en app_id Tizen et déclenche le POST REST. Allume la TV d'abord si elle
+      est éteinte, sinon le POST part dans le vide.
+      mode restart : sur deux taps rapides, seule la dernière app compte.
+    mode: restart
+    fields:
+      app:
+        description: >-
+          Nom court. Applications : netflix, prime, youtube, canal, disney,
+          appletv. Entrées physiques : pc, freebox, tnt.
+        required: true
+        example: "netflix"
+        selector:
+          text:
+    sequence:
+      - variables:
+          # Ids VÉRIFIÉS sur l'appareil le 06/08/2026 : chacun renvoie bien le
+          # nom attendu sur /api/v2/applications/<id>. Ne rien ajouter ici sans
+          # avoir fait cette vérification — un id inventé échoue en silence.
+          catalogue:
+            netflix: "3201907018807" # Netflix        v70.23.15090
+            prime: "3201910019365" # Prime Video    v5.3.2
+            youtube: "111299001912" # YouTube        v2.1.513
+            canal: "3201606009910" # CANAL+         v7.0.2
+            disney: "3201901017640" # Disney+        v26.4.0
+            appletv: "3201807016597" # Apple TV       v14.4.0
+          # ── Entrées physiques ────────────────────────────────────────────
+          # [AI-WARNING] Les touches HDMI NUMÉROTÉES (KEY_HDMI1..KEY_HDMI4) sont
+          # IGNORÉES par cette TV. Vérifié le 07/08/2026 : Netflix laissé au
+          # premier plan, envoi de KEY_HDMI1, `visible` reste `true` et l'écran
+          # ne bouge pas (confirmé de visu). Ne pas les réintroduire.
+          #
+          # [AI-WARNING] `select_source: "HDMI"` (= KEY_HDMI) n'est pas fiable
+          # non plus : il vise la DERNIÈRE entrée HDMI utilisée, pas une prise
+          # fixe. C'est ce qui explique le faux souvenir « ça marchait avant » —
+          # le bouton tombait sur le PC tant que le PC était la dernière source
+          # utilisée, et sur la Freebox dès qu'on avait regardé la Freebox. Il
+          # n'a jamais visé une prise, il avait juste de la chance.
+          #
+          # [AI-INSTRUCTION] SEULE méthode fiable : naviguer dans le menu des
+          # sources avec des touches qui, elles, fonctionnent (KEY_SOURCE, les
+          # flèches, KEY_ENTER). On sature d'abord vers la GAUCHE — 6 appuis,
+          # bien plus que nécessaire — pour partir d'une position connue quelle
+          # que soit la sélection courante, puis on compte les crans vers la
+          # droite. Décompte donné par Axel, télécommande en main, le
+          # 07/08/2026 : le PC est à 3 crans du bord gauche.
+          # Si l'ordre du menu change (câble déplacé, appareil ajouté), c'est
+          # CE nombre de KEY_RIGHT qu'on corrige — pas le firmware du Tab5.
+          sequences:
+            pc:
+              [
+                "KEY_SOURCE",
+                "KEY_LEFT",
+                "KEY_LEFT",
+                "KEY_LEFT",
+                "KEY_LEFT",
+                "KEY_LEFT",
+                "KEY_LEFT",
+                "KEY_RIGHT",
+                "KEY_RIGHT",
+                "KEY_RIGHT",
+                "KEY_ENTER",
+              ]
+            # Pas de décompte relevé pour la Freebox : KEY_HDMI y retombe en
+            # pratique, et aucun bouton du Tab5 ne la vise aujourd'hui.
+            freebox: ["KEY_HDMI"]
+            tnt: ["KEY_TV"]
+          cible: "{{ app | lower | trim }}"
+          app_id: "{{ catalogue.get(cible, '') }}"
+          sequence_touches: "{{ sequences.get(cible, []) }}"
+          # TV choisie dans HA (« Tab5 · Samsung TV »), '' si aucune ou disparue.
+          tv: >-
+            {%- set t = states('select.tab5_tv_samsung') -%}
+            {{ t if t.startswith('media_player.') and expand(t) | count > 0 else '' }}
+          # Télécommande : le remote.* du même appareil, sinon celui du même nom.
+          telecommande: >-
+            {%- set r = (device_entities(device_id(tv)) | select('match', 'remote[.]') | first | default('')) if tv else '' -%}
+            {%- set n = 'remote.' ~ tv.split('.', 1)[1] if tv else '' -%}
+            {{ r if r else (n if n and expand(n) | count > 0 else '') }}
+          # hôte:port de l'API REST Tizen : « Tab5 · TV address » (schéma et chemin
+          # retirés, port 8001 par défaut), sinon l'`ip` d'un suivi réseau qui porte
+          # l'adresse MAC de la TV.
+          hote: >-
+            {%- set brut = states('input_text.tab5_tv_adresse') | trim -%}
+            {%- set brut = '' if brut in ['unknown', 'unavailable'] else brut -%}
+            {%- if brut == '' and tv -%}
+              {%- set macs = (device_attr(device_id(tv), 'connections') or []) | selectattr(0, 'eq', 'mac') | map(attribute=1) | map('lower') | list -%}
+              {%- set ns = namespace(ip='') -%}
+              {%- for s in states.device_tracker if ns.ip == '' and s.attributes.ip is defined and (s.attributes.mac | default('') | lower) in macs -%}
+                {%- set ns.ip = s.attributes.ip | string -%}
+              {%- endfor -%}
+              {%- set brut = ns.ip -%}
+            {%- endif -%}
+            {%- set h = brut | regex_replace('^[a-zA-Z]+://', '') -%}
+            {%- set h = h.split('/')[0] -%}
+            {{ '' if h == '' else (h if ':' in h else h ~ ':8001') }}
+
+      # Nom inconnu des deux tables : on s'arrête ici plutôt que de POSTer une
+      # URL vide (la TV répondrait 404 et on ne saurait pas pourquoi).
+      - condition: template
+        value_template: "{{ app_id != '' or (sequence_touches | length > 0) }}"
+
+      # Réglages manquants : rien n'est envoyé, et une notification dit quoi régler
+      # (le bouton de l'écran ne ferait sinon rien, sans explication).
+      - if:
+          - condition: template
+            value_template: >-
+              {{ tv == '' or (app_id != '' and hote == '') or (app_id == '' and telecommande == '') }}
+        then:
+          - action: persistent_notification.create
+            data:
+              notification_id: tab5_tv_reglages
+              title: "Tab5 : TV à régler dans Home Assistant"
+              message: >-
+                {{ "Aucune TV choisie dans la liste « Tab5 · Samsung TV »." if tv == '' else
+                   ("Adresse de la TV inconnue : renseignez « Tab5 · TV address » (son adresse IP sur le réseau local)." if app_id != '' and hote == ''
+                    else "Pas de télécommande (remote.*) pour " ~ tv ~ " : l'intégration Samsung Smart TV la crée.") }}
+          - stop: "TV ou adresse à régler (notification tab5_tv_reglages)"
+
+      # TV éteinte : l'allumer et lui laisser le temps de monter sa pile réseau,
+      # sinon la commande part avant que la TV ne réponde.
+      - if:
+          - condition: template
+            value_template: "{{ is_state(tv, 'off') }}"
+        then:
+          - action: media_player.turn_on
+            target:
+              entity_id: "{{ tv }}"
+          - wait_template: >-
+              {{ not is_state(tv, 'off') }}
+            timeout: "00:00:15"
+            continue_on_timeout: true
+          - delay: "00:00:03"
+
+      - choose:
+          # Application → POST REST Tizen (seul mécanisme qui marche, cf. en-tête)
+          - conditions:
+              - condition: template
+                value_template: "{{ app_id != '' }}"
+            sequence:
+              - action: rest_command.tab5_tv_lancer_app
+                data:
+                  hote: "{{ hote }}"
+                  app_id: "{{ app_id }}"
+          # Entrée physique → séquence de touches de la télécommande
+          - conditions:
+              - condition: template
+                value_template: "{{ sequence_touches | length > 0 }}"
+            sequence:
+              # [AI-WARNING] `delay_secs` n'est PAS du confort : le menu des
+              # sources de la TV a besoin d'un instant pour s'ouvrir et pour
+              # déplacer sa sélection. Enchaîner les touches sans pause fait
+              # avaler des appuis et la sélection atterrit au mauvais endroit.
+              # Ne pas descendre sous 0,5 s sans le vérifier à l'écran.
+              - action: remote.send_command
+                target:
+                  entity_id: "{{ telecommande }}"
+                data:
+                  command: "{{ sequence_touches }}"
+                  delay_secs: 0.6

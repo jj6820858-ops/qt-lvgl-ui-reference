@@ -1,0 +1,194 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file tab5-tuiles.yaml
+# @role Pièces et tuiles génériques (ADR-0023, 28/09/2026) : pose les widgets que
+#       tab5_tuiles.cpp dessine (g_tuiles_ui ; popups lumière, volet et appareil compris, que
+#       dessine tab5_tuiles_popups.cpp) et ses deux commandes (événement esphome.tab5_action,
+#       tap du volet 3.x), puis lance tab5_roue_ui (tab5-roue.yaml : la roue d'actions
+#       rapides). Le modèle, la NVS et le dessin vivent dans tab5_tuiles.cpp ; les
+#       définitions arrivent par l'action tab5_maj_tuiles et les états par
+#       tab5_maj_emplacements (clés tRT), tab5-api-logic.yaml.
+# @architecture_constraint id() n'existe que dans une lambda YAML et l'on_boot de
+#       tab5-ha-hmi.yaml n'est pas à nous : tab5_zones_apply (tab5-zones.yaml), lancé à
+#       la fin du setup AVANT la première image, exécute ce script en premier. Chargé
+#       APRÈS tab5_lvgl : il référence des widgets. Aucun lv_* ici.
+# @ai_instruction Un widget de plus pour les tuiles = son champ dans TuilesUI
+#       (tab5_custom.h) et sa ligne ici. Les commandes sont des lambdas SANS capture
+#       (pointeurs de fonction), comme le rappel des cellules du calendrier.
+# ============================================================================
+
+script:
+  - id: tab5_tuiles_ui
+    then:
+      - lambda: |-
+          TuilesUI& u = g_tuiles_ui;
+          u.calque_jours = id(layer_forecast_daily);
+          u.calque_heures = id(layer_forecast_hourly);
+          u.calque_ha = id(layer_switches);
+          u.pastilles[0] = id(pbar_0);
+          u.pastilles[1] = id(pbar_1);
+          u.pastilles[2] = id(pbar_2);
+          u.pastilles[3] = id(pbar_3);
+          u.pastilles[4] = id(pbar_4);
+          u.pastilles[5] = id(pbar_5);
+          u.pastilles[6] = id(pbar_6);
+          u.pastilles[7] = id(pbar_7);
+          u.pastilles[8] = id(pbar_8);
+          u.pastilles[9] = id(pbar_9);
+          u.titre_cadre = id(page_title_wrapper);
+          u.titre = id(lbl_page_title);
+          u.bouton_ha = id(btn_control_ha);
+          u.icone_ha = id(icon_ha);
+          u.police_meteo = id(font_meteo_card);
+          u.police_meteo_petite = id(font_meteo_card_small);
+          // Mode météo, par position visuelle T (tuiles horaires : l'objet h(4−T)).
+          u.jour_g[0] = id(icon_card_pc);
+          u.jour_g[1] = id(icon_card_shutter1);
+          u.jour_g[2] = id(icon_card_lit_j2);
+          u.jour_g[3] = id(icon_card_salon_j3);
+          u.jour_g[4] = id(icon_card_led_j4);
+          u.jour_d[0] = id(icon_card_droite_j0);
+          u.jour_d[1] = id(icon_card_shutter_arrow);
+          u.jour_d[2] = id(icon_card_light_j2);
+          u.jour_d[3] = id(icon_card_light_j3);
+          u.jour_d[4] = id(icon_card_light_j4);
+          u.jour_bouton[0] = id(btn_j0_action);
+          u.jour_bouton[1] = id(btn_j1_action);
+          u.jour_bouton[2] = id(btn_j2_action);
+          u.jour_bouton[3] = id(btn_j3_action);
+          u.jour_bouton[4] = id(btn_j4_action);
+          u.jour_sens = id(btn_j1_dir);
+          u.heure_g[0] = id(icon_card_h4_g);
+          u.heure_g[1] = id(icon_card_h3_g);
+          u.heure_g[2] = id(icon_card_h2_g);
+          u.heure_g[3] = id(icon_card_h1_g);
+          u.heure_g[4] = id(icon_card_h0_g);
+          u.heure_d[0] = id(icon_card_h4_d);
+          u.heure_d[1] = id(icon_card_h3_d);
+          u.heure_d[2] = id(icon_card_h2_d);
+          u.heure_d[3] = id(icon_card_h1_d);
+          u.heure_d[4] = id(icon_card_h0_d);
+          u.heure_bouton[0] = id(btn_h4_action);
+          u.heure_bouton[1] = id(btn_h3_action);
+          u.heure_bouton[2] = id(btn_h2_action);
+          u.heure_bouton[3] = id(btn_h1_action);
+          u.heure_bouton[4] = id(btn_h0_action);
+          u.jour_titre[0] = id(j0_day);
+          u.jour_titre[1] = id(j1_day);
+          u.jour_titre[2] = id(j2_day);
+          u.jour_titre[3] = id(j3_day);
+          u.jour_titre[4] = id(j4_day);
+          u.heure_titre[0] = id(h4_time);
+          u.heure_titre[1] = id(h3_time);
+          u.heure_titre[2] = id(h2_time);
+          u.heure_titre[3] = id(h1_time);
+          u.heure_titre[4] = id(h0_time);
+          // Mode HA : carte T = tuile T.
+          u.carte[0] = id(sw_card_0);
+          u.carte[1] = id(sw_card_1);
+          u.carte[2] = id(sw_card_2);
+          u.carte[3] = id(sw_card_3);
+          u.carte[4] = id(sw_card_4);
+          u.carte_pastille[0] = id(sw_pastille_0);
+          u.carte_pastille[1] = id(sw_pastille_1);
+          u.carte_pastille[2] = id(sw_pastille_2);
+          u.carte_pastille[3] = id(sw_pastille_3);
+          u.carte_pastille[4] = id(sw_pastille_4);
+          u.carte_icone[0] = id(icon_sw0);
+          u.carte_icone[1] = id(icon_sw1);
+          u.carte_icone[2] = id(icon_sw2);
+          u.carte_icone[3] = id(icon_sw3);
+          u.carte_icone[4] = id(icon_sw4);
+          u.carte_nom[0] = id(lbl_sw0_title);
+          u.carte_nom[1] = id(lbl_sw1_title);
+          u.carte_nom[2] = id(lbl_sw2_title);
+          u.carte_nom[3] = id(lbl_sw3_title);
+          u.carte_nom[4] = id(lbl_sw4_title);
+          u.carte_etat[0] = id(lbl_sw0_state);
+          u.carte_etat[1] = id(lbl_sw1_state);
+          u.carte_etat[2] = id(lbl_sw2_state);
+          u.carte_etat[3] = id(lbl_sw3_state);
+          u.carte_etat[4] = id(lbl_sw4_state);
+          // Cases des tuiles coupées (ADR-0066, tab5_tuiles_cases.cpp) : le style des cartes
+          // et les polices d'une moitié (icône 45, valeur 32) et d'un quart (icône 32, 22).
+          u.style_case = id(style_meteo_card_page);
+          u.police_icone_45 = id(mdi_font_45);
+          u.police_icone_32 = id(mdi_font_32);
+          u.police_valeur = id(roboto_32_b);
+          u.police_petite = id(roboto_22);
+          u.popup_clim = id(clim_options_popup);
+          // Popup Lumières : une page par pièce (ADR-0046), ses lignes et les noms des pièces.
+          u.lum_popup = id(light_options_popup);
+          u.lum_ligne[0] = id(btn_light_sel_0);
+          u.lum_ligne[1] = id(btn_light_sel_1);
+          u.lum_ligne[2] = id(btn_light_sel_2);
+          u.lum_ligne[3] = id(btn_light_sel_3);
+          u.lum_ligne[4] = id(btn_light_sel_4);
+          u.lum_onglet[0] = id(lum_onglet_0);
+          u.lum_onglet[1] = id(lum_onglet_1);
+          u.lum_onglet[2] = id(lum_onglet_2);
+          u.lum_onglet[3] = id(lum_onglet_3);
+          u.lum_onglet[4] = id(lum_onglet_4);
+          u.lum_onglet[5] = id(lum_onglet_5);
+          u.lum_onglet[6] = id(lum_onglet_6);
+          u.lum_onglet[7] = id(lum_onglet_7);
+          u.lum_onglet[8] = id(lum_onglet_8);
+          u.lum_onglet[9] = id(lum_onglet_9);
+          u.lum_arc = id(arc_light_brightness);
+          u.lum_pct = id(lbl_light_brightness_val);
+          u.lum_cle = &id(current_light_slot);
+          // Popup Volets (05/10/2026 ; une page par pièce, ADR-0046) : lignes, noms des
+          // pièces, et à droite le volet choisi.
+          u.vol_popup = id(volet_popup);
+          u.vol_ligne[0] = id(volet_ligne_0);
+          u.vol_ligne[1] = id(volet_ligne_1);
+          u.vol_ligne[2] = id(volet_ligne_2);
+          u.vol_ligne[3] = id(volet_ligne_3);
+          u.vol_ligne[4] = id(volet_ligne_4);
+          u.vol_onglet[0] = id(vol_onglet_0);
+          u.vol_onglet[1] = id(vol_onglet_1);
+          u.vol_onglet[2] = id(vol_onglet_2);
+          u.vol_onglet[3] = id(vol_onglet_3);
+          u.vol_onglet[4] = id(vol_onglet_4);
+          u.vol_onglet[5] = id(vol_onglet_5);
+          u.vol_onglet[6] = id(vol_onglet_6);
+          u.vol_onglet[7] = id(vol_onglet_7);
+          u.vol_onglet[8] = id(vol_onglet_8);
+          u.vol_onglet[9] = id(vol_onglet_9);
+          u.vol_nom = id(volet_nom);
+          u.vol_position = id(volet_position);
+          u.vol_nombre = id(volet_nombre);
+          u.vol_etat = id(volet_etat);
+          u.vol_cadre = id(volet_cadre);
+          u.vol_tablier = id(volet_tablier);
+          // Popup d'un appareil (appui long d'une tuile int, act, med sans t, 06/10/2026).
+          u.app_popup = id(appareil_popup);
+          u.app_titre = id(appareil_popup_titre);
+          u.app_pastille = id(appareil_pastille);
+          u.app_icone = id(appareil_icone);
+          u.app_etat = id(appareil_etat);
+          u.app_piece = id(appareil_piece);
+          u.app_options = id(appareil_options);
+          u.app_remplissage = id(appareil_remplissage);
+          u.app_commande_icone = id(appareil_commande_icone);
+          u.app_action = id(appareil_action);
+          u.volet_sens = &id(volet_target_open);
+          u.envoyer = [](const char* e, const char* a, const char* v) {
+            id(tab5_action).execute(std::string(e), std::string(a), std::string(v));
+          };
+          u.volet_tap = []() { id(tab5_volet_tap).execute(); };
+          // Option e (ADR-0028) : une tuile cap ouvre le popup Énergie (tab5-energie.yaml).
+          u.energie_ouvrir = []() { id(tab5_energie_ouvrir).execute(); };
+          // Appui long d'une med sans t (ADR-0050) : le lecteur de musique (tab5-lecteur.yaml).
+          u.lecteur_ouvrir = [](const char* cle) { id(tab5_lecteur_ouvrir).execute(std::string(cle)); };
+          // Toucher d'un titre = sens d'un volet (28/09) ; une fois, les pointeurs posés.
+          tuiles_brancher_titres();
+          // Volet dessiné du popup : ses lames, glisser, relâcher (une fois aussi) ; et le
+          // glissement de pièce en pièce des popups Lumières et Volets (tab5_pages.cpp).
+          tuiles_brancher_popup_volet();
+      # Popup télécommande (ADR-0056) : ses onglets et ses deux dispositions dans
+      # g_telecommande_ui (tab5-telecommande.yaml) ; l'appui long de la tuile TV l'ouvre.
+      - script.execute: tab5_telecommande_ui
+      # Roue d'actions rapides (ADR-0036) : ses widgets dans g_roue_ui, juste après ceux des
+      # tuiles, comme quand ils étaient ici (tab5-roue.yaml, lot L7 du 08/10/2026).
+      - script.execute: tab5_roue_ui

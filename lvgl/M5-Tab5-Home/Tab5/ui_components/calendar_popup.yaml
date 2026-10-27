@@ -1,0 +1,194 @@
+# ═══════════════════════════════════════════════════════
+# [AI-CONTEXT]
+# @file calendar_popup.yaml
+# @role Popup plein écran calendrier mensuel (carte 1250×690, 15 px des bords écran
+#       1280×720). Grille 7×6 lundi-en-tête (42 cellules construites en C++), navigation
+#       ◀ / mois affiché / ▶ + bouton "Aujourd'hui", légende en bas, et sous-popup
+#       détail du jour (cal_day_popup, 780×540) ouvert au tap sur une cellule.
+#       Ouvert par l'appui long sur la date de l'horloge (btn_horloge_date,
+#       horloge_zone.yaml, geste « auto » ; ADR-0039), ou par un autre geste choisi.
+# @architecture_constraint La grille (numéros, alignement lundi-dimanche, weekend,
+#       "aujourd'hui") est calculée EN LOCAL par cal_render_month() (tab5_custom.cpp,
+#       date SNTP) — le popup reste utilisable sans HA. HA enrichit ensuite chaque mois
+#       à la demande (script.tab5_calendrier_mois → service tab5_maj_calendrier_mois :
+#       bitmask travail/férié/vacances scolaires/RDV/anniversaire + heures de travail),
+#       et chaque jour tapé (script.tab5_calendrier_jour → tab5_maj_calendrier_jour).
+#       Cache stale-while-revalidate : les données sont affichées immédiatement même
+#       si périmées (> 10 min → refresh silencieux). Pré-fetch boot + reconnect HA
+#       (tab5_cal_prefetch_boot) + mois adjacents (M-1, M+1) à chaque rendu.
+#       Eviction : max 3 mois en cache (cal_cache_evict_distant).
+# @ai_instruction Cadre modal v4 (ADR-0009) : barre de titre modal_header.yaml, grille
+#       à partir de y=72. Cellules : cal_grid_build() (tab5_calendar.cpp), à la
+#       première ouverture (tab5_calendar_open), juste avant cal_legend ; colonnes
+#       25+c*172, lignes réparties par cal_render_month() sur ${cal_grid_h} selon le
+#       nombre de semaines du mois (4 à 6), les lignes en trop masquées. Depuis le
+#       lot 8 de l'audit du 26/09/2026 : les 42 !include de cal_day_cell.yaml coûtaient ≈ 45 Ko de
+#       setup() et un bouton invisible par cellule.
+# ═══════════════════════════════════════════════════════
+obj:
+  id: calendar_popup
+  align: CENTER
+  width: 100%
+  height: 100%
+  hidden: true
+  scrollable: false
+  styles: style_invisible
+  widgets:
+    - !include { file: modal_scrim.yaml, vars: { scrim_opa: "100", close_lambda: "animate_popup_close(id(cal_day_popup)); animate_popup_close(id(calendar_popup));" } }
+
+    # Carte modale — 15 px des bords écran (1280×720)
+    - obj:
+        align: CENTER
+        width: ${modal_card_w}
+        height: ${modal_card_h}
+        styles: style_modal_card
+        scrollable: false
+        widgets:
+
+          # ═══ BARRE DE TITRE (cadre v4 : icône + titre + croix, corps à y=72) ═══
+          - !include { file: modal_header.yaml, vars: { icon: "\U000F0E17", icon_style: "style_text_accent", title: "Calendrier", title_id: "popup_cal_title", close_btn_id: "btn_cal_close", close_lambda: "animate_popup_close(id(cal_day_popup)); animate_popup_close(id(calendar_popup));" } }
+
+          # Options d'en-tête : frères de la barre, alignés sur sa ligne (y=4, hauteur 44)
+          # Navigation mois : ◀  mois  ▶, à ${cal_nav_x} du milieu de la carte (278 sur le
+          # Tab5) : sur une carte plus étroite, ▶ reste à gauche de « Aujourd'hui »
+          # (tab5-ui-tokens.yaml, tests/test_geometrie_partagee.py).
+          - button:
+              id: btn_cal_prev
+              align: TOP_MID
+              x: ${ 0 - (cal_nav_x | int) }
+              y: 4
+              width: 80
+              height: 44
+              styles: style_clim_btn
+              on_short_click:
+                - script.execute: tab5_cal_prev
+              widgets:
+                - label: { text: "\U000F0141", align: CENTER, text_font: mdi_font_32 }
+          - label:
+              id: lbl_cal_month
+              text: ""
+              align: TOP_MID
+              x: 0
+              y: 4
+              width: ${cal_mois_l}
+              height: 44
+              text_align: CENTER
+              text_font: roboto_32_b
+          - button:
+              id: btn_cal_next
+              align: TOP_MID
+              x: ${cal_nav_x}
+              y: 4
+              width: 80
+              height: 44
+              styles: style_clim_btn
+              on_short_click:
+                - script.execute: tab5_cal_next
+              widgets:
+                - label: { text: "\U000F0142", align: CENTER, text_font: mdi_font_32 }
+
+          # Bouton Aujourd'hui — 10 px à gauche de la croix (80 + 10 + 10)
+          - button:
+              id: btn_cal_today
+              align: TOP_RIGHT
+              x: -100
+              y: 4
+              width: 150
+              height: 44
+              styles: style_clim_btn
+              on_short_click:
+                - script.execute: tab5_cal_today
+              widgets:
+                - label: { text: "Aujourd'hui", align: CENTER }
+
+          # ═══ TÊTE DE GRILLE (jours de la semaine) ═══
+          # En semaine : couleur du thème (blanc) ; samedi et dimanche estompés, comme
+          # leurs numéros. Chaque nom est centré sur sa colonne, les numéros aussi.
+          - label: { text: "Lun", align: TOP_LEFT, x: "${cal_col_x0}", y: "${modal_body_y}", width: "${cal_col_w}", text_align: CENTER }
+          - label: { text: "Mar", align: TOP_LEFT, x: "${ cal_col_x0 | int + 1 * (cal_col_pas | int) }", y: "${modal_body_y}", width: "${cal_col_w}", text_align: CENTER }
+          - label: { text: "Mer", align: TOP_LEFT, x: "${ cal_col_x0 | int + 2 * (cal_col_pas | int) }", y: "${modal_body_y}", width: "${cal_col_w}", text_align: CENTER }
+          - label: { text: "Jeu", align: TOP_LEFT, x: "${ cal_col_x0 | int + 3 * (cal_col_pas | int) }", y: "${modal_body_y}", width: "${cal_col_w}", text_align: CENTER }
+          - label: { text: "Ven", align: TOP_LEFT, x: "${ cal_col_x0 | int + 4 * (cal_col_pas | int) }", y: "${modal_body_y}", width: "${cal_col_w}", text_align: CENTER }
+          - label: { text: "Sam", align: TOP_LEFT, x: "${ cal_col_x0 | int + 5 * (cal_col_pas | int) }", y: "${modal_body_y}", width: "${cal_col_w}", text_align: CENTER, styles: style_text_dim }
+          - label: { text: "Dim", align: TOP_LEFT, x: "${ cal_col_x0 | int + 6 * (cal_col_pas | int) }", y: "${modal_body_y}", width: "${cal_col_w}", text_align: CENTER, styles: style_text_dim }
+
+          # ═══ GRILLE 7×6 (42 cellules, lundi en premier — idx = ligne*7 + colonne) ═══
+          # Construite en C++ par cal_grid_build(), insérée ICI (juste avant la
+          # légende, qui sert d'ancre) : ne rien intercaler entre la tête et la légende.
+
+          # ═══ LÉGENDE ═══ (ancre de la grille : son id est lu par tab5_calendar_open)
+          - obj:
+              id: cal_legend
+              align: BOTTOM_MID
+              y: ${modal_bottom_y}
+              width: SIZE_CONTENT
+              height: SIZE_CONTENT
+              styles: style_transparent
+              scrollable: false
+              layout:
+                type: FLEX
+                flex_flow: ROW
+                flex_align_main: CENTER
+                flex_align_cross: CENTER
+                pad_column: 10
+              widgets:
+                - obj: { width: 18, height: 18, radius: 6, bg_opa: 0%, border_width: 2, styles: style_border_accent, pad_all: 0 }
+                - label: { text: "Aujourd'hui", styles: style_text_dim }
+                - label: { text: "·", styles: style_text_dim }
+                - label: { text: "9:00-19:00" }
+                - label: { text: "Travail", styles: style_text_dim }
+                - label: { text: "·", styles: style_text_dim }
+                - label: { text: "1", styles: style_text_error }
+                - label: { text: "Férié", styles: style_text_dim }
+                - label: { text: "·", styles: style_text_dim }
+                - obj: { width: 14, height: 14, radius: 4, styles: style_bg_accent_alt, bg_opa: 55%, border_width: 0, pad_all: 0 }
+                - label: { text: "Vac. scolaires", styles: style_text_dim }
+                - label: { text: "·", styles: style_text_dim }
+                - obj: { width: 14, height: 14, radius: 7, styles: style_bg_gold, border_width: 0, pad_all: 0 }
+                - label: { text: "RDV", styles: style_text_dim }
+                - label: { text: "·", styles: style_text_dim }
+                - obj: { width: 14, height: 14, radius: 7, styles: style_bg_warm_pink, border_width: 0, pad_all: 0 }
+                - label: { text: "Anniv.", styles: style_text_dim }
+
+    # ═══ SOUS-POPUP DÉTAIL DU JOUR (au-dessus de la grille) ═══
+    - obj:
+        id: cal_day_popup
+        align: CENTER
+        width: 100%
+        height: 100%
+        hidden: true
+        scrollable: false
+        styles: style_invisible
+        widgets:
+          # Voile local, moins opaque : il s'empile sur le voile du calendrier
+          - !include { file: modal_scrim.yaml, vars: { scrim_opa: "60", popup_id: cal_day_popup } }
+          # Sous-popup imbriqué : garde sa taille 780×540 (pas une fenêtre de
+          # premier niveau), mais la MÊME barre de titre que les autres. Opaque : ce qu'elle
+          # couvre se dessine sans le calendrier ni les deux voiles (popup_voile_carte(),
+          # tab5_anim.cpp, appelé par tab5_cal_day_tap).
+          - obj:
+              id: cal_day_carte
+              align: CENTER
+              width: 780
+              height: 540
+              styles: style_modal_card_verre
+              scrollable: false
+              widgets:
+                - !include { file: modal_header.yaml, vars: { icon: "\U000F0E17", icon_style: "style_text_accent", title: "", title_id: "lbl_cal_day_title", close_btn_id: "btn_cal_day_close", popup_id: cal_day_popup } }
+
+                # Statut central (Chargement… / Rien de prévu / HA hors ligne)
+                - label: { id: lbl_cal_day_status, text: "", align: CENTER, y: 0, text_font: roboto_32_b, styles: style_text_dim }
+
+                # 6 lignes de détail (icône typée + texte), remplies par cal_render_day_detail()
+                - label: { id: cal_det_icon_0, text: "", align: TOP_LEFT, x: 32, y: 72, text_font: mdi_font_32, hidden: true }
+                - label: { id: cal_det_txt_0, text: "", align: TOP_LEFT, x: 88, y: 74, width: 660, text_font: roboto_32_b, hidden: true }
+                - label: { id: cal_det_icon_1, text: "", align: TOP_LEFT, x: 32, y: 140, text_font: mdi_font_32, hidden: true }
+                - label: { id: cal_det_txt_1, text: "", align: TOP_LEFT, x: 88, y: 142, width: 660, text_font: roboto_32_b, hidden: true }
+                - label: { id: cal_det_icon_2, text: "", align: TOP_LEFT, x: 32, y: 208, text_font: mdi_font_32, hidden: true }
+                - label: { id: cal_det_txt_2, text: "", align: TOP_LEFT, x: 88, y: 210, width: 660, text_font: roboto_32_b, hidden: true }
+                - label: { id: cal_det_icon_3, text: "", align: TOP_LEFT, x: 32, y: 276, text_font: mdi_font_32, hidden: true }
+                - label: { id: cal_det_txt_3, text: "", align: TOP_LEFT, x: 88, y: 278, width: 660, text_font: roboto_32_b, hidden: true }
+                - label: { id: cal_det_icon_4, text: "", align: TOP_LEFT, x: 32, y: 344, text_font: mdi_font_32, hidden: true }
+                - label: { id: cal_det_txt_4, text: "", align: TOP_LEFT, x: 88, y: 346, width: 660, text_font: roboto_32_b, hidden: true }
+                - label: { id: cal_det_icon_5, text: "", align: TOP_LEFT, x: 32, y: 412, text_font: mdi_font_32, hidden: true }
+                - label: { id: cal_det_txt_5, text: "", align: TOP_LEFT, x: 88, y: 414, width: 660, text_font: roboto_32_b, hidden: true }

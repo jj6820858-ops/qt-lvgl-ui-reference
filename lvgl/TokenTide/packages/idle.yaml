@@ -1,0 +1,123 @@
+# Activity tracking, auto-dim and the user-tunable idle settings.
+# Everything is exposed to Home Assistant (config entities) and persisted
+# in NVS; substitutions only provide the first-boot defaults. A timeout
+# number set below 10s disables that feature.
+
+substitutions:
+  dim_timeout_default: "120"
+  dim_brightness_default: "20"
+  # Full screen-off is opt-in: 0 disables it (any value below 10s does).
+  screen_off_timeout_default: "0"
+
+globals:
+  - id: last_activity_s
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: is_dimmed
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: pre_dim_brightness
+    type: float
+    restore_value: no
+    initial_value: "0.8"
+  - id: is_screen_off
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  # millis() of the last wake from full screen-off. Gesture scripts treat
+  # input within a short grace of it as the wake itself and consume it
+  # (theme_next, the optional saver's toggle_saver); a dimmed screen
+  # stays interactive.
+  - id: last_wake_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+number:
+  - platform: template
+    id: dim_timeout
+    name: "Dim Timeout"
+    entity_category: config
+    unit_of_measurement: "s"
+    min_value: 0
+    max_value: 3600
+    step: 10
+    initial_value: ${dim_timeout_default}
+    restore_value: true
+    optimistic: true
+  - platform: template
+    id: dim_brightness_pct
+    name: "Dim Brightness"
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 5
+    max_value: 100
+    step: 5
+    initial_value: ${dim_brightness_default}
+    restore_value: true
+    optimistic: true
+  - platform: template
+    id: screen_off_timeout
+    name: "Screen Off Timeout"
+    entity_category: config
+    unit_of_measurement: "s"
+    min_value: 0
+    max_value: 14400
+    step: 10
+    initial_value: ${screen_off_timeout_default}
+    restore_value: true
+    optimistic: true
+
+script:
+  - id: note_activity
+    mode: single
+    then:
+      # Wake from full screen-off first: resume rendering, then relight.
+      - if:
+          condition:
+            lambda: "return id(is_screen_off);"
+          then:
+            - lvgl.resume:
+            - lambda: |-
+                id(is_screen_off) = false;
+                id(last_wake_ms) = millis();
+      - lambda: |-
+          id(last_activity_s) = millis() / 1000;
+          if (id(is_dimmed)) {
+            id(is_dimmed) = false;
+            auto call = id(lcd_backlight).turn_on();
+            call.set_brightness(id(pre_dim_brightness));
+            call.perform();
+          }
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          uint32_t idle = (millis() / 1000) - id(last_activity_s);
+          float dim_after = id(dim_timeout).state;
+          if (dim_after >= 10 && !id(is_dimmed) && idle >= (uint32_t) dim_after) {
+            id(pre_dim_brightness) = id(lcd_backlight).current_values.get_brightness();
+            id(is_dimmed) = true;
+            auto call = id(lcd_backlight).turn_on();
+            call.set_brightness(id(dim_brightness_pct).state / 100.0f);
+            call.perform();
+          }
+      # Full screen-off: backlight cut + LVGL paused (no rendering work).
+      # The dim step keeps pre_dim_brightness current; capture it here too
+      # in case dimming is disabled.
+      - if:
+          condition:
+            lambda: |-
+              return id(screen_off_timeout).state >= 10 && !id(is_screen_off)
+                  && ((millis() / 1000) - id(last_activity_s)) >= (uint32_t) id(screen_off_timeout).state;
+          then:
+            - lambda: |-
+                if (!id(is_dimmed))
+                  id(pre_dim_brightness) = id(lcd_backlight).current_values.get_brightness();
+                id(is_screen_off) = true;
+            - light.turn_off: lcd_backlight
+            - lvgl.pause:
+                show_snow: false

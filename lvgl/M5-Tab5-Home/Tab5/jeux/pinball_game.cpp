@@ -1,0 +1,2236 @@
+/**
+ * [AI-CONTEXT]
+ * @file pinball_game.cpp
+ * @role Jeu « Neon Apron » — flipper portrait. Table unique, soignee, 100 % local.
+ *
+ * ===========================================================================
+ * [AI-CONTEXT] ORIENTATION — a lire avant de toucher quoi que ce soit
+ * ===========================================================================
+ * Le dashboard vit en PAYSAGE 1280x720 (`lvgl: rotation: 270` dans
+ * tab5-styles.yaml). Un flipper couche sur le cote ne ressemble a rien : ce jeu
+ * bascule donc l'ecran en PORTRAIT 720x1280 le temps d'une partie.
+ *
+ * COMMENT : `UI::lvgl->set_rotation(0)` a l'ouverture, `set_rotation(270)` a la
+ * fermeture. C'est une API publique d'ESPHome 2026.7.x
+ * (LvglComponent::set_rotation, lvgl_esphome.cpp) qui recalcule la resolution
+ * du display LVGL et invalide l'ecran actif.
+ *
+ * POURQUOI CA MARCHE ICI :
+ *  - `rotation:` est present dans la config YAML, donc ESPHome a compile le
+ *    support de rotation (rotation_type_ = ROTATION_SOFTWARE, buffer dedie +
+ *    client PPA sur ESP32-P4). Sans cette cle, set_rotation() ne ferait qu'un
+ *    ESP_LOGW et ne changerait rien. NE PAS retirer `rotation: 270`.
+ *  - Le TACTILE suit tout seul : LVTouchListener applique
+ *    LvglComponent::rotate_coordinates() qui lit la rotation COURANTE a chaque
+ *    lecture d'indev. Aucune recalibration a faire, la calibration native
+ *    720x1280 de tab5-hardware.yaml reste la bonne dans les deux sens.
+ *    SAUF le dernier point, doigt leve : LVGL relit alors `last_raw_point`
+ *    (lv_indev.c, indev_read_core) — celui du tap qui a ouvert ou ferme le jeu,
+ *    dans l'ANCIEN repere — et le compare a la nouvelle resolution a chaque
+ *    lecture, jusqu'a la touche suivante : « X is 832 which is greater than hor.
+ *    res » a l'ouverture, « Y is 743 … ver. res » a la fermeture, ~60 lignes/s
+ *    relayees jusqu'au journal de HA (29/09/2026). screen_portrait() le ramene
+ *    dans l'ecran apres chaque bascule (recadrer_dernier_point()).
+ *  - Les conteneurs de ui_components/pinball_game.yaml sont deja declares en
+ *    720x1280. Tant que le jeu est ferme ils sont HIDDEN, et LVGL ignore les
+ *    enfants HIDDEN dans le calcul de scroll : aucun debordement parasite sur
+ *    le dashboard paysage.
+ *
+ * EFFET DE BORD HEUREUX : a rotation 0, le chemin de flush d'ESPHome tombe dans
+ * le `default:` et fait `dst = ptr` — AUCUNE rotation logicielle, aucun passage
+ * PPA. Le flipper coute donc MOINS cher a afficher que le dashboard paysage,
+ * qui lui paie une rotation 270 a chaque flush.
+ *
+ * @ai_instruction Si un jour l'ecran reste a l'envers apres une fermeture
+ *     anormale, le coupable est un chemin de sortie qui ne passe pas par
+ *     Pinball::close(). Toutes les sorties DOIVENT passer par close().
+ *
+ * ===========================================================================
+ * [AI-CONTEXT] MÉMOIRE — jeu fermé, rien de réservé (lot 4, 26/09/2026)
+ * ===========================================================================
+ * Tout l'état (sauvegarde chargée, pièces de la table, partie, objets LVGL, pool
+ * de points des lv_line, brouillons de texte) vit dans le bloc `Mem` (section 7),
+ * créé par open() et rendu par close() ; l'UI est reconstruite à chaque
+ * ouverture. Seuls survivent g_state, g_nvs, g_raw_x/y, g_slow_x/y et s_rng
+ * (raisons en section 7). Ordre de close() : paysage 270 PUIS show_page PUIS
+ * destruction de l'UI (conteneurs terrain / fronton / panneau, jamais la
+ * racine) PUIS libération du bloc — les lv_line lisent leurs points dedans.
+ *
+ * ===========================================================================
+ * [AI-CONTEXT] MAPPING IMU EN PORTRAIT
+ * ===========================================================================
+ * marble_game.cpp et arkanoid_game.cpp (verifies sur la dalle) utilisent en
+ * PAYSAGE : ecran_x = -imu_y, ecran_y = +imu_x.
+ * Or a rotation 270 les coordonnees LVGL derivent du panneau natif par
+ * lvgl_x = natif_h - natif_y - 1 et lvgl_y = natif_x (rotate_coordinates()).
+ * En composant les deux : imu_x est aligne sur natif_x, imu_y sur natif_y.
+ * A rotation 0, LVGL = natif, donc en PORTRAIT :
+ *
+ *     ecran_x = +imu_x        ecran_y = +imu_y
+ *
+ * (et l'inverse des deux si le joueur a choisi l'ecran retourne, rotation 180).
+ * C'est le seul endroit du fichier ou ce mapping est ecrit — tout le reste
+ * passe par nudge_axes().
+ *
+ * ===========================================================================
+ * [AI-WARNING] RENDU — ce qu'il ne faut PAS refaire
+ * ===========================================================================
+ * L'ancien « Flip Noir » (supprime en 697e2e9) dessinait ses murs, ses
+ * slingshots et ses flippers avec `lv_obj_set_style_transform_rotation()`
+ * recalcule a chaque frame. Resultat : laid (rectangles pivotes creneles) et
+ * cher (LVGL repasse par un buffer ARGB8888 des qu'une transformation existe).
+ *
+ * Ici :
+ *  - la table est construite UNE fois par ouverture (section 13), jamais par
+ *    frame : arcs `lv_arc` pour l'arche, polylignes `lv_line` a boite
+ *    englobante serree pour les rails et les guides, rectangles arrondis +
+ *    degrades verticaux pour le reste ;
+ *  - seuls la bille, les flippers, les flashs et le plunger bougent (section 11) ;
+ *  - ZERO transform_rotation, ZERO allocation, ZERO std::string dans le tick.
+ *
+ * Les polylignes passent par mk_poly() qui place le widget sur la boite
+ * englobante des points : un `lv_line` cree en (0,0) de la taille du terrain
+ * serait redessine a chaque deplacement de bille, ce qui annulerait tout
+ * l'interet du rendu statique.
+ */
+#include "pinball_game.h"
+#include "game_common.h"
+#include "tab5_geometrie.h"  // rotation_repos() : la rotation de repos de la carte (ADR-0061, ADR-0069)
+#include "esphome/core/preferences.h"
+#include "lvgl_private.h"  // lv_indev_t::pointer.last_raw_point (recadrer_dernier_point)
+#include <math.h>
+#include <string.h>
+#include <stdio.h>
+
+namespace Pinball {
+
+// ===========================================================================
+// 1. Constantes — geometrie de la table (repere du terrain, 720 x 1140)
+// ===========================================================================
+// [AI-CONTEXT] Toutes les coordonnees ci-dessous sont LOCALES au conteneur
+// `pinball_field` (720 large x 1140 haut, place sous le fronton de 140 px).
+// L'ecran complet fait 720x1280. Ne pas melanger les deux reperes.
+
+static constexpr int   SCR_W  = 720;
+static constexpr int   SCR_H  = 1280;
+static constexpr int   HUD_H  = 140;
+static constexpr int   FW     = 720;    // largeur du terrain
+static constexpr int   FH     = 1140;   // hauteur du terrain
+
+// --- Arche haute : contrainte circulaire, pas une suite de segments ---------
+// Un demi-cercle exact coute UN test de distance par sous-pas au lieu de 18
+// tests point-segment, et la bille n'accroche sur aucune facette.
+static constexpr float ARCH_CX = 360.0f;
+static constexpr float ARCH_CY = 360.0f;
+static constexpr float ARCH_R  = 338.0f;
+
+// --- Couloir du plunger (a droite) -----------------------------------------
+static constexpr float LANE_X   = 636.0f;   // cloison gauche du couloir
+static constexpr float LANE_RX  = 698.0f;   // paroi droite (bord de table)
+static constexpr float LANE_BOT = 1108.0f;  // fond du couloir
+static constexpr float LANE_MID = 667.0f;   // axe du couloir (repos de la bille)
+static constexpr float BALL_REST_Y = 1078.0f;
+
+// --- Flippers ---------------------------------------------------------------
+static constexpr float FLIP_PX_L = 200.0f, FLIP_PX_R = 458.0f;
+static constexpr float FLIP_PY   = 984.0f;
+static constexpr float FLIP_LEN  = 116.0f;
+static constexpr float FLIP_REST_L   =  0.46f;              // repos, bras vers le bas
+static constexpr float FLIP_ACT_L    = -0.40f;              // frappe
+static constexpr float FLIP_REST_R   = 3.14159265f - 0.46f; // miroir
+static constexpr float FLIP_ACT_R    = 3.14159265f + 0.40f;
+// 18 rad/s = ~48 ms pour les 0,86 rad de course, la valeur d'un vrai flipper.
+// Plus rapide, la fenetre de frappe deviendrait trop courte pour une bille
+// lancee a pleine vitesse ; plus lent, le battoir semblerait mou.
+static constexpr float FLIP_SPEED    = 18.0f;   // rad/s — montee du bras
+static constexpr float FLIP_THICK    = 11.0f;   // demi-epaisseur de collision
+static constexpr float FLIP_PUNCH    = 1.35f;   // gain d'impulsion a la frappe
+
+// Boites de rendu des flippers (voir mk_poly / section 11) : dimensionnees pour
+// contenir tout le balayage + la moitie de l'epaisseur du trait.
+static constexpr int FLIP_BOX_X[2] = {184, 337};
+static constexpr int FLIP_BOX_Y    = 923;
+static constexpr int FLIP_BOX_W    = 140;
+static constexpr int FLIP_BOX_H    = 130;
+
+// --- Drain / tablier --------------------------------------------------------
+static constexpr float DRAIN_Y  = 1092.0f;  // sous cette ligne, bille perdue
+static constexpr int   APRON_Y  = 1078;     // haut du tablier chrome
+
+// ===========================================================================
+// 2. Constantes — physique et rythme
+// ===========================================================================
+// [AI-CONTEXT] La table est simulee « a plat vue de dessus avec une pente » :
+// la gravite est CONSTANTE vers le bas de l'ecran, elle ne depend pas de l'IMU.
+// C'est volontaire — le joueur peut tenir la tablette droite, inclinee ou posee
+// sur un bureau, la table se comporte pareil. L'IMU ne sert QU'AU NUDGE.
+
+static constexpr uint32_t TICK_MS      = 20;    // 50 Hz en partie
+static constexpr uint32_t TICK_MENU_MS = 200;   // menus : rien a animer
+static constexpr int   SUBSTEP = 4;             // sous-pas anti-tunnelling
+static constexpr float DT      = TICK_MS / 1000.0f;
+static constexpr float SDT     = DT / SUBSTEP;
+
+static constexpr float BALL_R      = 13.0f;
+// [AI-CONTEXT] GRAVITY calibree, pas choisie au hasard : un plateau reel fait
+// ~1,20 m pour 1140 px ici (950 px/m) et une table inclinee a 6,5 deg donne une
+// acceleration utile de ~1,15 m/s^2, soit ~1090 px/s^2. On arrondit a 1150 :
+// la bille traverse le plateau en ~1,3 s, exactement le rythme d'une machine.
+// Toute modification de GRAVITY oblige a refaire le calcul de PLUNGER_* ci-dessous.
+static constexpr float GRAVITY     = 1150.0f;   // px/s^2 (pente de la table)
+static constexpr float FRICTION    = 0.9990f;   // par sous-pas
+static constexpr float MAX_SPEED   = 1900.0f;
+static constexpr float REST_WALL   = 0.30f;     // rebond des rails
+static constexpr float REST_SOFT   = 0.12f;     // rebond des guides mous
+static constexpr float BUMPER_KICK = 690.0f;
+static constexpr float SLING_KICK  = 620.0f;
+static constexpr float TARGET_KICK = 240.0f;
+
+// Demi-epaisseur de collision des rails : la valeur est calee sur l'epaisseur
+// DESSINEE (15 px, cf. mk_rail) pour que la bille touche pile le rail visible.
+static constexpr float RAIL_HALF = 7.0f;
+
+// [AI-CONTEXT] Course du lanceur, calculee et pas devinee (h = v^2 / 2g depuis
+// BALL_REST_Y = 1078) :
+//   - PLUNGER_MIN 1300 -> apogee y ~ 343 : la bille sort tout juste du couloir
+//     (qui s'ouvre a y = 430) et retombe mollement a droite du plateau. Un tir
+//     faible RATE, c'est voulu, sinon la jauge ne servirait a rien.
+//   - PLUNGER_MAX 1800 -> depasse le sommet de l'arche (y = 22) avec de la
+//     reserve : la bille fait le tour complet et traverse les 3 rollovers du
+//     skill shot. C'est le seul tir qui les atteint.
+// Baisser GRAVITY ou remonter BALL_REST_Y sans refaire ce calcul rendrait le
+// skill shot injouable (la bille calerait sur le flanc droit de l'arche).
+static constexpr float PLUNGER_CHARGE_S = 1.10f;  // secondes pour charger a fond
+static constexpr float PLUNGER_MIN = 1300.0f;
+static constexpr float PLUNGER_MAX = 1800.0f;
+static constexpr uint32_t AUTOLAUNCH_MS = 9000;   // securite anti-blocage
+
+// --- Nudge / TILT -----------------------------------------------------------
+static constexpr float NUDGE_HP    = 0.12f;   // coupure du passe-haut
+static constexpr float NUDGE_GAIN  = 900.0f;  // px/s d'impulsion par g de secousse
+static constexpr uint32_t NUDGE_COOLDOWN_MS = 260;
+static constexpr int   TILT_HITS   = 3;
+static constexpr uint32_t TILT_DECAY_MS   = 2600;  // un cran de compteur s'efface
+static constexpr uint32_t TILT_PENALTY_MS = 2500;  // flippers morts
+
+// --- Modes ------------------------------------------------------------------
+static constexpr uint32_t FRENZY_MS = 9000;
+static constexpr int MAX_SIM_BALLS = 3;
+static constexpr int BALLS_PER_GAME = 3;
+
+// --- Score ------------------------------------------------------------------
+static constexpr uint32_t SC_BUMPER   = 1200;
+static constexpr uint32_t SC_SLING    = 400;
+static constexpr uint32_t SC_TARGET   = 3500;
+static constexpr uint32_t SC_LANE     = 900;
+static constexpr uint32_t SC_SKILL    = 25000;
+static constexpr uint32_t SC_BANK     = 12000;
+static constexpr uint32_t SC_JACKPOT  = 30000;
+static constexpr uint32_t BONUS_BALL_1 = 250000;
+static constexpr uint32_t BONUS_BALL_2 = 750000;
+
+// --- Persistance ------------------------------------------------------------
+// [AI-WARNING] « PIN2 » et pas « PIN1 » : PIN1 etait le layout de l'ancien Flip
+// Noir. Le reutiliser ferait charger les octets d'un autre jeu ici.
+static constexpr uint32_t PINBALL_SAVE_MAGIC = 0x50494E32u;  // "PIN2"
+static constexpr uint32_t PREF_KEY           = 0x504E4232u;  // cle NVS dediee
+
+// ===========================================================================
+// 3. Sons — stubs (meme convention qu'arkanoid_game.cpp)
+// ===========================================================================
+// [AI-CONTEXT] Aucun bip local n'est emis pour l'instant : le haut-parleur du
+// Tab5 est pilote par le pipeline vocal Home Assistant (media_player + micro),
+// et lui voler la sortie audio pendant une partie couperait une reponse de
+// l'assistant. Ces fonctions sont le point d'accroche unique le jour ou un
+// buzzer PWM local (ou un canal mixe) sera disponible.
+static inline void sfx_bumper()   { /* STUB : pop court et sec */ }
+static inline void sfx_sling()    { /* STUB : claquement */ }
+static inline void sfx_target()   { /* STUB : bip aigu */ }
+static inline void sfx_bank()     { /* STUB : arpege montant */ }
+static inline void sfx_launch()   { /* STUB : ressort */ }
+static inline void sfx_drain()    { /* STUB : bip grave */ }
+static inline void sfx_tilt()     { /* STUB : buzzer d'alarme */ }
+static inline void sfx_multiball(){ /* STUB : fanfare */ }
+static inline void sfx_gameover() { /* STUB : descente */ }
+
+// ===========================================================================
+// 4. Aleatoire (xorshift32) et petits utilitaires
+// ===========================================================================
+
+// Survit à la fermeture (hors du bloc Mem, section 7) : l'état n'est JAMAIS
+// ré-amorcé. Repartir de la graine à chaque ouverture rejouerait la même suite,
+// donc la même lane de skill shot à la première bille de chaque ouverture.
+static uint32_t s_rng = 0x9E3779B9u;
+static inline uint32_t rnd() {
+    return xorshift32_next(s_rng);
+}
+// Flottant aleatoire dans [-1, 1].
+static inline float rndf() { return (float)(int32_t)(rnd() >> 8) / 8388608.0f - 1.0f; }
+
+
+// ===========================================================================
+// 5. Types
+// ===========================================================================
+
+// Segment de collision. `rest` = coefficient de restitution.
+// `one_way != 0` : le segment n'existe que pour une bille qui DESCEND — c'est
+// la porte anti-retour en haut du couloir du plunger, exactement comme le
+// clapet metallique d'une vraie machine.
+struct Seg {
+    float x1, y1, x2, y2;
+    float rest;
+    uint8_t one_way;
+};
+
+struct Bumper {
+    float cx, cy, r;
+    uint32_t color;
+    uint32_t flash_until;
+    lv_obj_t* flash;
+};
+
+struct Target {
+    float cx, cy;      // centre de la barre
+    float half;        // demi-longueur
+    bool  down;
+    lv_obj_t* obj;     // cible levee (masquee quand tombee)
+    lv_obj_t* lamp;    // insert sous la cible (reste visible)
+};
+
+struct Sling {
+    float x1, y1, x2, y2;   // face active
+    float nx, ny;           // normale (unitaire) de la detente
+    uint32_t flash_until;
+    lv_obj_t* flash;
+};
+
+struct Rollover {
+    float cx, cy, r;
+    bool  lit;
+    lv_obj_t* obj;
+};
+
+struct Flipper {
+    float px, py;
+    float angle, target, rest, active;
+    bool  pressed;
+    float draw_angle;   // dernier angle effectivement dessine
+};
+
+struct Ball {
+    float x, y, vx, vy;
+    bool  active;
+    bool  in_plunger;
+    int   dx, dy;       // derniere position dessinee (entiers)
+    lv_obj_t* shadow;
+    lv_obj_t* body;
+    lv_obj_t* gloss;
+};
+
+// ===========================================================================
+// 6. Donnees de table
+// ===========================================================================
+// [AI-CONTEXT] Lecture de la table, de haut en bas :
+//   - arche haute (demi-cercle) : le tir du plunger monte a droite, contourne
+//     par le haut et redescend a gauche. 3 rollovers y sont poses sur la
+//     trajectoire (skill shot).
+//   - 3 bumpers en triangle dans le tiers haut.
+//   - 3 inserts lumineux (FRENZY / MULTI / SKILL) puis la banque de 3 cibles.
+//   - 2 slingshots, 2 couloirs de retour (inlane) et 2 couloirs de perte
+//     (outlane, sans plancher : la bille y tombe).
+//   - 2 flippers, drain au centre, tablier chrome par-dessus.
+
+static const Seg WALLS[] = {
+    // --- Bord gauche puis entonnoir de l'outlane gauche ---------------------
+    { 22.0f,  360.0f,  22.0f,  900.0f, REST_WALL, 0 },
+    { 22.0f,  900.0f,  46.0f, 1010.0f, REST_WALL, 0 },
+    { 46.0f, 1010.0f,  64.0f, 1070.0f, REST_WALL, 0 },
+    // --- Cloison du couloir du plunger = bord droit du terrain --------------
+    {636.0f,  430.0f, 636.0f, 1108.0f, REST_WALL, 0 },
+    // --- Entonnoir de l'outlane droite --------------------------------------
+    {636.0f,  900.0f, 612.0f, 1010.0f, REST_WALL, 0 },
+    {612.0f, 1010.0f, 594.0f, 1070.0f, REST_WALL, 0 },
+    // --- Separateurs outlane / inlane (les « posts ») ------------------------
+    {126.0f,  850.0f, 110.0f,  928.0f, REST_SOFT, 0 },
+    {532.0f,  850.0f, 548.0f,  928.0f, REST_SOFT, 0 },
+    // --- Planchers d'inlane : ils deposent la bille sur le flipper -----------
+    {108.0f,  930.0f, 196.0f,  962.0f, REST_SOFT, 0 },
+    {550.0f,  930.0f, 462.0f,  962.0f, REST_SOFT, 0 },
+    // --- Couloir du plunger : paroi droite et fond --------------------------
+    {698.0f,  360.0f, 698.0f, 1108.0f, REST_WALL, 0 },
+    {636.0f, 1108.0f, 698.0f, 1108.0f, 0.02f,     0 },
+    // --- Clapet anti-retour en haut du couloir ------------------------------
+    {636.0f,  366.0f, 636.0f,  430.0f, REST_WALL, 1 },
+};
+static constexpr int N_WALLS = (int)(sizeof(WALLS) / sizeof(WALLS[0]));
+
+static constexpr int N_BUMPERS   = 3;
+static constexpr int N_TARGETS   = 3;
+static constexpr int N_SLINGS    = 2;
+static constexpr int N_ROLLOVERS = 3;
+
+// Les pièces animées (bumpers, cibles, slingshots, rollovers, flippers, billes)
+// vivent dans le bloc Mem (section 7) : build_table_data() les remplit à chaque
+// ouverture.
+
+// ===========================================================================
+// 7. Etat runtime
+// ===========================================================================
+
+enum State : uint8_t {
+    ST_OFF = 0, ST_HUB, ST_SCORES, ST_SETTINGS, ST_PLAYING, ST_PAUSED, ST_GAMEOVER
+};
+
+// Ce qui survit à la fermeture — quelques octets, et RIEN d'autre (lot 4 de
+// l'audit du 26/09/2026, game_common.h « Mémoire d'un jeu ») :
+//  - g_nvs : le recréer ferait fuir un backend de préférences par ouverture ;
+//  - g_state : lu par le registre (is_open) jeu fermé ;
+//  - g_raw_x/y : écrits par on_imu(), que dispatch_imu appelle aussi jeu fermé ;
+//  - g_slow_x/y : composante lente du passe-haut du nudge (nudge_update), qui
+//    continue d'une partie à l'autre et n'est remise à 0 que par calibrate_flat().
+//    Remise à 0 à chaque ouverture, le premier tick d'une partie verrait tout
+//    l'écart à la calibration comme une secousse : nudge fantôme = un cran de TILT ;
+//  - s_rng (section 4) : jamais ré-amorcé.
+static NvsSlot<PinballSave> g_nvs(PREF_KEY, PINBALL_SAVE_MAGIC);
+static State g_state = ST_OFF;
+static float g_raw_x = 0.0f, g_raw_y = 0.0f;
+static float g_slow_x = 0.0f, g_slow_y = 0.0f;
+
+static constexpr int N_SLOTS = 7;
+static constexpr int MAX_PTS = 96;
+
+// Tout le reste n'existe que jeu ouvert : créé par open(), rendu par close()
+// APRÈS la destruction des objets LVGL qu'il pointe — et des lv_line qui lisent
+// `pts` / `flip_pts` (voir le [AI-WARNING] du pool de points ci-dessous).
+struct Mem {
+    PinballSave save{};  // relue de la NVS à chaque ouverture
+    UI    ui{};
+    lv_timer_t* timer = nullptr;
+    uint32_t tick_period = TICK_MENU_MS;
+
+    // --- Pièces animées (section 6) : géométrie + état + objets LVGL, remplis
+    //     par build_table_data() puis build_*() à chaque ouverture ------------
+    Bumper   bump[N_BUMPERS];
+    Target   targ[N_TARGETS];
+    Sling    sling[N_SLINGS];
+    Rollover roll[N_ROLLOVERS];
+    Flipper  flip[2];
+    Ball     balls[MAX_SIM_BALLS];
+
+    // --- Partie -------------------------------------------------------------
+    uint32_t score = 0;
+    uint32_t ball_score = 0;      // points marques sur la bille en cours
+    int      ball_num = 0;
+    int      balls_total = BALLS_PER_GAME;
+    int      active_balls = 0;
+    int      multiplier = 1;
+    int      game_multiballs = 0;
+    bool     game_tilted = false;
+    bool     bonus1 = false, bonus2 = false;
+    int      banks_done = 0;      // banques de cibles completees
+
+    // --- Plunger ------------------------------------------------------------
+    bool     plunger_held = false;
+    float    plunger_charge = 0.0f;
+    uint32_t autolaunch_at = 0;
+    uint32_t serve_at = 0;        // 0 = rien en attente
+
+    // --- Skill shot ---------------------------------------------------------
+    int      skill_lane = -1;     // rollover a viser apres le tir
+    uint32_t skill_until = 0;
+
+    // --- Modes --------------------------------------------------------------
+    uint32_t frenzy_until = 0;
+    bool     mb_active = false;
+
+    // --- Nudge / TILT (lectures IMU et passe-haut : globaux ci-dessus) -------
+    int      tilt_hits = 0;
+    uint32_t tilt_decay_at = 0;
+    bool     tilted = false;
+    uint32_t tilt_until = 0;
+    uint32_t nudge_ok_at = 0;
+
+    // --- Feedback -----------------------------------------------------------
+    char     toast_buf[48];
+    uint32_t toast_until = 0;
+
+    // --- Objets LVGL (construits à chaque ouverture) ------------------------
+    lv_obj_t* hud_ball  = nullptr;
+    lv_obj_t* hud_dot[BALLS_PER_GAME] = {};
+    lv_obj_t* hud_score = nullptr;
+    lv_obj_t* hud_best  = nullptr;
+    lv_obj_t* hud_badge = nullptr;
+    lv_obj_t* hud_tilt  = nullptr;
+    lv_obj_t* pwr_bg    = nullptr;
+    lv_obj_t* pwr_fill  = nullptr;
+    lv_obj_t* toast     = nullptr;
+    lv_obj_t* insert[3] = {};
+    lv_obj_t* insert_l[3] = {};
+    lv_obj_t* plunger_rod = nullptr;
+    lv_obj_t* flip_base[2] = {};
+    lv_obj_t* flip_edge[2] = {};
+    lv_obj_t* zone_l = nullptr;
+    lv_obj_t* zone_r = nullptr;
+    lv_obj_t* zone_p = nullptr;
+    lv_obj_t* plunger_hint = nullptr;
+
+    // --- Panneau de menus ---------------------------------------------------
+    lv_obj_t* p_title = nullptr;
+    lv_obj_t* p_sub   = nullptr;
+    lv_obj_t* p_body  = nullptr;
+    lv_obj_t* p_foot  = nullptr;
+    SlotMenu<N_SLOTS> slots;   // entrées des menus (game_common.h)
+    // Pictogramme « tournez la tablette » du hub (3 objets, aucune police MDI a
+    // enrichir : deux rectangles et un chevron suffisent et restent lisibles).
+    lv_obj_t* rot_land = nullptr;
+    lv_obj_t* rot_port = nullptr;
+    lv_obj_t* rot_arrow = nullptr;
+
+    // --- Caches de rendu : valeurs déjà dessinées sur les objets de CETTE
+    //     ouverture. Ils naissent invalides avec le bloc, donc tout est repeint
+    //     au premier tick sur les objets neufs (voir aussi render_effects et
+    //     render_plunger) ----------------------------------------------------
+    uint32_t c_score = 0xFFFFFFFFu;
+    int      c_ball  = -1;
+    int      c_dots  = -1;
+    bool     c_tilt  = false;     // = hud_tilt masqué à la construction
+    char     c_badge[24] = {0};
+    int8_t   c_roll[N_ROLLOVERS] = {-1, -1, -1};   // lampes des rollovers
+    int8_t   c_ins[3] = {-1, -1, -1};              // inserts FRENZY/MULTI/SKILL
+    int      plunger_len = -1;                     // longueur dessinee de la tige
+
+    // --- Pool de points pour les polylignes statiques -----------------------
+    // [AI-WARNING] lv_line_set_points() ne COPIE PAS le tableau, il n'en garde
+    // que l'adresse. Les points doivent donc vivre aussi longtemps que le
+    // widget : d'ou ce pool dans le bloc plutot que des tableaux locaux, et
+    // close() ne rend le bloc qu'APRES avoir detruit les lignes.
+    lv_point_precise_t pts[MAX_PTS];
+    int pts_n = 0;
+    // Points des flippers : un tableau par flipper, partage par les deux traits
+    // (corps sombre + arete neon) puisque lv_line ne stocke que le pointeur.
+    lv_point_precise_t flip_pts[2][2];
+
+    // --- Brouillons de texte des menus et du HUD (le label copie le texte) --
+    char hub_sub[128];
+    char hub_best[64];
+    char scores_body[512];
+    char scores_sub[96];
+    char settings_t0[72], settings_t1[72], settings_t2[72];
+    char pause_sub[96];
+    char end_sub[96];
+    char end_body[160];
+    char hud_sc[24];
+    char hud_bl[32];
+    char hud_be[32];
+    char hud_badge_buf[24];
+};
+static Mem* gs = nullptr;
+
+// Declarations avancees
+static void go_hub();
+static void go_scores();
+static void go_settings();
+static void go_pause();
+static void tick_period_sync();
+
+// ===========================================================================
+// 8. Persistance NVS
+// ===========================================================================
+
+void persist_load() {
+    if (!gs) return;  // la sauvegarde n'est en memoire que jeu ouvert
+    if (!g_nvs.load(gs->save)) {
+        gs->save = PinballSave{};
+        gs->save.magic = PINBALL_SAVE_MAGIC;
+        gs->save.nudge_sens = 2;
+        gs->save.sfx = 1;
+    }
+    if (gs->save.nudge_sens > 4) gs->save.nudge_sens = 2;
+    if (gs->save.flip_screen > 1) gs->save.flip_screen = 0;
+    if (gs->save.invert_nudge > 1) gs->save.invert_nudge = 0;
+}
+
+void persist_save() {
+    if (!gs || !g_nvs.ready()) return;
+    g_nvs.save(gs->save);
+}
+
+// Insere un score dans le top 10 et renvoie son rang (0 = premier), -1 si hors
+// classement. Le tableau est trie par score decroissant.
+static int scores_insert(uint32_t sc, int balls, int mb, bool tilted) {
+    if (sc == 0) return -1;
+    PinballScore e{};
+    e.score        = sc;
+    e.ball_reached = (uint16_t) balls;
+    e.multiballs   = (uint8_t) (mb > 255 ? 255 : mb);
+    e.tilted       = tilted ? 1 : 0;
+    // Tableau à sentinelle (cases vides à 0, pas de compteur) : c'est topn_insert
+    // avec count = N, puisque sc > 0 (même rang, mêmes décalages).
+    uint8_t full = PINBALL_NSCORES;
+    return topn_insert(gs->save.top, full, e);
+}
+
+static inline uint32_t best_score() { return gs->save.top[0].score; }
+
+// ===========================================================================
+// 9. Helpers LVGL
+// ===========================================================================
+
+
+
+
+
+// Degrade vertical : c'est lui qui donne du volume aux pieces sans coûter
+// d'objet supplementaire (une seule passe de dessin LVGL).
+static inline void set_grad(lv_obj_t* o, uint32_t hi, uint32_t lo) {
+    if (!o) return;
+    lv_obj_set_style_bg_color(o, lv_color_hex(hi), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_color(o, lv_color_hex(lo), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(o, LV_GRAD_DIR_VER, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, LV_PART_MAIN);
+}
+
+
+
+// Formate un score avec des espaces fins tous les 3 chiffres (« 1 250 000 »).
+// La police roboto_55_b ne contient que les chiffres, l'espace et quelques
+// symboles : aucune lettre ne doit passer par ce buffer.
+static void fmt_score(char* buf, size_t n, uint32_t v) {
+    char tmp[16];
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long) v);
+    int len = (int) strlen(tmp);
+    size_t o = 0;
+    for (int i = 0; i < len && o + 2 < n; i++) {
+        if (i > 0 && ((len - i) % 3) == 0) buf[o++] = ' ';
+        buf[o++] = tmp[i];
+    }
+    buf[o] = '\0';
+}
+
+// --- Polyligne a boite englobante serree ------------------------------------
+// Voir le [AI-WARNING] RENDU en tete de fichier : un lv_line pose en (0,0) a la
+// taille du terrain serait redessine a chaque frame. On place donc le widget
+// exactement sur ses points et on convertit ceux-ci en coordonnees locales.
+static lv_obj_t* mk_poly(lv_obj_t* parent, const float* xy, int n,
+                         int width, uint32_t color, lv_opa_t opa) {
+    if (n < 2 || gs->pts_n + n > MAX_PTS) return nullptr;
+    float minx = xy[0], maxx = xy[0], miny = xy[1], maxy = xy[1];
+    for (int i = 1; i < n; i++) {
+        if (xy[2 * i]     < minx) minx = xy[2 * i];
+        if (xy[2 * i]     > maxx) maxx = xy[2 * i];
+        if (xy[2 * i + 1] < miny) miny = xy[2 * i + 1];
+        if (xy[2 * i + 1] > maxy) maxy = xy[2 * i + 1];
+    }
+    const int m = width / 2 + 2;          // marge : demi-epaisseur + bout arrondi
+    const int ox = (int) minx - m, oy = (int) miny - m;
+    lv_point_precise_t* p = &gs->pts[gs->pts_n];
+    for (int i = 0; i < n; i++) {
+        p[i].x = (lv_value_precise_t) ((int) xy[2 * i]     - ox);
+        p[i].y = (lv_value_precise_t) ((int) xy[2 * i + 1] - oy);
+    }
+    gs->pts_n += n;
+
+    lv_obj_t* o = lv_line_create(parent);
+    lv_obj_remove_style_all(o);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_line_width(o, width, LV_PART_MAIN);
+    lv_obj_set_style_line_color(o, lv_color_hex(color), LV_PART_MAIN);
+    lv_obj_set_style_line_opa(o, opa, LV_PART_MAIN);
+    lv_obj_set_style_line_rounded(o, true, LV_PART_MAIN);
+    lv_line_set_points(o, p, n);
+    lv_obj_set_pos(o, ox, oy);
+    lv_obj_set_size(o, (int) (maxx - minx) + 2 * m, (int) (maxy - miny) + 2 * m);
+    return o;
+}
+
+// Un rail = deux passes : un corps epais en acier froid, une arete fine et
+// claire par-dessus. C'est ce qui donne le relief sans aucune image.
+static void mk_rail(lv_obj_t* parent, const float* xy, int n) {
+    mk_poly(parent, xy, n, 15, Pal::RAIL, LV_OPA_COVER);
+    mk_poly(parent, xy, n, 5,  Pal::RAIL_HI, 190);
+}
+
+// Arc decoratif ou structurel. Le knob et l'anneau de fond sont neutralises :
+// on ne veut qu'un trait courbe, pas un widget interactif (meme recette que
+// mk_wedge() dans trivia_game.cpp).
+static lv_obj_t* mk_arc(lv_obj_t* parent, float cx, float cy, float r,
+                        int a0, int a1, int width, uint32_t color, lv_opa_t opa) {
+    lv_obj_t* a = lv_arc_create(parent);
+    lv_obj_remove_flag(a, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(a, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(a, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(a, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(a, 0, LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(a, LV_OPA_TRANSP, LV_PART_MAIN);   // pas d'anneau de fond
+    lv_obj_set_style_bg_opa(a, LV_OPA_TRANSP, LV_PART_KNOB);    // pas de poignee
+    lv_obj_set_style_pad_all(a, 0, LV_PART_KNOB);
+    lv_obj_set_style_arc_width(a, width, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(a, true, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(a, lv_color_hex(color), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(a, opa, LV_PART_INDICATOR);
+    lv_arc_set_rotation(a, 0);
+    lv_arc_set_bg_angles(a, a0, a1);
+    lv_arc_set_angles(a, a0, a1);
+    int d = (int) (r * 2.0f) + width;
+    lv_obj_set_size(a, d, d);
+    lv_obj_set_pos(a, (int) (cx - d / 2.0f), (int) (cy - d / 2.0f));
+    return a;
+}
+
+// ===========================================================================
+// 10. Orientation de l'ecran
+// ===========================================================================
+// [AI-CONTEXT] Voir le bloc ORIENTATION en tete de fichier. `portrait=false`
+// remet EXACTEMENT la rotation de repos du dashboard, jamais autre chose : 270 sur le
+// Tab5, celle de la carte en general (rotation_repos(), tab5_geometrie.h, ADR-0061 ; sur la
+// 7B, selon le select « Sens de l'ecran », ADR-0069). Sur
+// une carte paysage native (Waveshare 7B, repos 180), le portrait n'est pas encore fait.
+
+// Dernier point de chaque entree pointeur ramene dans la resolution courante (voir
+// ORIENTATION en tete de fichier). Doigt leve, ce point ne declenche rien : seule
+// sa validite compte, un simple recadrage suffit. Le prochain appui l'ecrase.
+static void recadrer_dernier_point() {
+    for (lv_indev_t* in = lv_indev_get_next(nullptr); in != nullptr; in = lv_indev_get_next(in)) {
+        if (lv_indev_get_type(in) != LV_INDEV_TYPE_POINTER) continue;
+        lv_display_t* d = lv_indev_get_display(in);
+        const int32_t w = lv_display_get_horizontal_resolution(d);
+        const int32_t h = lv_display_get_vertical_resolution(d);
+        lv_point_t& p = in->pointer.last_raw_point;
+        p.x = LV_CLAMP(0, p.x, w - 1);
+        p.y = LV_CLAMP(0, p.y, h - 1);
+    }
+}
+
+static void screen_portrait(bool portrait) {
+    if (!gs->ui.lvgl) return;
+    rotation_tenue() = portrait;  // un sens choisi pendant la partie attend la sortie (ADR-0069)
+    int angle = rotation_repos();
+    if (portrait) angle = gs->save.flip_screen ? 180 : 0;
+    gs->ui.lvgl->set_rotation(angle);
+    recadrer_dernier_point();
+}
+
+// ===========================================================================
+// 11. Physique
+// ===========================================================================
+// [AI-CONTEXT] Schema de collision :
+//   - bille                       = cercle (x, y, BALL_R)
+//   - rails, guides, planchers    = segments (projection point-segment)
+//   - arche haute                 = contrainte circulaire (un seul test)
+//   - bumpers, cibles, rollovers  = cercles / capsules
+//   - flippers                    = segments mobiles (vitesse au point de contact)
+// Chaque sous-pas : integration, puis resolution de toutes les collisions.
+
+static float point_seg_dist(float px, float py, float x1, float y1, float x2, float y2,
+                            float& cx, float& cy) {
+    const float dx = x2 - x1, dy = y2 - y1;
+    const float len2 = dx * dx + dy * dy;
+    float t = 0.0f;
+    if (len2 > 0.0001f) {
+        t = ((px - x1) * dx + (py - y1) * dy) / len2;
+        t = clampf(t, 0.0f, 1.0f);
+    }
+    cx = x1 + t * dx;
+    cy = y1 + t * dy;
+    const float ex = px - cx, ey = py - cy;
+    return sqrtf(ex * ex + ey * ey);
+}
+
+// Rebond generique bille / segment epais (capsule de rayon `rad`).
+static bool collide_capsule(Ball& b, float x1, float y1, float x2, float y2,
+                            float rad, float rest) {
+    float cx, cy;
+    const float d = point_seg_dist(b.x, b.y, x1, y1, x2, y2, cx, cy);
+    if (d >= rad || d < 0.0001f) return false;
+    const float nx = (b.x - cx) / d, ny = (b.y - cy) / d;
+    const float pen = rad - d;
+    b.x += nx * pen;
+    b.y += ny * pen;
+    const float vn = b.vx * nx + b.vy * ny;
+    if (vn < 0.0f) {
+        b.vx -= (1.0f + rest) * vn * nx;
+        b.vy -= (1.0f + rest) * vn * ny;
+    }
+    return true;
+}
+
+// L'arche : la bille ne peut pas sortir du disque tant qu'elle est au-dessus du
+// diametre. Un seul sqrt par sous-pas, et une courbe parfaitement lisse.
+static void collide_arch(Ball& b) {
+    if (b.y >= ARCH_CY) return;
+    const float dx = b.x - ARCH_CX, dy = b.y - ARCH_CY;
+    const float d = sqrtf(dx * dx + dy * dy);
+    // -RAIL_HALF : le rail est DESSINE centre sur ARCH_R avec 15 px d'epaisseur,
+    // la bille doit donc s'arreter sur sa face interieure, pas sur son axe.
+    const float lim = ARCH_R - BALL_R - RAIL_HALF;
+    if (d <= lim || d < 0.0001f) return;
+    const float ux = dx / d, uy = dy / d;
+    b.x = ARCH_CX + ux * lim;
+    b.y = ARCH_CY + uy * lim;
+    const float nx = -ux, ny = -uy;               // normale rentrante
+    const float vn = b.vx * nx + b.vy * ny;
+    if (vn < 0.0f) {
+        b.vx -= (1.0f + REST_WALL) * vn * nx;
+        b.vy -= (1.0f + REST_WALL) * vn * ny;
+    }
+}
+
+// ===========================================================================
+// 12. Scoring et modes
+// ===========================================================================
+
+static void toast(const char* txt, uint32_t ms) {
+    snprintf(gs->toast_buf, sizeof(gs->toast_buf), "%s", txt);
+    set_text_if(gs->toast, gs->toast_buf);
+    show(gs->toast, true);
+    gs->toast_until = lv_tick_get() + ms;
+}
+
+static void add_score(uint32_t pts) {
+    const uint32_t gain = pts * (uint32_t) gs->multiplier;
+    gs->score += gain;
+    gs->ball_score += gain;
+    if (!gs->bonus1 && gs->score >= BONUS_BALL_1) {
+        gs->bonus1 = true; gs->balls_total++;
+        toast(tr("BILLE BONUS"), 1800);
+    } else if (!gs->bonus2 && gs->score >= BONUS_BALL_2) {
+        gs->bonus2 = true; gs->balls_total++;
+        toast(tr("BILLE BONUS"), 1800);
+    }
+}
+
+static void start_frenzy() {
+    gs->frenzy_until = lv_tick_get() + FRENZY_MS;
+    toast("BUMPER FRENZY", 1600);
+    sfx_bank();
+}
+
+// Lance la bille supplementaire du multiball : elle part du couloir et se tire
+// toute seule (voir gs->autolaunch_at). Une seule bille en plus : deux billes
+// suffisent a rendre l'ecran vivant sans le rendre illisible.
+static void start_multiball() {
+    int slot = -1;
+    for (int i = 0; i < MAX_SIM_BALLS; i++) if (!gs->balls[i].active) { slot = i; break; }
+    if (slot < 0) return;
+    Ball& b = gs->balls[slot];
+    b.x = LANE_MID; b.y = BALL_REST_Y;
+    b.vx = 0.0f; b.vy = 0.0f;
+    b.active = true; b.in_plunger = true;
+    b.dx = b.dy = -9999;    // invalide le cache de rendu, sinon la bille reste invisible
+    gs->active_balls++;
+    gs->mb_active = true;
+    gs->multiplier = 2;
+    gs->game_multiballs++;
+    gs->save.multiballs++;
+    gs->autolaunch_at = lv_tick_get() + 900;
+    toast("MULTIBALL", 2000);
+    sfx_multiball();
+}
+
+// Banque de cibles completee : alterne mode court et multiball, pour que les
+// deux recompenses tombent a coup sur au fil d'une partie.
+static void bank_complete() {
+    add_score(SC_BANK);
+    gs->banks_done++;
+    for (int i = 0; i < N_TARGETS; i++) {
+        gs->targ[i].down = false;
+        show(gs->targ[i].obj, true);
+    }
+    if ((gs->banks_done % 2) == 1) start_frenzy();
+    else if (!gs->mb_active)       start_multiball();
+    else                         start_frenzy();
+}
+
+// ===========================================================================
+// 13. Construction de l'UI — table statique (à chaque ouverture)
+// ===========================================================================
+
+static void zone_event_cb(lv_event_t* e);
+static void hud_event_cb(lv_event_t* e);
+static void slot_event_cb(lv_event_t* e);
+static void flipper_points(int s, bool force);
+
+// --- Donnees de placement des pieces animees --------------------------------
+// Geometrie ET etat initial (flippers au repos, cibles levees, lanes allumees,
+// billes inactives) : appelee a chaque ouverture sur un bloc neuf.
+static void build_table_data() {
+    struct { float x, y, r; uint32_t c; } bd[N_BUMPERS] = {
+        {186.0f, 570.0f, 36.0f, Pal::CYAN},
+        {330.0f, 476.0f, 40.0f, Pal::AMBER},
+        {474.0f, 570.0f, 36.0f, Pal::MAGENTA},
+    };
+    for (int i = 0; i < N_BUMPERS; i++) {
+        gs->bump[i].cx = bd[i].x; gs->bump[i].cy = bd[i].y; gs->bump[i].r = bd[i].r;
+        gs->bump[i].color = bd[i].c; gs->bump[i].flash_until = 0; gs->bump[i].flash = nullptr;
+    }
+
+    const float tx[N_TARGETS] = {246.0f, 330.0f, 414.0f};
+    for (int i = 0; i < N_TARGETS; i++) {
+        gs->targ[i].cx = tx[i]; gs->targ[i].cy = 752.0f; gs->targ[i].half = 32.0f;
+        gs->targ[i].down = false; gs->targ[i].obj = nullptr; gs->targ[i].lamp = nullptr;
+    }
+
+    // Slingshots : la normale est la direction de la detente, pas la normale
+    // geometrique du segment — c'est elle qui decide ou part la bille.
+    gs->sling[0] = {108.0f, 828.0f, 218.0f, 908.0f,  0.609f, -0.793f, 0, nullptr};
+    gs->sling[1] = {550.0f, 828.0f, 440.0f, 908.0f, -0.609f, -0.793f, 0, nullptr};
+
+    // Rollovers poses sur la trajectoire de l'arche (rayon ARCH_R - 32) :
+    // une bille qui longe l'arche les traverse forcement.
+    const float rr = ARCH_R - 32.0f;
+    const float ang[N_ROLLOVERS] = {2.007f, 1.5708f, 1.134f};   // 115 / 90 / 65 deg
+    for (int i = 0; i < N_ROLLOVERS; i++) {
+        gs->roll[i].cx = ARCH_CX + rr * cosf(ang[i]);
+        gs->roll[i].cy = ARCH_CY - rr * sinf(ang[i]);
+        gs->roll[i].r  = 18.0f;
+        gs->roll[i].lit = true;
+        gs->roll[i].obj = nullptr;
+    }
+
+    gs->flip[0] = {FLIP_PX_L, FLIP_PY, FLIP_REST_L, FLIP_REST_L, FLIP_REST_L, FLIP_ACT_L, false, 99.0f};
+    gs->flip[1] = {FLIP_PX_R, FLIP_PY, FLIP_REST_R, FLIP_REST_R, FLIP_REST_R, FLIP_ACT_R, false, 99.0f};
+
+    for (int i = 0; i < MAX_SIM_BALLS; i++) {
+        gs->balls[i].active = false;
+        gs->balls[i].in_plunger = false;
+        gs->balls[i].dx = gs->balls[i].dy = -9999;
+    }
+}
+
+// --- Decor sous le verre : ce que la bille survole ---------------------------
+// [AI-CONTEXT] Sur une vraie table, la bille roule PAR-DESSUS la serigraphie.
+// Tout ce qui est dessine ici est donc volontairement non collisionnable et
+// tres peu opaque : c'est de la peinture, pas de la geometrie.
+static void build_art(lv_obj_t* field) {
+    // Sol : degrade vertical du bleu nuit vers le noir. Le haut plus clair
+    // « eclaire » l'arche, le bas sombre fait ressortir le tablier chrome.
+    set_grad(field, Pal::FELT_HI, Pal::FELT_LO);
+
+    // Orbites peintes sous l'arche.
+    mk_arc(field, ARCH_CX, ARCH_CY, ARCH_R - 44.0f, 182, 358, 3, Pal::CYAN, 42);
+    mk_arc(field, ARCH_CX, ARCH_CY, ARCH_R - 62.0f, 195, 345, 2, Pal::CYAN, 26);
+
+    // Halo peint autour du groupe de bumpers : deux disques tres transparents
+    // suffisent a creuser le centre de la table.
+    lv_obj_t* halo = mk_rect(field);
+    lv_obj_set_size(halo, 420, 300);
+    lv_obj_set_pos(halo, 120, 400);
+    lv_obj_set_style_radius(halo, 150, LV_PART_MAIN);
+    set_bg(halo, Pal::CYAN, 16);
+
+    // Liseres de fuite au bas du plateau : ils donnent la pente.
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t* r = mk_rect(field);
+        lv_obj_set_size(r, 520 - i * 90, 2);
+        lv_obj_set_pos(r, 100 + i * 45, 1000 + i * 22);
+        set_bg(r, Pal::RAIL_HI, (lv_opa_t) (26 - i * 7));
+    }
+
+    // Couloir du plunger : fond legerement plus clair + fleches de tir.
+    lv_obj_t* lane = mk_rect(field);
+    lv_obj_set_size(lane, (int) (LANE_RX - LANE_X), (int) (LANE_BOT - 380.0f));
+    lv_obj_set_pos(lane, (int) LANE_X, 380);
+    set_grad(lane, Pal::FELT_HI, Pal::VOID);
+    lv_obj_set_style_bg_opa(lane, 210, LV_PART_MAIN);
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t* a = mk_rect(field);
+        lv_obj_set_size(a, 26, 3);
+        lv_obj_set_pos(a, (int) LANE_MID - 13, 930 - i * 34);
+        lv_obj_set_style_radius(a, 2, LV_PART_MAIN);
+        set_bg(a, Pal::CYAN, (lv_opa_t) (110 - i * 22));
+    }
+
+    // Inserts lumineux : FRENZY / MULTI / SKILL. Eteints par defaut, allumes
+    // par hud_sync() quand le mode correspondant tourne.
+    static const char* INS[3] = {"FRENZY", "MULTI", "SKILL"};
+    static const uint32_t INSC[3] = {Pal::CYAN, Pal::MAGENTA, Pal::AMBER};
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t* o = mk_rect(field);
+        lv_obj_set_size(o, 104, 34);
+        lv_obj_set_pos(o, 151 + i * 126, 652);
+        lv_obj_set_style_radius(o, 8, LV_PART_MAIN);
+        set_bg(o, Pal::INSERT_OFF, LV_OPA_COVER);
+        set_border(o, INSC[i], 2, 90);
+        gs->insert[i] = o;
+        lv_obj_t* l = mk_label(o, gs->ui.f_small, INSC[i]);
+        lv_obj_set_style_text_opa(l, 130, LV_PART_MAIN);
+        lv_obj_set_width(l, 104);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_align(l, LV_ALIGN_CENTER, 0, 0);
+        lv_label_set_text(l, INS[i]);
+        gs->insert_l[i] = l;
+    }
+}
+
+// --- Rails, arche et guides -------------------------------------------------
+static void build_rails(lv_obj_t* field) {
+    // Arche : deux passes, corps d'acier puis liseré neon interieur.
+    mk_arc(field, ARCH_CX, ARCH_CY, ARCH_R, 180, 360, 15, Pal::RAIL, LV_OPA_COVER);
+    mk_arc(field, ARCH_CX, ARCH_CY, ARCH_R - 9.0f, 181, 359, 4, Pal::RAIL_HI, 170);
+
+    // Tous les segments de collision sont doubles par un rail visible, sauf le
+    // clapet anti-retour (invisible sur une vraie machine aussi) : on le marque
+    // par un simple trait fin pour que le joueur comprenne le sens unique.
+    for (int i = 0; i < N_WALLS; i++) {
+        const Seg& s = WALLS[i];
+        const float xy[4] = {s.x1, s.y1, s.x2, s.y2};
+        if (s.one_way) {
+            mk_poly(field, xy, 2, 4, Pal::RAIL, 130);
+            continue;
+        }
+        mk_rail(field, xy, 2);
+    }
+}
+
+// --- Pieces marquantes : bumpers, cibles, slingshots, rollovers -------------
+static void build_pieces(lv_obj_t* field) {
+    // Rollovers : anneau fin, rempli quand la lane est allumee.
+    for (int i = 0; i < N_ROLLOVERS; i++) {
+        lv_obj_t* o = mk_rect(field);
+        const int d = (int) (gs->roll[i].r * 2.0f);
+        lv_obj_set_size(o, d, d);
+        lv_obj_set_pos(o, (int) (gs->roll[i].cx - gs->roll[i].r), (int) (gs->roll[i].cy - gs->roll[i].r));
+        lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        set_bg(o, Pal::CYAN, 40);
+        set_border(o, Pal::CYAN, 3, LV_OPA_COVER);
+        gs->roll[i].obj = o;
+    }
+
+    // Cibles drop : une lampe encastree (toujours visible) + la barre qui tombe.
+    for (int i = 0; i < N_TARGETS; i++) {
+        Target& t = gs->targ[i];
+        lv_obj_t* lamp = mk_rect(field);
+        lv_obj_set_size(lamp, (int) (t.half * 2.0f) + 8, 10);
+        lv_obj_set_pos(lamp, (int) (t.cx - t.half) - 4, (int) t.cy + 9);
+        lv_obj_set_style_radius(lamp, 5, LV_PART_MAIN);
+        set_bg(lamp, Pal::AMBER_DIM, LV_OPA_COVER);
+        t.lamp = lamp;
+
+        lv_obj_t* o = mk_rect(field);
+        lv_obj_set_size(o, (int) (t.half * 2.0f), 22);
+        lv_obj_set_pos(o, (int) (t.cx - t.half), (int) t.cy - 11);
+        lv_obj_set_style_radius(o, 7, LV_PART_MAIN);
+        set_grad(o, Pal::AMBER, Pal::AMBER_DIM);
+        set_border(o, Pal::WHITE, 1, 120);
+        t.obj = o;
+    }
+
+    // Slingshots : triangle ferme (base + arete neon) + un flash superpose.
+    for (int i = 0; i < N_SLINGS; i++) {
+        Sling& s = gs->sling[i];
+        // 3e sommet : recule derriere la face, du cote oppose a la normale.
+        const float bx = (s.x1 + s.x2) * 0.5f - s.nx * 40.0f;
+        const float by = (s.y1 + s.y2) * 0.5f - s.ny * 40.0f;
+        const float tri[8] = {s.x1, s.y1, bx, by, s.x2, s.y2, s.x1, s.y1};
+        mk_poly(field, tri, 4, 13, Pal::RAIL, LV_OPA_COVER);
+        const float face[4] = {s.x1, s.y1, s.x2, s.y2};
+        mk_poly(field, face, 2, 7, Pal::MAGENTA_DIM, LV_OPA_COVER);
+        s.flash = mk_poly(field, face, 2, 9, Pal::MAGENTA, LV_OPA_COVER);
+        show(s.flash, false);
+    }
+
+    // Bumpers : socle sombre, corps en degrade, capuchon neon, anneau de flash.
+    for (int i = 0; i < N_BUMPERS; i++) {
+        Bumper& b = gs->bump[i];
+        const int r = (int) b.r;
+
+        lv_obj_t* base = mk_rect(field);
+        lv_obj_set_size(base, (r + 9) * 2, (r + 9) * 2);
+        lv_obj_set_pos(base, (int) b.cx - r - 9, (int) b.cy - r - 9);
+        lv_obj_set_style_radius(base, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        set_bg(base, Pal::INSERT_OFF, LV_OPA_COVER);
+        set_border(base, b.color, 2, 110);
+
+        lv_obj_t* body = mk_rect(field);
+        lv_obj_set_size(body, r * 2, r * 2);
+        lv_obj_set_pos(body, (int) b.cx - r, (int) b.cy - r);
+        lv_obj_set_style_radius(body, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        set_grad(body, Pal::RAIL, Pal::VOID);
+        set_border(body, b.color, 3, LV_OPA_COVER);
+
+        lv_obj_t* cap = mk_rect(field);
+        lv_obj_set_size(cap, r, r);
+        lv_obj_set_pos(cap, (int) b.cx - r / 2, (int) b.cy - r / 2);
+        lv_obj_set_style_radius(cap, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        set_bg(cap, b.color, 70);
+
+        lv_obj_t* fl = mk_rect(field);
+        lv_obj_set_size(fl, (r + 18) * 2, (r + 18) * 2);
+        lv_obj_set_pos(fl, (int) b.cx - r - 18, (int) b.cy - r - 18);
+        lv_obj_set_style_radius(fl, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        set_bg(fl, b.color, 0);
+        set_border(fl, b.color, 4, LV_OPA_COVER);
+        show(fl, false);
+        b.flash = fl;
+    }
+
+    // Plunger : la tige se comprime quand on charge (voir render_dynamic()).
+    gs->plunger_rod = mk_rect(field);
+    lv_obj_set_size(gs->plunger_rod, 18, 60);
+    lv_obj_set_pos(gs->plunger_rod, (int) LANE_MID - 9, 1091);
+    lv_obj_set_style_radius(gs->plunger_rod, 9, LV_PART_MAIN);
+    set_grad(gs->plunger_rod, Pal::CHROME, Pal::RAIL);
+}
+
+// --- Billes, flippers, tablier, toast (ordre d'empilement important) --------
+static void build_actors(lv_obj_t* field) {
+    // Billes : ombre portee, corps en degrade (le volume vient de la), reflet.
+    for (int i = 0; i < MAX_SIM_BALLS; i++) {
+        Ball& b = gs->balls[i];
+        b.shadow = mk_rect(field);
+        lv_obj_set_size(b.shadow, (int) (BALL_R * 2.0f) + 4, (int) (BALL_R * 2.0f) + 4);
+        lv_obj_set_style_radius(b.shadow, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        set_bg(b.shadow, Pal::BALL_SH, 150);
+
+        b.body = mk_rect(field);
+        lv_obj_set_size(b.body, (int) (BALL_R * 2.0f), (int) (BALL_R * 2.0f));
+        lv_obj_set_style_radius(b.body, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        set_grad(b.body, Pal::BALL_HI, Pal::RAIL);
+
+        b.gloss = mk_rect(field);
+        lv_obj_set_size(b.gloss, 9, 9);
+        lv_obj_set_style_radius(b.gloss, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        set_bg(b.gloss, Pal::BALL_HI, 235);
+
+        show(b.shadow, false); show(b.body, false); show(b.gloss, false);
+    }
+
+    // Flippers : dessines APRES les billes (la bille roule sous le battoir) et
+    // AVANT le tablier. Chaque flipper vit dans une boite serree pour que le
+    // balayage n'invalide que ~140x130 px.
+    for (int s = 0; s < 2; s++) {
+        for (int layer = 0; layer < 2; layer++) {
+            lv_obj_t* o = lv_line_create(field);
+            lv_obj_remove_style_all(o);
+            lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_style_line_rounded(o, true, LV_PART_MAIN);
+            if (layer == 0) {
+                lv_obj_set_style_line_width(o, 24, LV_PART_MAIN);
+                lv_obj_set_style_line_color(o, lv_color_hex(Pal::FLIP_BASE), LV_PART_MAIN);
+                lv_obj_set_style_line_opa(o, LV_OPA_COVER, LV_PART_MAIN);
+                gs->flip_base[s] = o;
+            } else {
+                lv_obj_set_style_line_width(o, 10, LV_PART_MAIN);
+                lv_obj_set_style_line_color(o, lv_color_hex(Pal::FLIP_EDGE), LV_PART_MAIN);
+                lv_obj_set_style_line_opa(o, LV_OPA_COVER, LV_PART_MAIN);
+                gs->flip_edge[s] = o;
+            }
+            lv_line_set_points(o, gs->flip_pts[s], 2);
+            lv_obj_set_pos(o, FLIP_BOX_X[s], FLIP_BOX_Y);
+            lv_obj_set_size(o, FLIP_BOX_W, FLIP_BOX_H);
+        }
+        // Premier trace : sans lui le battoir resterait un point tant qu'aucune
+        // partie n'a tourne (gs->flip_pts sort a zero du bloc neuf, a chaque
+        // ouverture). gs->flip[s] est deja au repos : build_table_data() d'abord.
+        flipper_points(s, true);
+
+        // Axe chrome du flipper (statique).
+        lv_obj_t* pin = mk_rect(field);
+        lv_obj_set_size(pin, 20, 20);
+        lv_obj_set_pos(pin, (int) gs->flip[s].px - 10, (int) FLIP_PY - 10);
+        lv_obj_set_style_radius(pin, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        set_bg(pin, Pal::CHROME, LV_OPA_COVER);
+    }
+
+    // Tablier chrome : cree APRES les billes pour masquer le drain, exactement
+    // comme la tole d'une vraie machine avale la bille perdue.
+    lv_obj_t* apron = mk_rect(field);
+    lv_obj_set_size(apron, FW, FH - APRON_Y);
+    lv_obj_set_pos(apron, 0, APRON_Y);
+    set_grad(apron, Pal::APRON, Pal::VOID);
+    lv_obj_t* edge = mk_rect(field);
+    lv_obj_set_size(edge, FW, 3);
+    lv_obj_set_pos(edge, 0, APRON_Y);
+    set_bg(edge, Pal::CHROME, 200);
+    lv_obj_t* name = mk_label(apron, gs->ui.f_small, Pal::TEXT_DIM);
+    lv_obj_align(name, LV_ALIGN_CENTER, 0, 4);
+    lv_label_set_text(name, "N E O N   A P R O N");
+
+    // Consigne de tir, affichee seulement quand une bille attend au plunger.
+    gs->plunger_hint = mk_label(field, gs->ui.f_small, Pal::CYAN);
+    lv_obj_set_width(gs->plunger_hint, 300);
+    lv_obj_set_style_text_align(gs->plunger_hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_pos(gs->plunger_hint, 210, 1020);
+    lv_label_set_text(gs->plunger_hint, tr("Maintiens ici pour armer,\nrelâche pour tirer"));
+    show(gs->plunger_hint, false);
+
+    // Banniere de mode, au centre de l'arche (zone la plus lisible du plateau).
+    gs->toast = mk_label(field, gs->ui.f_big, Pal::MODE);
+    lv_obj_set_width(gs->toast, FW);
+    lv_obj_set_style_text_align(gs->toast, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_pos(gs->toast, 0, 300);
+    show(gs->toast, false);
+}
+
+// --- Zones tactiles ---------------------------------------------------------
+// [AI-CONTEXT] Filles du TERRAIN (pas de la racine) : le calque des menus est
+// un frere declare apres le terrain dans le YAML, il reste donc au-dessus et
+// les zones ne volent jamais un appui de menu.
+static void build_zones(lv_obj_t* field) {
+    struct { lv_obj_t** dst; int x, y, w, h; intptr_t tag; } Z[3] = {
+        {&gs->zone_l,   0, 200, 290, 940, 0},
+        {&gs->zone_r, 430, 200, 290, 940, 1},
+        {&gs->zone_p, 290, 940, 140, 200, 2},
+    };
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t* o = lv_obj_create(field);
+        lv_obj_remove_style_all(o);
+        lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_pos(o, Z[i].x, Z[i].y);
+        lv_obj_set_size(o, Z[i].w, Z[i].h);
+        lv_obj_add_event_cb(o, zone_event_cb, LV_EVENT_PRESSED,     (void*) Z[i].tag);
+        lv_obj_add_event_cb(o, zone_event_cb, LV_EVENT_RELEASED,    (void*) Z[i].tag);
+        lv_obj_add_event_cb(o, zone_event_cb, LV_EVENT_PRESS_LOST,  (void*) Z[i].tag);
+        *Z[i].dst = o;
+    }
+    show(gs->zone_p, false);
+}
+
+// --- Fronton (DMD) ----------------------------------------------------------
+static void build_hud(lv_obj_t* hud) {
+    gs->hud_ball = mk_label(hud, gs->ui.f_led, Pal::TEXT_DIM);
+    lv_obj_align(gs->hud_ball, LV_ALIGN_TOP_LEFT, 24, 12);
+
+    for (int i = 0; i < BALLS_PER_GAME; i++) {
+        lv_obj_t* d = mk_rect(hud);
+        lv_obj_set_size(d, 20, 20);
+        lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_align(d, LV_ALIGN_TOP_LEFT, 24 + i * 28, 48);
+        set_bg(d, Pal::AMBER, LV_OPA_COVER);
+        gs->hud_dot[i] = d;
+    }
+
+    gs->hud_score = mk_label(hud, gs->ui.f_score, Pal::AMBER);
+    lv_obj_set_style_text_align(gs->hud_score, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_align(gs->hud_score, LV_ALIGN_TOP_RIGHT, -24, 4);
+
+    gs->hud_best = mk_label(hud, gs->ui.f_led, Pal::TEXT_DIM);
+    lv_obj_align(gs->hud_best, LV_ALIGN_TOP_LEFT, 24, 86);
+
+    gs->hud_badge = mk_label(hud, gs->ui.f_mid, Pal::MODE);
+    lv_obj_set_style_text_align(gs->hud_badge, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_align(gs->hud_badge, LV_ALIGN_TOP_RIGHT, -24, 84);
+
+    gs->hud_tilt = mk_label(hud, gs->ui.f_big, Pal::DANGER);
+    lv_obj_align(gs->hud_tilt, LV_ALIGN_TOP_MID, 0, 40);
+    lv_label_set_text(gs->hud_tilt, "T I L T");
+    show(gs->hud_tilt, false);
+
+    // Jauge de puissance du plunger : dans le fronton, jamais sur la table
+    // (aucune place dans le couloir sans recouvrir la bille).
+    gs->pwr_bg = mk_rect(hud);
+    lv_obj_set_size(gs->pwr_bg, 300, 12);
+    lv_obj_align(gs->pwr_bg, LV_ALIGN_BOTTOM_MID, 0, -12);
+    lv_obj_set_style_radius(gs->pwr_bg, 6, LV_PART_MAIN);
+    set_bg(gs->pwr_bg, Pal::INSERT_OFF, LV_OPA_COVER);
+    set_border(gs->pwr_bg, Pal::CYAN, 1, 120);
+    gs->pwr_fill = mk_rect(gs->pwr_bg);
+    lv_obj_set_size(gs->pwr_fill, 0, 8);
+    lv_obj_align(gs->pwr_fill, LV_ALIGN_LEFT_MID, 2, 0);
+    lv_obj_set_style_radius(gs->pwr_fill, 4, LV_PART_MAIN);
+    set_bg(gs->pwr_fill, Pal::CYAN, LV_OPA_COVER);
+    show(gs->pwr_bg, false);
+
+    // Filet neon en pied de fronton : separe le DMD de la table.
+    lv_obj_t* rule = mk_rect(hud);
+    lv_obj_set_size(rule, SCR_W, 3);
+    lv_obj_align(rule, LV_ALIGN_BOTTOM_MID, 0, 0);
+    set_bg(rule, Pal::CYAN, 200);
+
+    // Pose sur le conteneur YAML lui-meme, a chaque ouverture : close() le
+    // retire, sinon il s'empilerait d'une ouverture a l'autre.
+    lv_obj_add_flag(hud, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(hud, hud_event_cb, LV_EVENT_CLICKED, nullptr);
+}
+
+// --- Calque des menus -------------------------------------------------------
+static void build_panel(lv_obj_t* panel) {
+    gs->p_title = mk_label(panel, gs->ui.f_big, Pal::AMBER);
+    lv_obj_set_width(gs->p_title, SCR_W);
+    lv_obj_set_style_text_align(gs->p_title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(gs->p_title, LV_ALIGN_TOP_MID, 0, 96);
+
+    gs->p_sub = mk_label(panel, gs->ui.f_small, Pal::TEXT_DIM);
+    lv_obj_set_width(gs->p_sub, SCR_W - 80);
+    lv_obj_set_style_text_align(gs->p_sub, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(gs->p_sub, LV_ALIGN_TOP_MID, 0, 156);
+
+    gs->p_body = mk_label(panel, gs->ui.f_led, Pal::WHITE);
+    lv_obj_set_width(gs->p_body, SCR_W - 80);
+    lv_obj_set_style_text_align(gs->p_body, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(gs->p_body, LV_ALIGN_TOP_MID, 0, 210);
+
+    gs->p_foot = mk_label(panel, gs->ui.f_small, Pal::TEXT_DIM);
+    lv_obj_set_width(gs->p_foot, SCR_W - 60);
+    lv_obj_set_style_text_align(gs->p_foot, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(gs->p_foot, LV_ALIGN_BOTTOM_MID, 0, -28);
+
+    // Pictogramme d'orientation : paysage barre -> portrait allume.
+    gs->rot_land = mk_rect(panel);
+    lv_obj_set_size(gs->rot_land, 104, 66);
+    lv_obj_align(gs->rot_land, LV_ALIGN_TOP_MID, -104, 214);
+    lv_obj_set_style_radius(gs->rot_land, 8, LV_PART_MAIN);
+    set_bg(gs->rot_land, Pal::VOID, LV_OPA_COVER);
+    set_border(gs->rot_land, Pal::TEXT_DIM, 3, 150);
+
+    gs->rot_arrow = mk_label(panel, gs->ui.f_big, Pal::CYAN);
+    lv_obj_align(gs->rot_arrow, LV_ALIGN_TOP_MID, 0, 222);
+    lv_label_set_text(gs->rot_arrow, ">");
+
+    gs->rot_port = mk_rect(panel);
+    lv_obj_set_size(gs->rot_port, 66, 104);
+    lv_obj_align(gs->rot_port, LV_ALIGN_TOP_MID, 100, 196);
+    lv_obj_set_style_radius(gs->rot_port, 8, LV_PART_MAIN);
+    set_bg(gs->rot_port, Pal::VOID, LV_OPA_COVER);
+    set_border(gs->rot_port, Pal::CYAN, 3, LV_OPA_COVER);
+
+    // Entrees de menu : liste verticale 620x84 a y = 400 + 96 i (gs->slots.row).
+    gs->slots.geom = {.w = 620, .h = 84, .top = 400, .pitch = 96, .tx = 26, .t_dy = -15, .d_dy = 18,
+                      .border_opa = 120, .off = Pal::TEXT_DIM};
+    gs->slots.build(panel, slot_event_cb, gs->ui.f_mid, Pal::WHITE, gs->ui.f_small, Pal::TEXT_DIM,
+                    [](lv_obj_t* s, int) {
+        lv_obj_set_style_radius(s, 14, LV_PART_MAIN);
+        set_bg(s, Pal::FELT_HI, LV_OPA_COVER);
+        // Retour tactile : le fond s'eclaircit tant que le doigt est pose.
+        set_pressed_bg(s, Pal::RAIL);
+    });
+}
+
+// Appelee a CHAQUE ouverture, sur des conteneurs vides (close() detruit tout ce
+// qui est cree ici) et un bloc Mem neuf : build_table_data() repose donc a chaque
+// fois la geometrie ET l'etat initial des pieces (flippers au repos, cibles
+// levees, lanes allumees), avant que build_actors() ne trace les flippers.
+static void build_ui() {
+    gs->pts_n = 0;
+    build_table_data();
+    build_art(gs->ui.field);
+    build_rails(gs->ui.field);
+    build_pieces(gs->ui.field);
+    build_actors(gs->ui.field);
+    build_zones(gs->ui.field);
+    build_hud(gs->ui.hud);
+    build_panel(gs->ui.panel);
+}
+
+// ===========================================================================
+// 14. Calque des menus (entrees : gs->slots, game_common.h)
+// ===========================================================================
+
+static void panel_on(bool v) { show_front(gs->ui.panel, v); }
+
+// Titre / sous-titre / corps / pied du panneau de menus (nullptr = inchange).
+static void panel_text(const char* t, const char* s, const char* b, const char* f) {
+    set_text_if(gs->p_title, t);
+    set_text_if(gs->p_sub, s);
+    set_text_if(gs->p_body, b);
+    set_text_if(gs->p_foot, f);
+}
+
+// Le pictogramme d'orientation occupe la bande y = 196..316 du panneau. Les
+// ecrans qui l'affichent doivent donc pousser leur corps de texte SOUS lui —
+// d'ou le parametre `body_y`, unique endroit ou cette contrainte est exprimee.
+static void rot_hint(bool v, int body_y) {
+    show(gs->rot_land, v);
+    show(gs->rot_port, v);
+    show(gs->rot_arrow, v);
+    lv_obj_align(gs->p_body, LV_ALIGN_TOP_MID, 0, body_y);
+}
+
+// ===========================================================================
+// 15. Ecrans
+// ===========================================================================
+
+// Noms des 5 crans de sensibilite du nudge (index = gs->save.nudge_sens, borne par
+// persist_load). tr_ctx et pas tr_noop + tr(table[i]) : « Douce » (sonnerie du
+// reveil) et « Vive » (vitesse de Coureur d'Or) ont deja un autre sens a l'ecran,
+// et tr_noop ne porte pas de contexte. Appele seulement a l'affichage des reglages.
+static const char* nudge_name(uint8_t i) {
+    const char* const noms[5] = {
+        tr_ctx("nudge", "Très douce"), tr_ctx("nudge", "Douce"), tr_ctx("nudge", "Normale"),
+        tr_ctx("nudge", "Vive"), tr_ctx("nudge", "Très vive"),
+    };
+    return noms[i];
+}
+
+static void go_hub() {
+    g_state = ST_HUB;
+    panel_on(true);
+    rot_hint(true, 336);   // sous le pictogramme d'orientation
+
+    auto& sub = gs->hub_sub;
+    snprintf(sub, sizeof(sub), tr("%lu partie(s) - %lu multiball(s) - %lu tilt(s)"),
+             (unsigned long) gs->save.games, (unsigned long) gs->save.multiballs,
+             (unsigned long) gs->save.tilts);
+
+    auto& best = gs->hub_best;
+    if (best_score() > 0) {
+        char sc[24]; fmt_score(sc, sizeof(sc), best_score());
+        snprintf(best, sizeof(best), tr("Record : %s"), sc);
+    } else {
+        snprintf(best, sizeof(best), "%s", tr("Aucun score enregistré"));
+    }
+
+    // Pied en UN litteral sur une ligne : tools/i18n_keys.py ne releve que les appels
+    // tr() d'une ligne (un littéral coupé en deux lignes n'y serait vu qu'à moitié).
+    panel_text("NEON APRON", sub, tr("Tournez la tablette à la verticale"),
+        tr("Zone gauche / zone droite = flippers (maintien). Bas du centre = lanceur.\nSecouez la tablette pour pousser la bille — trois abus de suite et c'est TILT."));
+    gs->slots.row(0, tr("Jouer"), tr("3 billes - lanceur en bas de l'écran"), Pal::AMBER);
+    gs->slots.row(1, tr("Classement"), best, Pal::CYAN);
+    gs->slots.row(2, tr("Réglages"), tr("Nudge, sens de l'écran, calibration"), Pal::MAGENTA);
+    gs->slots.row(3, tr("Quitter"), tr("Retour au tableau de bord (paysage)"), Pal::TEXT_DIM);
+    gs->slots.hide_from(4);
+    tick_period_sync();
+}
+
+static void go_scores() {
+    g_state = ST_SCORES;
+    panel_on(true);
+    rot_hint(false, 226);  // 10 lignes de classement : il faut toute la hauteur
+
+    auto& body = gs->scores_body;
+    size_t o = 0;
+    body[0] = '\0';
+    bool any = false;
+    for (int i = 0; i < PINBALL_NSCORES; i++) {
+        if (gs->save.top[i].score == 0) continue;
+        any = true;
+        char sc[24]; fmt_score(sc, sizeof(sc), gs->save.top[i].score);
+        int w = snprintf(body + o, sizeof(body) - o, "%2d.  %11s   %ub%s%s\n",
+                         i + 1, sc, (unsigned) gs->save.top[i].ball_reached,
+                         gs->save.top[i].multiballs ? "  MB" : "",
+                         gs->save.top[i].tilted ? "  tilt" : "");
+        if (w <= 0 || (size_t) w >= sizeof(body) - o) break;
+        o += (size_t) w;
+    }
+    if (!any) snprintf(body, sizeof(body), "%s", tr("Aucun score pour l'instant.\nLance une partie !"));
+
+    auto& sub = gs->scores_sub;
+    snprintf(sub, sizeof(sub), tr("Cumul carrière : %lu points"),
+             (unsigned long) gs->save.total_score);
+
+    panel_text(tr("CLASSEMENT"), sub, body, tr("b = billes jouées, MB = multiball déclenché."));
+    gs->slots.row(0, tr("Retour"), "", Pal::TEXT_DIM);
+    gs->slots.hide_from(1);
+    // Le classement est long : on remonte les slots sous le texte.
+    lv_obj_align(gs->slots.box[0], LV_ALIGN_BOTTOM_MID, 0, -110);
+    tick_period_sync();
+}
+
+static void go_settings() {
+    g_state = ST_SETTINGS;
+    panel_on(true);
+    rot_hint(false, 300);
+
+    auto& t0 = gs->settings_t0;
+    auto& t1 = gs->settings_t1;
+    auto& t2 = gs->settings_t2;
+    snprintf(t0, sizeof(t0), tr("Sensibilité du nudge : %s"), nudge_name(gs->save.nudge_sens));
+    snprintf(t1, sizeof(t1), tr("Sens du nudge : %s"), tr(gs->save.invert_nudge ? "inverse" : "normal"));
+    snprintf(t2, sizeof(t2), tr("Orientation : %s"), tr(gs->save.flip_screen ? "retournée" : "normale"));
+
+    // Pied en UN litteral sur une ligne : tools/i18n_keys.py ne releve que les appels
+    // tr() d'une ligne, et le "" qui precede fausse le recollage de littéraux adjacents.
+    panel_text(tr("RÉGLAGES"), tr("Tout est enregistré et survit au redémarrage."), "",
+        tr("Calibre à plat AVANT de jouer : le nudge mesure l'écart avec cette référence,\npas l'inclinaison absolue. Poser la tablette, puis appuyer."));
+    gs->slots.row(0, t0, tr("Force de la secousse nécessaire"), Pal::CYAN);
+    gs->slots.row(1, t1, tr("Si la bille part du mauvais côté"), Pal::CYAN);
+    gs->slots.row(2, t2, tr("Si l'écran est à l'envers dans vos mains"), Pal::MAGENTA);
+    gs->slots.row(3, tr("Calibrer à plat"), tr("Poser la tablette puis appuyer"), Pal::AMBER);
+    gs->slots.row(4, tr("Retour"), "", Pal::TEXT_DIM);
+    gs->slots.hide_from(5);
+    tick_period_sync();
+}
+
+static void go_pause() {
+    g_state = ST_PAUSED;
+    panel_on(true);
+    rot_hint(false, 300);
+
+    auto& sub = gs->pause_sub;
+    char sc[24]; fmt_score(sc, sizeof(sc), gs->score);
+    snprintf(sub, sizeof(sub), tr("Score %s - bille %d / %d"), sc, gs->ball_num, gs->balls_total);
+
+    panel_text(tr("PAUSE"), sub, "", tr("La partie reprend exactement où elle s'est arrêtée."));
+    gs->slots.row(0, tr("Reprendre"), "", Pal::AMBER);
+    gs->slots.row(1, tr("Recalibrer à plat"), tr("Poser la tablette puis appuyer"), Pal::CYAN);
+    gs->slots.row(2, tr("Abandonner"), tr("La partie est enregistrée telle quelle"), Pal::MAGENTA);
+    gs->slots.row(3, tr("Quitter le flipper"), tr("Retour au tableau de bord"), Pal::TEXT_DIM);
+    gs->slots.hide_from(4);
+    tick_period_sync();
+}
+
+// Cloture la partie : classement, statistiques carriere, ecriture NVS.
+static void end_game() {
+    gs->save.games++;
+    gs->save.total_score += gs->score;
+    if (gs->ball_score > gs->save.best_ball) gs->save.best_ball = gs->ball_score;
+    const int rank = scores_insert(gs->score, gs->ball_num, gs->game_multiballs, gs->game_tilted);
+    persist_save();
+
+    g_state = ST_GAMEOVER;
+    panel_on(true);
+    rot_hint(false, 300);
+    for (int i = 0; i < MAX_SIM_BALLS; i++) {
+        gs->balls[i].active = false;
+        show(gs->balls[i].shadow, false);
+        show(gs->balls[i].body, false);
+        show(gs->balls[i].gloss, false);
+    }
+    show(gs->zone_p, false);
+    show(gs->plunger_hint, false);
+    show(gs->toast, false);
+    sfx_gameover();
+
+    auto& sub = gs->end_sub;
+    char sc[24]; fmt_score(sc, sizeof(sc), gs->score);
+    snprintf(sub, sizeof(sub), tr("Score final : %s"), sc);
+
+    auto& body = gs->end_body;
+    if (rank == 0)      snprintf(body, sizeof(body), "%s", tr("NOUVEAU RECORD !"));
+    else if (rank > 0)  snprintf(body, sizeof(body), tr("%de au classement"), rank + 1);
+    else                snprintf(body, sizeof(body), tr("Hors du top %d"), PINBALL_NSCORES);
+
+    panel_text(tr("FIN DE PARTIE"), sub, body, gs->game_tilted ? tr("Partie marquée TILT.") : "");
+    gs->slots.row(0, tr("Rejouer"), tr("Nouvelle partie, 3 billes"), Pal::AMBER);
+    gs->slots.row(1, tr("Classement"), "", Pal::CYAN);
+    gs->slots.row(2, "Hub", "", Pal::TEXT_DIM);
+    gs->slots.hide_from(3);
+    tick_period_sync();
+}
+
+// ===========================================================================
+// 16. Cycle de vie d'une partie
+// ===========================================================================
+
+// Pose la bille au repos dans le couloir du plunger et arme le tir.
+static void serve_ball() {
+    for (int i = 0; i < MAX_SIM_BALLS; i++) {
+        gs->balls[i].active = false;
+        gs->balls[i].in_plunger = false;
+    }
+    Ball& b = gs->balls[0];
+    b.x = LANE_MID; b.y = BALL_REST_Y; b.vx = 0.0f; b.vy = 0.0f;
+    b.active = true; b.in_plunger = true;
+    // Le cache de rendu porte la position de la bille PRECEDENTE : sans cette
+    // invalidation, une bille servie au meme pixel entier ne serait jamais
+    // reaffichee (render_balls() saute les positions inchangees).
+    b.dx = b.dy = -9999;
+    gs->active_balls = 1;
+    gs->multiplier = 1;
+    gs->mb_active = false;
+    gs->ball_score = 0;
+    gs->plunger_charge = 0.0f;
+    gs->plunger_held = false;
+    gs->autolaunch_at = lv_tick_get() + AUTOLAUNCH_MS;
+    gs->serve_at = 0;
+    gs->tilted = false;
+    gs->tilt_hits = 0;
+    // Skill shot : une lane est tiree au sort, elle seule paie le gros lot.
+    gs->skill_lane = (int) (rnd() % (uint32_t) N_ROLLOVERS);
+    gs->skill_until = 0;
+    for (int i = 0; i < N_ROLLOVERS; i++) gs->roll[i].lit = (i == gs->skill_lane);
+    show(gs->zone_p, true);
+    show(gs->plunger_hint, true);
+}
+
+static void new_game() {
+    gs->score = 0;
+    gs->ball_num = 1;
+    gs->balls_total = BALLS_PER_GAME;
+    gs->game_multiballs = 0;
+    gs->game_tilted = false;
+    gs->bonus1 = gs->bonus2 = false;
+    gs->banks_done = 0;
+    gs->frenzy_until = 0;
+    for (int i = 0; i < N_TARGETS; i++) {
+        gs->targ[i].down = false;
+        show(gs->targ[i].obj, true);
+    }
+    gs->c_score = 0xFFFFFFFFu; gs->c_ball = -1; gs->c_dots = -1; gs->c_badge[0] = '\0';
+    serve_ball();
+    g_state = ST_PLAYING;
+    panel_on(false);
+    tick_period_sync();
+}
+
+static void launch_ball(Ball& b, float power) {
+    b.in_plunger = false;
+    b.vy = -(PLUNGER_MIN + clampf(power, 0.0f, 1.0f) * (PLUNGER_MAX - PLUNGER_MIN));
+    b.vx = rndf() * 12.0f;
+    gs->plunger_charge = 0.0f;
+    gs->plunger_held = false;
+    gs->skill_until = lv_tick_get() + 6000;
+    show(gs->zone_p, false);
+    show(gs->plunger_hint, false);
+    sfx_launch();
+}
+
+// Une bille est tombee. S'il en reste en jeu on continue (multiball) ; sinon on
+// passe a la bille suivante, ou on termine la partie.
+static void ball_drained(Ball& b) {
+    b.active = false;
+    show(b.shadow, false); show(b.body, false); show(b.gloss, false);
+    gs->active_balls--;
+    if (gs->active_balls > 0) {
+        if (gs->active_balls == 1 && gs->mb_active) {
+            gs->mb_active = false;
+            gs->multiplier = 1;
+            toast(tr("MULTIBALL TERMINÉ"), 1400);
+        }
+        return;
+    }
+    sfx_drain();
+    gs->mb_active = false;
+    gs->multiplier = 1;
+    show(gs->zone_p, false);
+    if (gs->ball_num >= gs->balls_total) {
+        end_game();
+        return;
+    }
+    gs->ball_num++;
+    gs->serve_at = lv_tick_get() + 900;   // court temps mort avant la relance
+    toast(tr("BILLE PERDUE"), 800);
+}
+
+// ===========================================================================
+// 17. Nudge et TILT
+// ===========================================================================
+
+// [AI-CONTEXT] Mapping des axes en portrait — la demonstration complete est en
+// tete de fichier. Ici on n'ecrit QUE la conclusion, une seule fois.
+static inline void nudge_axes(float& sx, float& sy) {
+    sx = g_raw_x - gs->save.cal_x / 1000.0f;
+    sy = g_raw_y - gs->save.cal_y / 1000.0f;
+    if (gs->save.flip_screen) { sx = -sx; sy = -sy; }
+}
+
+static void nudge_update(uint32_t now) {
+    float sx, sy;
+    nudge_axes(sx, sy);
+
+    // Passe-haut : une inclinaison entretenue (le joueur tient la tablette de
+    // travers) glisse dans la composante lente et ne declenche rien. Seule une
+    // secousse breve — le vrai coup de hanche — produit du jerk.
+    g_slow_x += (sx - g_slow_x) * NUDGE_HP;
+    g_slow_y += (sy - g_slow_y) * NUDGE_HP;
+    const float jx = sx - g_slow_x, jy = sy - g_slow_y;
+
+    // Compteur de TILT : un cran s'efface toutes les TILT_DECAY_MS.
+    if (gs->tilt_hits > 0 && now >= gs->tilt_decay_at) {
+        gs->tilt_hits--;
+        gs->tilt_decay_at = now + TILT_DECAY_MS;
+    }
+    if (gs->tilted && now >= gs->tilt_until) gs->tilted = false;
+
+    if (now < gs->nudge_ok_at) return;
+    const float thr = 0.42f - 0.06f * (float) gs->save.nudge_sens;   // 0.42 .. 0.18 g
+    const float mag = sqrtf(jx * jx + jy * jy);
+    if (mag < thr) return;
+
+    gs->nudge_ok_at = now + NUDGE_COOLDOWN_MS;
+
+    // La table bouge, la bille garde son inertie : vue de la table, elle part
+    // dans le sens OPPOSE a la secousse. `invert_nudge` existe parce que le
+    // signe depend de la facon dont le joueur tient la tablette.
+    const float s = gs->save.invert_nudge ? 1.0f : -1.0f;
+    const float gain = NUDGE_GAIN * s;
+    for (int i = 0; i < MAX_SIM_BALLS; i++) {
+        Ball& b = gs->balls[i];
+        if (!b.active || b.in_plunger) continue;
+        b.vx += jx * gain;
+        b.vy += jy * gain * 0.55f;   // moins d'effet vertical : plus lisible
+    }
+
+    if (gs->tilt_hits == 0) gs->tilt_decay_at = now + TILT_DECAY_MS;
+    gs->tilt_hits++;
+    if (gs->tilt_hits >= TILT_HITS && !gs->tilted) {
+        gs->tilted = true;
+        gs->game_tilted = true;
+        gs->tilt_until = now + TILT_PENALTY_MS;
+        gs->tilt_hits = 0;
+        gs->save.tilts++;
+        toast("TILT", 1600);
+        sfx_tilt();
+    }
+}
+
+// ===========================================================================
+// 18. Boucle physique
+// ===========================================================================
+
+static void step_flippers(float dt) {
+    for (int s = 0; s < 2; s++) {
+        Flipper& f = gs->flip[s];
+        f.target = (f.pressed && !gs->tilted) ? f.active : f.rest;
+        const float d = f.target - f.angle;
+        const float step = FLIP_SPEED * dt;
+        if (d > step)       f.angle += step;
+        else if (d < -step) f.angle -= step;
+        else                f.angle = f.target;
+    }
+}
+
+// Collision bille / flipper : segment mobile. L'impulsion vient de la vitesse
+// lineaire du bras au point de contact (omega x r), pas d'un simple rebond —
+// c'est ce qui fait la difference entre « la bille repart » et « la bille est
+// frappee ».
+static void collide_flipper(Ball& b, const Flipper& f, float dt) {
+    const float ex = f.px + cosf(f.angle) * FLIP_LEN;
+    const float ey = f.py + sinf(f.angle) * FLIP_LEN;
+
+    float cx, cy;
+    const float d = point_seg_dist(b.x, b.y, f.px, f.py, ex, ey, cx, cy);
+    const float rad = BALL_R + FLIP_THICK;
+    if (d >= rad || d < 0.0001f) return;
+
+    const float nx = (b.x - cx) / d, ny = (b.y - cy) / d;
+    b.x += nx * (rad - d);
+    b.y += ny * (rad - d);
+
+    // Vitesse angulaire effective sur ce pas, puis vitesse au point de contact.
+    float omega = 0.0f;
+    if (dt > 0.0001f) {
+        const float diff = f.target - f.angle;
+        const float step = FLIP_SPEED * dt;
+        omega = (fabsf(diff) > step ? (diff > 0 ? step : -step) : diff) / dt;
+    }
+    const float rx = cx - f.px, ry = cy - f.py;
+    const float fvx = -ry * omega, fvy = rx * omega;
+
+    const float rel = (b.vx - fvx) * nx + (b.vy - fvy) * ny;
+    if (rel < 0.0f) {
+        b.vx -= 1.45f * rel * nx;
+        b.vy -= 1.45f * rel * ny;
+    }
+    if (f.pressed && !gs->tilted) {
+        b.vx += fvx * FLIP_PUNCH;
+        b.vy += fvy * FLIP_PUNCH;
+    }
+}
+
+static void physics_step(float dt, uint32_t now) {
+    // Le bras avance a CHAQUE sous-pas, pas une fois par tick : sinon le battoir
+    // resterait fige pendant les 4 sous-pas alors que collide_flipper() annonce
+    // une vitesse angulaire non nulle, et une bille rapide pourrait etre frappee
+    // par un flipper qui n'a pas bouge.
+    step_flippers(dt);
+
+    for (int i = 0; i < MAX_SIM_BALLS; i++) {
+        Ball& b = gs->balls[i];
+        if (!b.active || b.in_plunger) continue;
+
+        b.vy += GRAVITY * dt;
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+        b.vx *= FRICTION;
+        b.vy *= FRICTION;
+
+        // --- Rails et guides ------------------------------------------------
+        for (int w = 0; w < N_WALLS; w++) {
+            const Seg& s = WALLS[w];
+            if (s.one_way && b.vy <= 0.0f) continue;   // clapet : ouvert en montee
+            collide_capsule(b, s.x1, s.y1, s.x2, s.y2, BALL_R + RAIL_HALF, s.rest);
+        }
+        collide_arch(b);
+
+        // --- Flippers -------------------------------------------------------
+        collide_flipper(b, gs->flip[0], dt);
+        collide_flipper(b, gs->flip[1], dt);
+
+        // --- Bumpers --------------------------------------------------------
+        for (int k = 0; k < N_BUMPERS; k++) {
+            Bumper& bm = gs->bump[k];
+            const float dx = b.x - bm.cx, dy = b.y - bm.cy;
+            const float dist = sqrtf(dx * dx + dy * dy);
+            const float mind = BALL_R + bm.r;
+            if (dist >= mind || dist < 0.0001f) continue;
+            const float nx = dx / dist, ny = dy / dist;
+            b.x = bm.cx + nx * mind;
+            b.y = bm.cy + ny * mind;
+            b.vx = nx * BUMPER_KICK;
+            b.vy = ny * BUMPER_KICK;
+            bm.flash_until = now + 130;
+            const bool frenzy = now < gs->frenzy_until;
+            add_score(frenzy ? SC_BUMPER * 3 : SC_BUMPER);
+            if (gs->mb_active) add_score(SC_JACKPOT / 10);
+            sfx_bumper();
+        }
+
+        // --- Slingshots -----------------------------------------------------
+        for (int k = 0; k < N_SLINGS; k++) {
+            Sling& sl = gs->sling[k];
+            float cx, cy;
+            const float d = point_seg_dist(b.x, b.y, sl.x1, sl.y1, sl.x2, sl.y2, cx, cy);
+            const float rad = BALL_R + 8.0f;
+            if (d >= rad || d < 0.0001f) continue;
+            b.x = cx + sl.nx * rad;
+            b.y = cy + sl.ny * rad;
+            b.vx = sl.nx * SLING_KICK + rndf() * 60.0f;
+            b.vy = sl.ny * SLING_KICK;
+            sl.flash_until = now + 120;
+            add_score(SC_SLING);
+            sfx_sling();
+        }
+
+        // --- Cibles drop ----------------------------------------------------
+        for (int k = 0; k < N_TARGETS; k++) {
+            Target& t = gs->targ[k];
+            if (t.down) continue;
+            float cx, cy;
+            const float d = point_seg_dist(b.x, b.y, t.cx - t.half, t.cy,
+                                           t.cx + t.half, t.cy, cx, cy);
+            const float rad = BALL_R + 11.0f;
+            if (d >= rad || d < 0.0001f) continue;
+            const float nx = (b.x - cx) / d, ny = (b.y - cy) / d;
+            b.x += nx * (rad - d);
+            b.y += ny * (rad - d);
+            b.vx += nx * TARGET_KICK;
+            b.vy += ny * TARGET_KICK;
+            t.down = true;
+            show(t.obj, false);
+            add_score(SC_TARGET);
+            sfx_target();
+            int left = 0;
+            for (int j = 0; j < N_TARGETS; j++) if (!gs->targ[j].down) left++;
+            if (left == 0) bank_complete();
+        }
+
+        // --- Rollovers (declencheurs, aucune collision) ----------------------
+        for (int k = 0; k < N_ROLLOVERS; k++) {
+            Rollover& r = gs->roll[k];
+            if (!r.lit) continue;
+            const float dx = b.x - r.cx, dy = b.y - r.cy;
+            if (dx * dx + dy * dy > (BALL_R + r.r) * (BALL_R + r.r)) continue;
+            r.lit = false;
+            if (k == gs->skill_lane && now < gs->skill_until) {
+                add_score(SC_SKILL);
+                toast("SKILL SHOT", 1600);
+                gs->skill_lane = -1;
+            } else {
+                add_score(SC_LANE);
+            }
+            // Les 3 lanes eteintes se rallument ensemble : la voie reste vivante.
+            int off = 0;
+            for (int j = 0; j < N_ROLLOVERS; j++) if (!gs->roll[j].lit) off++;
+            if (off == N_ROLLOVERS) {
+                for (int j = 0; j < N_ROLLOVERS; j++) gs->roll[j].lit = true;
+                add_score(SC_LANE * 4);
+            }
+        }
+
+        // --- Vitesse maximale ------------------------------------------------
+        const float sp2 = b.vx * b.vx + b.vy * b.vy;
+        if (sp2 > MAX_SPEED * MAX_SPEED) {
+            const float k = MAX_SPEED / sqrtf(sp2);
+            b.vx *= k; b.vy *= k;
+        }
+    }
+}
+
+// ===========================================================================
+// 19. Rendu
+// ===========================================================================
+
+// Recalcule les 2 points d'un flipper et redemande le trace. `force` sert a la
+// construction (les points d'un bloc neuf valent 0,0 : sans ce premier calcul le
+// battoir serait un point au coin de sa boite jusqu'au premier tick de partie).
+static void flipper_points(int s, bool force) {
+    Flipper& f = gs->flip[s];
+    // Seuil : sous ~0,6 degre le trait ne bougerait d'aucun pixel utile.
+    if (!force && fabsf(f.angle - f.draw_angle) < 0.01f) return;
+    f.draw_angle = f.angle;
+    const float ex = f.px + cosf(f.angle) * FLIP_LEN;
+    const float ey = f.py + sinf(f.angle) * FLIP_LEN;
+    gs->flip_pts[s][0].x = (lv_value_precise_t) ((int) f.px - FLIP_BOX_X[s]);
+    gs->flip_pts[s][0].y = (lv_value_precise_t) ((int) f.py - FLIP_BOX_Y);
+    gs->flip_pts[s][1].x = (lv_value_precise_t) ((int) ex - FLIP_BOX_X[s]);
+    gs->flip_pts[s][1].y = (lv_value_precise_t) ((int) ey - FLIP_BOX_Y);
+    // Les deux traits partagent le meme tableau : lv_line n'en garde que
+    // l'adresse, il faut donc redemander le trace sur chacun.
+    lv_line_set_points(gs->flip_base[s], gs->flip_pts[s], 2);
+    lv_line_set_points(gs->flip_edge[s], gs->flip_pts[s], 2);
+}
+
+static void render_flippers() {
+    flipper_points(0, false);
+    flipper_points(1, false);
+}
+
+static void render_balls() {
+    for (int i = 0; i < MAX_SIM_BALLS; i++) {
+        Ball& b = gs->balls[i];
+        if (!b.active) continue;
+        const int x = (int) b.x, y = (int) b.y;
+        if (x == b.dx && y == b.dy) continue;
+        b.dx = x; b.dy = y;
+        const int r = (int) BALL_R;
+        lv_obj_set_pos(b.shadow, x - r - 1, y - r + 3);
+        lv_obj_set_pos(b.body,   x - r,     y - r);
+        lv_obj_set_pos(b.gloss,  x - 7,     y - 8);
+        show(b.shadow, true); show(b.body, true); show(b.gloss, true);
+    }
+}
+
+// [AI-WARNING] Les lampes (rollovers, inserts) sont repeintes UNIQUEMENT quand
+// leur etat change. lv_obj_set_style_*() invalide l'objet a chaque appel, meme
+// si la valeur ecrite est identique : sans ces caches, ce sont 12 invalidations
+// gratuites par frame, soit 600 par seconde pour des pastilles immobiles.
+// Les caches (c_roll, c_ins) sont dans le bloc Mem : ils naissent a -1 a chaque
+// ouverture, donc les lampes des objets neufs sont repeintes au premier tick.
+
+static void render_effects(uint32_t now) {
+    for (int i = 0; i < N_BUMPERS; i++) {
+        show(gs->bump[i].flash, now < gs->bump[i].flash_until);
+    }
+    for (int i = 0; i < N_SLINGS; i++) {
+        show(gs->sling[i].flash, now < gs->sling[i].flash_until);
+    }
+    for (int i = 0; i < N_ROLLOVERS; i++) {
+        const int8_t lit = gs->roll[i].lit ? 1 : 0;
+        if (lit == gs->c_roll[i]) continue;
+        gs->c_roll[i] = lit;
+        lv_obj_set_style_bg_opa(gs->roll[i].obj, lit ? (lv_opa_t) 150 : (lv_opa_t) 20, LV_PART_MAIN);
+    }
+    if (gs->toast_until && now >= gs->toast_until) {
+        show(gs->toast, false);
+        gs->toast_until = 0;
+    }
+    // Inserts : FRENZY / MULTI / SKILL s'allument avec leur mode.
+    const bool on[3] = {now < gs->frenzy_until, gs->mb_active,
+                        gs->skill_lane >= 0 && now < gs->skill_until};
+    for (int i = 0; i < 3; i++) {
+        const int8_t v = on[i] ? 1 : 0;
+        if (v == gs->c_ins[i]) continue;
+        gs->c_ins[i] = v;
+        lv_obj_set_style_bg_opa(gs->insert[i], v ? (lv_opa_t) 110 : (lv_opa_t) LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(gs->insert[i],
+            lv_color_hex(v ? Pal::MODE : Pal::INSERT_OFF), LV_PART_MAIN);
+        lv_obj_set_style_text_opa(gs->insert_l[i], v ? (lv_opa_t) LV_OPA_COVER : (lv_opa_t) 130, LV_PART_MAIN);
+    }
+}
+
+// La bille en attente est deja dessinee par render_balls() (elle est `active`) :
+// ici on ne s'occupe que du ressort, qui se comprime avec la charge.
+static void render_plunger() {
+    int& c_len = gs->plunger_len;   // -1 a chaque ouverture : tige neuve repeinte
+    const int len = 60 - (int) (gs->plunger_charge * 26.0f);
+    if (len == c_len) return;
+    c_len = len;
+    lv_obj_set_size(gs->plunger_rod, 18, len);
+    lv_obj_set_pos(gs->plunger_rod, (int) LANE_MID - 9, 1091 + (60 - len));
+}
+
+static void hud_sync(uint32_t now) {
+    if (gs->score != gs->c_score) {
+        gs->c_score = gs->score;
+        auto& sc = gs->hud_sc;
+        fmt_score(sc, sizeof(sc), gs->score);
+        set_text_if(gs->hud_score, sc);
+    }
+    if (gs->ball_num != gs->c_ball) {
+        gs->c_ball = gs->ball_num;
+        auto& bl = gs->hud_bl;
+        // tr() seulement quand la bille change, pas a chaque tick. Libelles en
+        // f_led (roboto_22, Latin-1 complet) : seul le score passe en roboto_55_b.
+        snprintf(bl, sizeof(bl), tr("BILLE %d / %d"), gs->ball_num, gs->balls_total);
+        set_text_if(gs->hud_ball, bl);
+        auto& be = gs->hud_be;
+        char sc[24]; fmt_score(sc, sizeof(sc), best_score());
+        snprintf(be, sizeof(be), tr("RECORD %s"), sc);
+        set_text_if(gs->hud_best, be);
+    }
+    // Pastilles : une par bille restante (les billes bonus au-dela de 3 ne sont
+    // pas representees, le libelle « BILLE x / y » les annonce deja).
+    const int left = gs->balls_total - gs->ball_num + 1;
+    if (left != gs->c_dots) {
+        gs->c_dots = left;
+        for (int i = 0; i < BALLS_PER_GAME; i++) {
+            set_bg(gs->hud_dot[i], i < left ? Pal::AMBER : Pal::INSERT_OFF,
+                   LV_OPA_COVER);
+        }
+    }
+    if (gs->tilted != gs->c_tilt) {
+        gs->c_tilt = gs->tilted;
+        show(gs->hud_tilt, gs->tilted);
+    }
+
+    auto& badge = gs->hud_badge_buf;
+    badge[0] = '\0';
+    if (gs->mb_active)            snprintf(badge, sizeof(badge), "MULTIBALL x%d", gs->multiplier);
+    else if (now < gs->frenzy_until)
+        snprintf(badge, sizeof(badge), "FRENZY %lu", (unsigned long) ((gs->frenzy_until - now) / 1000 + 1));
+    if (strcmp(badge, gs->c_badge) != 0) {
+        snprintf(gs->c_badge, sizeof(gs->c_badge), "%s", badge);
+        set_text_if(gs->hud_badge, badge);
+    }
+
+    const bool charging = gs->plunger_held && gs->plunger_charge > 0.01f;
+    show(gs->pwr_bg, charging);
+    if (charging) lv_obj_set_size(gs->pwr_fill, (int) (296.0f * gs->plunger_charge), 8);
+}
+
+// ===========================================================================
+// 20. Tick
+// ===========================================================================
+
+// Le timer tourne vite en partie et lentement dans les menus : un hub statique
+// n'a rien a animer (meme motif que go_game.cpp / lode_game.cpp).
+static void tick_period_sync() {
+    timer_period_sync(gs->timer, gs->tick_period, (g_state == ST_PLAYING) ? TICK_MS : TICK_MENU_MS);
+}
+
+static void tick_cb(lv_timer_t*) {
+    if (g_state != ST_PLAYING) return;
+    const uint32_t now = lv_tick_get();
+
+    // Relance apres une bille perdue.
+    if (gs->serve_at && now >= gs->serve_at) {
+        serve_ball();
+        return;
+    }
+    if (gs->serve_at) return;
+
+    nudge_update(now);
+
+    // Charge du plunger + securite anti-blocage.
+    bool waiting = false;
+    for (int i = 0; i < MAX_SIM_BALLS; i++) {
+        if (gs->balls[i].active && gs->balls[i].in_plunger) { waiting = true; break; }
+    }
+    if (waiting) {
+        if (gs->plunger_held) {
+            gs->plunger_charge = clampf(gs->plunger_charge + DT / PLUNGER_CHARGE_S, 0.0f, 1.0f);
+        }
+        if (now >= gs->autolaunch_at) {
+            for (int i = 0; i < MAX_SIM_BALLS; i++) {
+                if (gs->balls[i].active && gs->balls[i].in_plunger) launch_ball(gs->balls[i], 0.85f);
+            }
+        }
+    }
+
+    for (int s = 0; s < SUBSTEP; s++) physics_step(SDT, now);
+
+    // Drain : uniquement cote table. Une bille redescendue dans le couloir se
+    // pose sur le fond et se relance (la zone du lanceur se rouvre toute seule).
+    for (int i = 0; i < MAX_SIM_BALLS; i++) {
+        Ball& b = gs->balls[i];
+        if (!b.active || b.in_plunger) continue;
+        // Seuil calcule, pas approxime : posee sur le fond du couloir la bille
+        // s'immobilise a LANE_BOT - BALL_R - RAIL_HALF = 1088. Un seuil trop
+        // proche de cette valeur (a 1 px pres) laisserait la bille bloquee au
+        // fond du couloir sans jamais rouvrir la zone du lanceur.
+        if (b.x > LANE_X + 4.0f && b.y > LANE_BOT - BALL_R - RAIL_HALF - 12.0f &&
+            fabsf(b.vy) < 55.0f && fabsf(b.vx) < 55.0f) {
+            b.in_plunger = true;
+            b.x = LANE_MID; b.y = BALL_REST_Y; b.vx = b.vy = 0.0f;
+            gs->autolaunch_at = now + AUTOLAUNCH_MS;
+            show(gs->zone_p, true);
+            show(gs->plunger_hint, true);
+            continue;
+        }
+        if (b.y > DRAIN_Y && b.x < LANE_X) {
+            ball_drained(b);
+            if (g_state != ST_PLAYING) return;   // end_game() a pu changer d'ecran
+        }
+    }
+
+    render_flippers();
+    render_balls();
+    render_plunger();
+    render_effects(now);
+    hud_sync(now);
+}
+
+// ===========================================================================
+// 21. Entrees tactiles
+// ===========================================================================
+
+static void zone_event_cb(lv_event_t* e) {
+    if (g_state != ST_PLAYING) return;
+    const int tag = (int) (intptr_t) lv_event_get_user_data(e);
+    const lv_event_code_t code = lv_event_get_code(e);
+    const bool down = (code == LV_EVENT_PRESSED);
+
+    if (tag == 0 || tag == 1) {
+        gs->flip[tag].pressed = down;
+        return;
+    }
+    // Plunger : maintien = charge, relachement = tir.
+    if (down) {
+        gs->plunger_held = true;
+        gs->plunger_charge = 0.0f;
+        return;
+    }
+    if (!gs->plunger_held) return;
+    gs->plunger_held = false;
+    for (int i = 0; i < MAX_SIM_BALLS; i++) {
+        if (gs->balls[i].active && gs->balls[i].in_plunger) {
+            launch_ball(gs->balls[i], gs->plunger_charge);
+            break;
+        }
+    }
+    gs->plunger_charge = 0.0f;
+}
+
+// Toucher le fronton = pause. Volontairement pas de croix : le jeu est un flux
+// plein cadre, on ne remet pas le chrome modal (ADR-0009).
+static void hud_event_cb(lv_event_t*) {
+    if (g_state == ST_PLAYING) {
+        gs->flip[0].pressed = gs->flip[1].pressed = false;
+        go_pause();
+    }
+}
+
+static void slot_event_cb(lv_event_t* e) {
+    const int i = (int) (intptr_t) lv_event_get_user_data(e);
+
+    switch (g_state) {
+    case ST_HUB:
+        if (i == 0)      new_game();
+        else if (i == 1) go_scores();
+        else if (i == 2) go_settings();
+        else if (i == 3) close();
+        break;
+
+    case ST_SCORES:
+        if (i == 0) go_hub();
+        break;
+
+    case ST_SETTINGS:
+        if (i == 0)      { gs->save.nudge_sens = (uint8_t) ((gs->save.nudge_sens + 1) % 5); persist_save(); go_settings(); }
+        else if (i == 1) { gs->save.invert_nudge = gs->save.invert_nudge ? 0 : 1; persist_save(); go_settings(); }
+        else if (i == 2) {
+            // Effet immediat : le joueur voit tout de suite si c'est le bon sens.
+            gs->save.flip_screen = gs->save.flip_screen ? 0 : 1;
+            persist_save();
+            screen_portrait(true);
+            go_settings();
+        }
+        else if (i == 3) { calibrate_flat(); go_settings(); }
+        else if (i == 4) go_hub();
+        break;
+
+    case ST_PAUSED:
+        if (i == 0)      { g_state = ST_PLAYING; panel_on(false); tick_period_sync(); }
+        else if (i == 1) calibrate_flat();
+        else if (i == 2) end_game();
+        else if (i == 3) close();
+        break;
+
+    case ST_GAMEOVER:
+        if (i == 0)      new_game();
+        else if (i == 1) go_scores();
+        else if (i == 2) go_hub();
+        break;
+
+    default:
+        break;
+    }
+}
+
+// ===========================================================================
+// 22. API publique
+// ===========================================================================
+
+void on_imu(float ax, float ay, float /*az*/) {
+    if (ax != ax || ay != ay) return;   // garde NaN
+    g_raw_x = ax;
+    g_raw_y = ay;
+}
+
+void calibrate_flat() {
+    if (!gs) return;  // la calibration vit dans la sauvegarde, en memoire jeu ouvert seulement
+    tilt_calibrate(gs->save.cal_x, gs->save.cal_y, g_raw_x, g_raw_y);
+    g_slow_x = g_slow_y = 0.0f;
+    gs->tilt_hits = 0;
+    persist_save();
+}
+
+bool is_open() { return g_state != ST_OFF; }
+
+void open(const UI& ui) {
+    if (g_state != ST_OFF) return;
+    if (!ui.root || !ui.field || !ui.hud || !ui.panel) return;
+    // Le bloc AVANT toute bascule d'orientation : s'il manque, on repart vers
+    // l'arcade encore en paysage (270), comme si le jeu n'avait pas ete lance.
+    gs = game_mem_new<Mem>(MemPref::Internal);
+    if (!gs) {
+        ESP_LOGW("pinball", "%u o introuvables : jeu non ouvert", (unsigned) sizeof(Mem));
+        if (ui.lvgl) ui.lvgl->show_page(ui.home_idx, LV_SCREEN_LOAD_ANIM_NONE, 0);
+        return;
+    }
+    gs->ui = ui;
+
+    persist_load();
+
+    // Portrait AVANT de construire / afficher : LVGL redimensionne l'ecran actif
+    // et invalide tout, autant que ce soit fait une seule fois.
+    screen_portrait(true);
+
+    build_ui();
+
+    // La page LVGL est déjà active (navigation via lvgl.page.show dans le YAML).
+
+    // Etat de repos visible derriere le hub : table vide, aucune bille.
+    for (int i = 0; i < MAX_SIM_BALLS; i++) {
+        gs->balls[i].active = false;
+        show(gs->balls[i].shadow, false);
+        show(gs->balls[i].body, false);
+        show(gs->balls[i].gloss, false);
+    }
+    show(gs->zone_p, false);
+    show(gs->plunger_hint, false);
+    show(gs->toast, false);
+    g_state = ST_HUB;
+
+    if (!gs->timer) {
+        gs->timer = lv_timer_create(tick_cb, TICK_MENU_MS, nullptr);
+        gs->tick_period = TICK_MENU_MS;
+    }
+    go_hub();
+}
+
+void close() {
+    if (g_state == ST_OFF) return;
+
+    // Une partie abandonnee est quand meme enregistree : sinon on pourrait
+    // quitter pour effacer un mauvais score, et le classement ne voudrait plus
+    // rien dire.
+    if (g_state == ST_PLAYING || g_state == ST_PAUSED) {
+        gs->save.games++;
+        gs->save.total_score += gs->score;
+        if (gs->ball_score > gs->save.best_ball) gs->save.best_ball = gs->ball_score;
+        scores_insert(gs->score, gs->ball_num, gs->game_multiballs, gs->game_tilted);
+    }
+    persist_save();
+
+    if (gs->timer) { lv_timer_delete(gs->timer); gs->timer = nullptr; }
+    gs->flip[0].pressed = gs->flip[1].pressed = false;
+    gs->plunger_held = false;
+
+    g_state = ST_OFF;
+
+    // Restauration du paysage AVANT de naviguer : le sélecteur arcade
+    // s'affiche en orientation correcte.
+    screen_portrait(false);
+    // Navigation retour vers le sélecteur arcade (page LVGL).
+    if (gs->ui.lvgl) gs->ui.lvgl->show_page(gs->ui.home_idx, LV_SCREEN_LOAD_ANIM_NONE, 0);
+
+    // Rien ne reste réservé — dans cet ordre, une fois revenu en paysage :
+    //  1. le callback de pause posé sur le fronton YAML par build_hud() (sinon il
+    //     s'empilerait à chaque ouverture) ;
+    //  2. les objets LVGL du jeu, conteneur par conteneur (le slot dont le
+    //     callback nous appelle peut-être en fait partie ; ~57 objets anonymes
+    //     du terrain et le filet du fronton ne sont atteints que par là). Jamais
+    //     `root` : il porte aussi la sonde YAML pinball_lvgl_line_probe ;
+    //  3. le bloc, en dernier : les lv_line détruites en 2 lisaient pts/flip_pts.
+    if (gs->ui.hud) lv_obj_remove_event_cb(gs->ui.hud, hud_event_cb);
+    ui_destroy(nullptr, {gs->ui.field, gs->ui.hud, gs->ui.panel});
+    game_mem_free(gs);
+}
+
+}  // namespace Pinball

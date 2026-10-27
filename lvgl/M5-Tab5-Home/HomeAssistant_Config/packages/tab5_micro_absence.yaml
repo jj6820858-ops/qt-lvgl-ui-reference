@@ -1,0 +1,162 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file packages/tab5_micro_absence.yaml
+# @role Coupe le micro du Tab5 (« Ok Nabu ») quand personne n'est à la maison, et
+#       le rallume au retour. Expérience E1 de l'audit des ressources du
+#       26/09/2026 : le mot d'activation écoute 24 h/24 (trames de 10 ms, modèle +
+#       détection de voix), soit 5 à 15 % d'un cœur plus le bus I2S et l'ADC du
+#       micro en continu (estimation de l'audit), pour rien quand l'appartement
+#       est vide.
+# @architecture_constraint Aucun changement firmware : on pilote l'interrupteur
+#       « Tab5 Wake Word Active » (switch template ESPHome, restauré au boot).
+#       Coupé, il arrête microWakeWord ; le réveil arme et démarre quand même son
+#       modèle « Stop » pendant la sonnerie, puis rend le micro à l'état de
+#       l'interrupteur (tab5-alarm.yaml, tab5_alarm_ring_start / _ring_loop).
+# @ai_instruction Présence = zone.home (nombre de personnes suivies à la maison) :
+#       aucun identifiant personnel dans ce fichier public. Pour ne suivre qu'une
+#       personne, remplacer zone.home par une condition sur person.<vous>.
+# @ai_instruction L'interrupteur « Tab5 Wake Word Active » de CHAQUE écran connecté
+#       (tab5_cibles / tab5_entite, custom_templates/tab5_tablette.jinja, ADR-0071 ;
+#       avant le 25/10/2026, seul celui de sensor.tab5_tablette), la reconnexion est
+#       l'événement esphome.tab5_connected de l'écran : aucun entity_id de la tablette
+#       écrit ici (ADR-0024). Sans tablette dans HA, l'automatisation ne fait rien.
+# @ai_warning Respecte un choix manuel : un micro n'est rallumé au retour QUE si
+#       c'est cette automation qui l'a coupé (liste input_text ci-dessous, un
+#       entity_id par écran ; l'input_boolean dit « au moins un »). Un « Ok Nabu »
+#       coupé à la main reste coupé.
+# @install Nécessite l'activation des packages dans configuration.yaml :
+#         homeassistant:
+#           packages: !include_dir_named packages
+#       Puis recharger « Entrées booléennes » et « Automatisations ».
+# ============================================================================
+
+input_boolean:
+  # Vrai tant que le micro est coupé PAR l'absence (et pas à la main). Restauré
+  # après un redémarrage de HA (pas d'`initial:`), comme l'interrupteur côté
+  # tablette.
+  tab5_micro_coupe_absence:
+    name: "Tab5 — mic off while away"
+    icon: mdi:microphone-off
+
+input_text:
+  # Les interrupteurs « Wake Word Active » coupés par l'absence, séparés par des
+  # virgules (plusieurs écrans, ADR-0071) : seuls ceux-là sont rallumés au retour.
+  # Restauré après un redémarrage de HA, comme l'input_boolean.
+  tab5_micros_coupes_absence:
+    name: "Tab5 — mics off while away"
+    icon: mdi:microphone-off
+    max: 255
+
+automation:
+  - id: tab5_micro_absence
+    alias: "Tab5 — mute the mic when away"
+    description: >-
+      Coupe « Ok Nabu » quand la maison est vide depuis 10 min, le rallume dès le
+      retour s'il avait été coupé par cette automation. Rattrape un départ ou un
+      retour manqué quand la tablette se reconnecte ou que HA redémarre.
+    # Actions courtes et idempotentes : on les enchaîne dans l'ordre d'arrivée.
+    mode: queued
+    max: 5
+    triggers:
+      # 10 min de maison vide : un saut du GPS (téléphone « absent » une minute)
+      # ne coupe rien.
+      - trigger: numeric_state
+        entity_id: zone.home
+        below: 1
+        for: "00:10:00"
+        id: depart
+      # Retour : tout de suite, pour qu'« Ok Nabu » réponde en arrivant.
+      - trigger: numeric_state
+        entity_id: zone.home
+        above: 0
+        id: retour
+      # Un écran reconnecté (redémarrage, OTA, Wi-Fi) ou HA redémarré : l'appel
+      # a pu échouer pendant la coupure, on refait le point.
+      - trigger: event
+        event_type: esphome.tab5_connected
+        id: resync
+      - trigger: homeassistant
+        event: start
+        id: resync
+    conditions:
+      - alias: "tab5_connected : seulement depuis une tablette (modele tab5-ha-hmi)"
+        condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_origine -%}
+          {{ tab5_origine(trigger) == 'oui' }}
+    actions:
+      - choose:
+          # Maison vide : chaque « Ok Nabu » actif est coupé, et on s'en souvient.
+          # L'interrupteur d'abord : s'il échoue (écran hors ligne), il n'entre pas
+          # dans la liste, l'automatisation s'arrête et le rattrapage à la reconnexion
+          # recommencera.
+          - conditions:
+              - condition: trigger
+                id: [depart, resync]
+              - condition: numeric_state
+                entity_id: zone.home
+                below: 1
+            sequence:
+              - repeat:
+                  for_each: >-
+                    {%- from 'tab5_tablette.jinja' import tab5_cibles, tab5_entite -%}
+                    {%- set ns = namespace(l=[]) -%}
+                    {%- for d in tab5_cibles('').split(',') | select -%}
+                      {%- set m = tab5_entite(d, 'micro') -%}
+                      {%- if m and is_state(m, 'on') -%}{%- set ns.l = ns.l + [m] -%}{%- endif -%}
+                    {%- endfor -%}
+                    {{ ns.l }}
+                  sequence:
+                    - action: switch.turn_off
+                      target:
+                        entity_id: "{{ repeat.item }}"
+                    - action: input_text.set_value
+                      target:
+                        entity_id: input_text.tab5_micros_coupes_absence
+                      data:
+                        value: >-
+                          {%- set l = states('input_text.tab5_micros_coupes_absence').split(',') | select('match', '^switch[.]') | list -%}
+                          {{ (l + ([repeat.item] if repeat.item not in l else [])) | join(',') }}
+                    - action: input_boolean.turn_on
+                      target:
+                        entity_id: input_boolean.tab5_micro_coupe_absence
+          # Quelqu'un est là : on rallume les micros que l'absence avait coupés. Même
+          # ordre, pour la même raison. L'ancien indicateur seul (avant la liste, un
+          # seul écran) rallume le micro de chaque écran connecté, comme avant.
+          - conditions:
+              - condition: trigger
+                id: [retour, resync]
+              - condition: numeric_state
+                entity_id: zone.home
+                above: 0
+              - condition: state
+                entity_id: input_boolean.tab5_micro_coupe_absence
+                state: "on"
+            sequence:
+              - repeat:
+                  for_each: >-
+                    {%- from 'tab5_tablette.jinja' import tab5_cibles, tab5_entite -%}
+                    {%- set l = states('input_text.tab5_micros_coupes_absence').split(',') | select('match', '^switch[.]') | list -%}
+                    {%- if not l -%}
+                      {%- set ns = namespace(l=[]) -%}
+                      {%- for d in tab5_cibles('').split(',') | select -%}
+                        {%- set m = tab5_entite(d, 'micro') -%}
+                        {%- if m -%}{%- set ns.l = ns.l + [m] -%}{%- endif -%}
+                      {%- endfor -%}
+                      {%- set l = ns.l -%}
+                    {%- endif -%}
+                    {{ l }}
+                  sequence:
+                    - action: switch.turn_on
+                      target:
+                        entity_id: "{{ repeat.item }}"
+                    - action: input_text.set_value
+                      target:
+                        entity_id: input_text.tab5_micros_coupes_absence
+                      data:
+                        value: >-
+                          {{ states('input_text.tab5_micros_coupes_absence').split(',') | select('match', '^switch[.]')
+                             | reject('eq', repeat.item) | join(',') }}
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.tab5_micro_coupe_absence

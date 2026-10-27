@@ -1,0 +1,722 @@
+# Architecture & Code Walkthrough
+
+This document explains how the ESP32-S3 Sky Gauge (flight radar + weather
+display) is put together — the moving parts, how they talk, and where to look
+when you want to change something.
+
+> **History:** the project began as an audio VU meter fed by a PC microphone.
+> Those modes (and their helper tools) were removed in favor of the
+> radar/weather pair.
+
+If you've just cloned the repo, read sections **1–4** end-to-end. Sections 5
+onward are reference material for when you're extending the system.
+
+---
+
+## 1. System overview
+
+The device is fully self-contained — it fetches its own data over HTTPS:
+
+```mermaid
+flowchart LR
+  subgraph ESP ["ESP32-S3-LCD-1.28"]
+    FW[firmware]
+    LCD[1.28&quot; round LCD<br/>GC9A01 240×240]
+    FW -->|SPI + DMA| LCD
+  end
+
+  ADSB["api.adsb.lol<br/>(aircraft positions)"]
+  ADSBDB["api.adsbdb.com<br/>(callsign → route)"]
+  METEO["api.open-meteo.com<br/>(current weather)"]
+  Browser["Browser tab<br/>(any device on LAN)"]
+
+  FW -->|HTTPS poll| ADSB
+  FW -->|HTTPS poll| ADSBDB
+  FW -->|HTTPS poll| METEO
+  Browser -->|"WS /ws<br/>{config, command}"| FW
+  FW -->|"WS /ws<br/>{state, radar}"| Browser
+  Browser -->|"HTTP /api/*"| FW
+```
+
+The **firmware** is the only authoritative state. The web UI is a stateless
+client that sends config patches and receives broadcasts.
+
+### Responsibilities
+
+| Piece | What it does | What it doesn't do |
+|---|---|---|
+| **firmware** (ESP32) | Renders the screen, owns all settings, serves the web UI, polls flight/weather APIs, broadcasts state + radar data | Store anything in the cloud |
+| **web UI** (browser) | Mirror the radar scope, edit settings, switch modes | Fetch flight/weather data itself |
+
+---
+
+## 2. Repository layout
+
+```
+esp-lcd-project/
+├── README.md                          User-facing setup & flashing guide
+├── ARCHITECTURE.md                    ← you are here
+│
+├── firmware/                          PlatformIO project for the ESP32-S3
+│   ├── platformio.ini                 Build flags, board, partition table, lib_deps
+│   ├── src/
+│   │   ├── main.cpp                   setup() / loop() — orchestrator
+│   │   ├── board_config.h             Pin map (single source of truth)
+│   │   ├── lv_conf.h                  LVGL 9 build-time configuration
+│   │   ├── display.{h,cpp}            LovyanGFX panel + LVGL flush callback
+│   │   ├── settings.{h,cpp}           NVS-backed config + JSON in/out
+│   │   ├── ui.{h,cpp}                 LVGL screens (radar scope, weather, home, boot status)
+│   │   ├── nightmode.{h,cpp}          SNTP clock + night backlight window (owns the backlight)
+│   │   ├── radar.{h,cpp}              poller for Radar mode (adsb.lol + adsbdb)
+│   │   ├── weather.{h,cpp}            poller for Weather mode (buienradar, Open-Meteo fallback)
+│   │   ├── mdi48.c                    generated LVGL Material Design Icons font (Home mode)
+│   │   ├── homeassistant.{h,cpp}      poller for Home mode (HA REST /api/states + token)
+│   │   ├── net_fetch.{h,cpp}          shared HTTPS fetcher (TLS lock + PSRAM buffer + JSON filter)
+│   │   ├── net_lock.h                 mutex: max one TLS connection at a time
+│   │   ├── screenshot.{h,cpp}         on-demand LVGL snapshot → BMP at /shot.bmp
+│   │   └── web_server.{h,cpp}         AsyncWebServer routes + WebSocket
+│   └── data/                          Uploaded to LittleFS as the web UI
+│       ├── index.html
+│       ├── style.css
+│       └── app.js
+```
+
+---
+
+## 3. Firmware module map
+
+```mermaid
+flowchart TB
+  main["main.cpp<br/>setup() / loop()"]
+
+  settings["settings.{h,cpp}<br/>NVS + JSON"]
+  display["display.{h,cpp}<br/>LovyanGFX + LVGL"]
+  ui["ui.{h,cpp}<br/>LVGL screens"]
+  web["web_server.{h,cpp}<br/>HTTP + WS"]
+  radar["radar.{h,cpp}<br/>HTTPS poller (core 0)"]
+  weather["weather.{h,cpp}<br/>HTTPS poller (core 0)"]
+  homeassistant["homeassistant.{h,cpp}<br/>HA REST poller (core 0)"]
+  nightmode["nightmode.{h,cpp}<br/>SNTP + backlight window"]
+
+  board["board_config.h<br/>pin map"]
+  lvconf["lv_conf.h<br/>LVGL build cfg"]
+
+  main --> settings
+  main --> display
+  main --> ui
+  main --> web
+  main --> radar
+  main --> weather
+  main --> homeassistant
+  main --> nightmode
+
+  nightmode --> display
+  nightmode --> settings
+  nightmode --> radar
+  ui --> nightmode
+
+  ui --> radar
+  ui --> weather
+  ui --> homeassistant
+  radar --> settings
+  weather --> settings
+  homeassistant --> settings
+  web --> radar
+
+  display -.uses.-> board
+  display -.uses.-> lvconf
+  ui --> settings
+  ui -.uses.-> lvconf
+  web --> settings
+  web --> ui
+  web --> display
+  web --> nightmode
+```
+
+### Night window
+
+`nightmode` is the only module that calls `display::set_brightness()`. Everything
+else — the boot sequence, the web UI's brightness slider — goes through
+`nightmode::refresh()` or `wake()`, so the effective level is decided in one
+place instead of racing between a slider drag and the schedule.
+
+Between `night_from` and `night_to` (a window that normally wraps midnight) the
+backlight drops to `night_bright`, and `night_bright == 0` means the backlight
+is switched off rather than driven very dim. The clock comes from SNTP
+(`configTzTime` with the configured POSIX `tz`); until it syncs, `in_window()`
+returns false and the panel simply stays on — a gauge that went dark because
+NTP was unreachable would be a worse failure than one that stayed lit.
+
+Nothing on the device can wake it — the board has no buttons — so `wake()` is
+driven from the web UI (a button, and implicitly any config change) and lights
+the panel for 20 s at `min(WAKE_BRIGHT, brightness)`. The one autonomous
+exception is `emergency_override()`: a 7500/7600/7700 contact in fresh radar
+data lights the panel at full brightness, and the Auto supervisor treats it as
+traffic so the scope is what appears. That only works while the radar poller is
+running (Radar and Auto modes) — in Weather and Home modes it is idle and there
+is nothing to detect.
+
+Each `.cpp` lives in its own anonymous namespace (`namespace { ... }`) for
+internal state, with a small public surface in the `.h`. Nothing reaches across
+modules except through those headers.
+
+### 3.1 `board_config.h` — pin map
+
+The only place hardware pins are written down. If your board revision needs
+different pins, you change this file and nothing else. Encodes the official
+Waveshare ESP32-S3-LCD-1.28 pinout (verified on hardware):
+
+```
+LCD_SCLK=10  LCD_MOSI=11  LCD_DC=8  LCD_CS=9  LCD_RST=12  LCD_BL=40
+IMU_SDA=6    IMU_SCL=7    IMU_INT1=4 IMU_INT2=3
+BAT_ADC=1
+```
+
+> A community "corrected" pinout (`RST=14, BL=2`) circulates online for a
+> *different* board revision — using it here leaves the screen pure black
+> (backlight pin wrong). `RST=12, BL=40` is correct for the unit this repo
+> was built and tested against.
+
+LVGL constants (`LCD_WIDTH=240`, `LCD_HEIGHT=240`, `LCD_SPI_FREQ_HZ=40 MHz`) also live here.
+
+### 3.2 `display.{h,cpp}` — pixel pipeline
+
+Two responsibilities:
+
+1. **Initialize the GC9A01 panel** via a custom LovyanGFX class
+   (`LGFX_GC9A01`) — SPI bus, panel parameters, PWM backlight.
+2. **Wire LVGL to the panel** — create the `lv_display_t`, register a flush
+   callback, hand it two partial draw buffers (24 lines × 240 px ×
+   2 bytes ≈ 11.5 KB each, both in DRAM).
+
+#### Flush callback (the hot path)
+
+LVGL renders a rectangle into `px_map` and calls our callback. We byte-swap
+RGB565 (LVGL is little-endian, GC9A01 expects big-endian) and push the bytes
+over SPI:
+
+```cpp
+static void flush_cb(lv_display_t* d, const lv_area_t* area, uint8_t* px_map) {
+    uint32_t w = area->x2 - area->x1 + 1;
+    uint32_t h = area->y2 - area->y1 + 1;
+    lv_draw_sw_rgb565_swap(px_map, w * h);
+    tft.startWrite();
+    tft.setAddrWindow(area->x1, area->y1, w, h);
+    tft.writePixels((uint16_t*)px_map, w * h);
+    tft.endWrite();
+    lv_display_flush_ready(d);
+}
+```
+
+Synchronous writes are used today. At 40 MHz SPI a full screen refreshes in
+~25 ms, which is plenty for a VU meter. DMA would buy us ~2× headroom — easy
+to add later by swapping `writePixels` for `pushImageDMA` and signalling
+`flush_ready` from the DMA completion callback.
+
+#### Public API
+
+```cpp
+display::begin();             // call once, before anything else LVGL-related
+display::tick();              // call frequently from loop() — pumps LVGL
+display::set_brightness(0..255);
+```
+
+### 3.3 `settings.{h,cpp}` — persistent state
+
+`Snapshot` is a plain struct that holds everything the user can configure:
+WiFi creds, mode, brightness, and the radar config (location + scope options —
+the location is shared with Weather mode).
+
+```mermaid
+classDiagram
+  class Snapshot {
+    +char wifi_ssid[33]
+    +char wifi_password[65]
+    +char hostname[33]
+    +Mode mode
+    +uint8 brightness
+    +RadarConfig radar
+    +HomeConfig home
+  }
+  class RadarConfig {
+    +float lat
+    +float lon
+    +uint16 range_km
+    +uint16 poll_s
+    +bool show_tags
+    +uint8 theme
+    +uint16 alert_km
+    +uint16 auto_km
+    +uint8 auto_base
+  }
+  class HomeConfig {
+    +char url[96]
+    +char token[224]
+    +uint16 poll_s
+    +char icon[8][16]
+    +char label[8][20]
+    +char entity[8][48]
+  }
+  Snapshot *-- RadarConfig
+  Snapshot *-- HomeConfig
+```
+
+#### Why a single snapshot
+
+Other code never reads NVS directly — they call `settings::state()` and get a
+reference. Mutating it doesn't persist anything; you call `settings::save()`
+when you're ready to flush. This makes the JSON-patch flow (apply many keys,
+save once) trivial.
+
+#### JSON shape
+
+`settings::to_json(JsonObject, include_secrets)` writes the snapshot into a
+JsonObject. The shape mirrors the struct nesting:
+
+```json
+{
+  "mode": 0,
+  "brightness": 200,
+  "radar": { "lat": 52.3105, "lon": 4.7683, "range_km": 10, "poll_s": 10,
+             "show_tags": true, "theme": 1, "alert_km": 3, "auto_km": 5 },
+  "wifi": { "ssid": "MyNet", "password": "********", "hostname": "esp-gauge" }
+}
+```
+
+`apply_json(JsonVariantConst)` accepts the same shape (or a sparse patch) and
+mutates the snapshot. It returns `true` only if something actually changed —
+the caller uses that to decide whether to call `save()` + re-render.
+
+### 3.4 `ui.{h,cpp}` — LVGL widget trees
+
+Screens: one per mode, plus an internal boot/status screen (shown during
+startup so WiFi messages are readable; not user-selectable):
+
+| Screen | Widgets |
+|---|---|
+| `Radar`   | range rings (round-distance steps + rim) + crosshair + cardinal ticks/"N" + 21× `lv_line` sweep (bright edge + fading trail) + center hub + 12× blip pools (`lv_obj` dot, `lv_line` heading vector, `lv_label` tag) + labels (track count, range marks, focus readout ×2, status) |
+| `Weather` | 7 icon groups built from LVGL primitives (sun/partly/cloud/rain/snow/thunder/fog — circles + lines, no image assets) + labels (temp 48 pt, description, feels/humidity, wind) + 24× rain-nowcast bars (bottom edge, hidden when dry) + status |
+| `Home`    | one entity per page, cycling every 4 s: a selectable Material Design icon (glyph from the generated `mdi48` LVGL font, colour per icon) + label 24 pt accent + value 48 pt (HA state + its unit) + page dots (centred on the configured page count) + status. Mirrors the Frame's Home mode data, as cycling single cards for the round screen |
+| status    | 3× `lv_label` (title, line1, line2) — boot + OTA-progress messages |
+
+All screens are built once during `ui::begin()` (they're cheap), kept around as
+`lv_obj_t*` globals, and switched between via `lv_screen_load_anim()`.
+
+A `shown` pointer tracks which screen is actually displayed — in **Auto mode**
+that differs from what the settings mode implies, so the animation timers gate
+on `shown`, not on the mode. The Auto supervisor (500 ms `lv_timer`) rests on
+the chosen base screen(s) (`radar.auto_base` bitmask: bit0 Weather, bit1 Home;
+if both, they alternate every 8 s), loads the radar screen while any airborne
+aircraft is within `radar.auto_km`, and returns 30 s after the last contact
+(hysteresis against poll-gap flapping). `auto_km == 0` disables switching; it is
+distinct from `alert_km`, which drives the on-scope focus-pin + ring pulse.
+
+The radar screen is animated by an `lv_timer` (33 ms): the sweep angle is
+derived from the wall clock (8 s/revolution — counting ticks turns timer
+jitter into visible stutter), each blip's opacity flares as the sweep crosses
+its bearing and decays back ("afterglow"), a fresh aircraft snapshot is pulled
+from `radar::get_aircraft()` once a second, and the focused aircraft in the
+bottom readout (callsign, route, altitude ft + climb/descend arrow, speed kt,
+distance km) cycles every 4 s. Blip positions are **dead-reckoned** between
+polls (last fetched position + ground-speed vector × data age, re-placed twice
+a second) so aircraft glide instead of jumping every `poll_s`. Each blip
+carries a speed-scaled heading vector; cardinal ticks + "N" mark true north
+(up). A configurable overhead alert (`radar.alert_km`) pins focus to traffic
+that close and pulses the outer ring; emergency squawks (7500/7600/7700) paint
+the blip red; `radar.theme` switches the phosphor between green and amber.
+The web UI mirrors the scope on a canvas, fed by the `radar` WS broadcast.
+
+The weather screen updates from a 1 s `lv_timer`: it shows the icon group for
+the current WMO weather code and refreshes the labels (a `set_text_if_changed`
+helper skips identical updates so unchanged labels don't invalidate).
+
+```mermaid
+sequenceDiagram
+    participant App as app code
+    participant UI as ui::*
+    participant LVGL
+    Note over App,UI: ui::begin() — once at boot
+    App->>UI: begin()
+    UI->>LVGL: build_status_screen()
+    UI->>LVGL: build_radar_screen()
+    UI->>LVGL: build_weather_screen()
+    UI->>LVGL: lv_timer_create(radar 33ms, weather 1s)
+    Note over App,UI: on each WS config patch
+    App->>UI: set_mode(new)
+    UI->>LVGL: lv_screen_load_anim(target)
+    App->>UI: apply_settings()
+    UI->>LVGL: rebuild all 3 screens, restore active
+```
+
+#### Scope geometry
+
+Bearings come straight from lat/lon deltas (true north). On screen, 0° points
+up and angles grow clockwise, so for a blip at distance `d` and bearing `b`:
+
+```cpp
+float r_px = d / range_km * RADAR_R;
+x = CX + r_px * sinf(b);     // east  → right
+y = CY - r_px * cosf(b);     // north → up (screen y grows down)
+```
+
+The sweep and its 20 trail lines are plain 2-point `lv_line`s recomputed each
+tick; a round center hub (`lv_obj` with circle radius) covers their overlapping
+flat ends at the origin.
+
+### 3.5 `web_server.{h,cpp}` — HTTP + WebSocket
+
+Two route surfaces:
+
+| Path | Method | Purpose |
+|---|---|---|
+| `/`, `/style.css`, `/app.js` | GET | Static files from LittleFS |
+| `/api/state` | GET / POST | Snapshot read / JSON patch |
+| `/api/reboot` | POST | Restart |
+| `/api/factory_reset` | POST | Wipe NVS + restart |
+| `/ws` | WebSocket | Real-time config + state + radar broadcast |
+
+**Auth:** an `AsyncAuthenticationMiddleware` (HTTP Basic, `WEB_USER` / `WEB_PASSWORD` from the gitignored `src/secrets.h`) is added to the server, so it guards every route above, **including the `/ws` upgrade**. It's Basic rather than Digest because browsers re-send cached Basic credentials on the WebSocket handshake. ArduinoOTA requires `OTA_PASSWORD`. A patch that changes `home.url` without `home.token` clears the stored token. A second middleware answers **403** unless the `Host` header is the device's own IP or hostname (DNS-rebinding guard), and refuses POSTs or WebSocket upgrades whose `Origin` names another site (CSRF guard), because a browser would otherwise replay the cached Basic-auth login.
+
+The WebSocket is the primary control plane; the REST endpoints are an
+escape hatch (e.g., for `curl -u admin:<pw>` / scripting). Both apply patches via the same
+`apply_config_patch()` helper.
+
+#### loop_tick() housekeeping
+
+`web::loop_tick()` (called from `main.cpp::loop()`) does three things:
+
+- **Debounced NVS saves** — a brightness-slider drag arrives as dozens of
+  config patches per second; settings apply live immediately, but the flash
+  write happens once, ~1.5 s after the burst settles. Reboot paths call
+  `flush_save()` first so nothing is lost. Brightness-only patches also skip
+  the full screen rebuild (backlight PWM doesn't need one).
+- **Radar broadcast** — in Radar mode, the aircraft list is serialized and
+  pushed to all WS clients every 2 s (skipped when no client is connected).
+- WS client cleanup.
+
+### 3.6 `main.cpp` — orchestration
+
+```mermaid
+sequenceDiagram
+    participant Boot
+    participant settings
+    participant display
+    participant ui
+    participant WiFi
+    participant web
+
+    Boot->>Boot: Serial.begin(115200)
+    Boot->>settings: begin()  (load NVS)
+    Boot->>display: begin()   (panel + LVGL)
+    Boot->>ui: begin()        (build screens + timers)
+    Boot->>ui: show_status() / update_status("Booting…")
+
+    alt has stored SSID
+        Boot->>WiFi: try_sta(ssid, pwd) — 20s timeout
+    end
+    alt connect failed or no creds
+        Boot->>WiFi: start_ap_mode() — "ESP-Gauge-XXXX"
+    end
+
+    Boot->>web: begin()       (mount LittleFS, register routes, start WS)
+    Boot->>Boot: setup_ota()  (ArduinoOTA :3232, progress on status screen)
+    Boot->>Boot: radar::begin() + weather::begin()  (pollers, core 0)
+    Boot->>display: set_brightness(saved)
+    Boot->>ui: set_mode(saved_mode)
+
+    loop forever
+        Boot->>display: tick()       (pumps LVGL + timers)
+        Boot->>web: loop_tick()      (cleanup, debounced save, radar broadcast)
+        Boot->>Boot: ArduinoOTA.handle()
+    end
+```
+
+OTA holds the net lock for the whole transfer so poller TLS traffic can't
+compete with the update; firmware and LittleFS both flash over WiFi via the
+`ota` PlatformIO env (espota, port 3232 — on macOS pass the device IP, the
+`.local` name hangs espota's resolver).
+
+Boot intentionally lingers on the status screen for 2.5 s after WiFi is up so
+you can read the IP before the screen switches to the saved mode.
+
+### 3.7 `radar.{h,cpp}` — flight data poller
+
+The only module that makes *outbound* network requests. A FreeRTOS task pinned
+to **core 0** (the Arduino loop and LVGL run on core 1, so TLS handshakes never
+stall rendering) polls two free public APIs while Radar mode is active:
+
+| API | Call | Gives us |
+|---|---|---|
+| adsb.lol | `GET /v2/point/{lat}/{lon}/{radius_nm}` every `poll_s` seconds | live positions: callsign, lat/lon, baro altitude, ground speed |
+| adsbdb.com | `GET /v0/callsign/{cs}` (max 2 per cycle) | route, e.g. `JFK>LHR` — cached in a 24-entry ring, unknowns cached too so they aren't retried |
+
+Key implementation choices:
+
+- **Fetches go through `net_fetch::http_get_json()`** (shared with weather):
+  TLS connections are serialized via `net_lock.h` (the heap can't fit two
+  handshakes), the body is buffered into a reused PSRAM buffer (cap 700 KB —
+  a 100 km query near a hub returns a few hundred KB, and byte-by-byte stream
+  parsing over TLS is slow enough that servers drop the connection mid-body),
+  and the filtered `JsonDocument` uses a PSRAM allocator, keeping internal
+  DRAM free. HTTP/1.0 (`useHTTP10`) avoids chunked transfer encoding;
+  `setInsecure()` skips CA validation — public read-only data, not worth the RAM.
+- The task computes distance/bearing from the configured home position
+  (equirectangular approximation — fine below a few hundred km), keeps the
+  nearest `MAX_AIRCRAFT` (12) sorted by distance, and publishes them under a
+  mutex. The UI thread copies that snapshot via `radar::get_aircraft()`.
+- When the mode isn't `Radar` (or lat/lon are unset, or WiFi is down) the task
+  idles cheaply and reports a `Status` the UI renders ("SET LOCATION", etc.).
+
+### 3.8 `weather.{h,cpp}` — current-conditions poller
+
+Mirrors the radar module's pattern (mode-gated core-0 task, mutex-guarded
+snapshot, `Status` enum for the UI). Polls every **10 minutes**, retries
+failures after 20 s; stale data is kept and shown rather than blanked. Uses
+the same `radar.lat/lon` location — deliberately one "home position".
+
+Primary source is **buienradar.nl** (`data.buienradar.nl/2.0/feed/json`,
+~36 KB): actual measurements from the KNMI station network, with authentic
+Dutch condition text classified into an icon by keyword matching. The feed
+stopped carrying station coordinates (all 0 as of 2026-06), so the nearest
+station is found by matching `StationId` against a baked-in table of KNMI
+positions (`StationId = 6000 + KNMI STN`). If no station is within 100 km
+(device taken outside NL/BE), it falls back to **Open-Meteo** with a WMO
+weather-code → icon mapping. Both fetched via `net_fetch.{h,cpp}` — the
+shared TLS + PSRAM-buffered + filtered-JSON helper also used by the radar.
+
+On a separate 5-minute cadence the task also fetches the **rain nowcast**
+(`gpsgadget.buienradar.nl/data/raintext?lat&lon` — plain text, one
+`value|HH:MM` line per 5-minute step, 2 h ahead; mm/h = 10^((value−109)/32)).
+It lands in the same `Current` snapshot (station publishes preserve it) and
+feeds the weather screen's bottom bar graph, which only appears when any step
+exceeds the light-rain threshold. The poller runs in Weather **and** Auto
+modes (Auto rests on the weather screen); likewise the radar poller runs in
+Radar and Auto modes — the TLS lock keeps the two from overlapping.
+
+### 3.9 `homeassistant.{h,cpp}` — Home Assistant entity poller
+
+Mirrors the weather module (mode-gated core-0 task, mutex-guarded snapshot,
+`Status` enum). Active in **Home** mode, and in **Auto** mode when Home is the
+resting screen (`radar.auto_base & 2`). Each poll cycle (`home.poll_s`,
+default 15 s) fetches up to `HOME_TILES` (8) configured entities:
+`GET {home.url}/api/states/{entity}` with `Authorization: Bearer {token}`,
+keeping the `state` string and `attributes.unit_of_measurement`. A purely
+numeric state is rounded to 1 decimal for display (HA reports floats at full
+precision, e.g. `21.7000007629395`); non-numeric states (`on`, `home`) stay verbatim. Fetches go
+through `net::http_get_text(..., bearer)` — the shared helper grew a
+scheme-aware (http/https) bearer-capable text GET, still under the global net
+lock so HA traffic never races the radar/weather TLS handshakes.
+
+Config lives in `settings::HomeConfig`: `url`, write-only `token` (never
+returned by `to_json` — a `token_set` bool is exposed instead), `poll_s`, and
+per-page `icon`/`label`/`entity` (one entity per page). There is no type
+preset — the unit comes straight from the entity, and the icon is a Material
+Design glyph (`mdi48.c`, generated by lv_font_conv from @mdi/font) chosen from
+a 10-icon set. Same catalog idea as the Frame project's Home
+mode, adapted from its 4.7" 2×2 grid to the round screen's one-entity-per-page
+cycling layout (see §3.4).
+
+This integration mirrors the sibling **LilyGo T5 "Frame"** project's Home mode;
+the data contract (HA REST + long-lived token + typed entity tiles) is the same.
+
+---
+
+## 4. End-to-end traces
+
+### 4.1 A radar poll reaches the screen
+
+```mermaid
+sequenceDiagram
+    participant API as api.adsb.lol
+    participant Radar as radar task (core 0)
+    participant Mutex as shared snapshot
+    participant Timer as ui radar lv_timer (core 1)
+    participant LVGL
+    participant LCD
+
+    Radar->>API: GET /v2/point/lat/lon/nm (TLS, HTTP/1.0)
+    API-->>Radar: JSON body (buffered into PSRAM)
+    Radar->>Radar: filter-parse, compute x/y km, sort by distance
+    Radar->>Mutex: publish nearest 12 (xSemaphoreTake/Give)
+    Note over Timer: every 1 s
+    Timer->>Mutex: radar::get_aircraft() (copy)
+    Note over Timer: every 33 ms
+    Timer->>LVGL: sweep angle from wall clock, afterglow opacities
+    Note over Timer: every 500 ms
+    Timer->>LVGL: dead-reckoned blip/vector/tag positions
+    LVGL->>LCD: flush dirty regions (DMA over SPI)
+```
+
+### 4.2 Web UI changes a setting
+
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Web as web_server
+    participant Settings as settings
+    participant Display as display
+    participant UI as ui
+
+    Browser->>Web: WS {"type":"config","patch":{"radar":{"theme":1}}}
+    Web->>Settings: apply_json(patch)
+    Settings-->>Web: changed=true
+    Web->>Web: save_pending=true            (flushed ~1.5 s later in loop_tick)
+    Web->>Display: set_brightness(state.brightness)
+    Web->>UI: set_mode(state.mode)
+    Web->>UI: apply_settings()              (rebuild screens w/ new palette)
+    Web->>Web: broadcast_all_state_inline()
+    Web->>Browser: WS {"type":"state","data":{…}}
+    Note right of Browser: other tabs reflect the change too
+```
+
+### 4.3 First boot (no WiFi creds)
+
+```mermaid
+flowchart TD
+    Boot([Power on]) --> LoadNVS[settings::begin]
+    LoadNVS --> NoSSID{stored SSID?}
+    NoSSID -- no --> AP[start_ap_mode: ESP-Gauge-XXXX]
+    NoSSID -- yes --> TrySTA[try_sta — 20s]
+    TrySTA --> STAok{connected?}
+    STAok -- yes --> mDNS[MDNS.begin&#40;hostname&#41;] --> NTP[configTime]
+    STAok -- no --> AP
+    AP --> WebUp[web::begin]
+    NTP --> WebUp
+    WebUp --> UserAction([User opens web UI,<br/>enters WiFi, clicks Reboot])
+    UserAction --> Boot
+```
+
+---
+
+## 5. WebSocket protocol reference
+
+The protocol is intentionally tiny — five message types in total.
+
+### Client → device
+
+| `type` | Fields | Sender | Effect |
+|---|---|---|---|
+| `hello` | — | any | reply with full `state` snapshot |
+| `config` | `patch` (sparse settings object) | web UI | apply + persist (debounced) + broadcast |
+| `command` | `cmd` ∈ `"reboot"`, `"factory_reset"`, `"wake"` | web UI | the obvious thing; `wake` lights the panel for 20 s during the night window |
+
+### Device → client
+
+| `type` | Fields | Recipient | Trigger |
+|---|---|---|---|
+| `state` | `data` (full Snapshot, password redacted, plus `live.{night_blanked,night_active,time_ok}`) | the client that sent `hello`, or all clients after a config change | hello / config |
+| `radar` | `ac` (array of `{cs,rt,x,y,alt,gs,trk,vr,gnd,emg}`), `age` ms, `range` km | all clients, every 2 s | mode == Radar; lets the web UI render a live scope (positions are km east/north of home — clients dead-reckon with `gs`+`trk`) |
+
+### Message examples
+
+```json
+// client → device
+{ "type": "hello" }
+{ "type": "config", "patch": { "mode": 1 } }
+{ "type": "config", "patch": { "radar": { "range_km": 50, "theme": 1 } } }
+{ "type": "command", "cmd": "reboot" }
+```
+
+```json
+// device → client
+{ "type": "state", "data": { "mode": 0, "brightness": 200, "radar": {…}, … } }
+{ "type": "radar", "age": 4120, "range": 10, "ac": [ {…}, {…} ] }
+```
+
+---
+
+## 6. Memory layout
+
+| Region | Used by | Approx size |
+|---|---|---|
+| Flash (16 MB) | bootloader, partition table, app slot (6.5 MB), LittleFS (~5 MB), OTA slot, NVS | app slot at ~24% used |
+| DRAM (320 KB) | Arduino runtime, WiFi stack, two LVGL draw buffers (2×19.2 KB), LVGL pool (`LV_MEM_SIZE` 64 KB), AsyncTCP buffers, three poller task stacks (3×10 KB) | ~55% static |
+| QSPI PSRAM (2 MB) | Radar mode: HTTP response buffer (≤700 KB, transient) + filtered JsonDocument | mostly free |
+
+The two LVGL draw buffers are declared `DMA_ATTR` so they live in DRAM (DMA
+can't access PSRAM on ESP32-S3 SPI).
+
+**The tight resource is the internal DRAM system heap, and the LVGL pool is a
+separate static reservation that competes with it.** A TLS handshake (mbedtls,
+used by every poller) needs a large allocation; if the system heap is low it
+fails with `esp-sha: Failed to allocate buf memory` / `start_ssl_client: -1`
+and connections drop. This bit us twice:
+- 60-line draw buffers pushed static DRAM too high → TLS -1.
+- `LV_MEM_SIZE` was 96 KB but LVGL only uses ~34 KB across all screens, so
+  ~58 KB sat idle in the pool while the heap starved (free ~61 KB, max-block
+  ~35 KB, dipping to ~3 KB under load). Adding a third poller task tipped it
+  into frequent failures. Cutting `LV_MEM_SIZE` to 64 KB freed ~32 KB to the
+  heap (free → ~94 KB, min-free → ~38 KB, TLS failures → 0).
+
+Lesson: size `LV_MEM_SIZE` to measured LVGL usage (`lv_mem_monitor`) plus
+headroom — don't over-provision it — and watch `ESP.getFreeHeap()` /
+`getMaxAllocHeap()` when adding tasks, buffers, or pools.
+
+---
+
+## 7. Extending the system
+
+### 7.1 Add a new display mode
+
+1. Add an enum value in `settings::Mode` (settings.h) and raise the bound
+   checks in `settings::begin()` / `apply_json`.
+2. In `ui.cpp`, add a `screen_X` global + `build_X_screen()` (+ an `lv_timer`
+   if it animates — guard the callback on `current == Mode::X`).
+3. Call `build_X_screen()` from `ui::begin()` **and** `ui::apply_settings()`,
+   and add a case to `ui::set_mode()`.
+4. In the web UI (`data/index.html`), add a `<button class="mode-btn" data-mode="N">…</button>` tile
+   and (if it has settings) a card; register both in `MODE_CARDS` in `app.js`
+   so the tab logic shows them.
+5. If it needs external data, mirror `weather.{h,cpp}`: a mode-gated FreeRTOS
+   task on core 0 + a mutex-guarded snapshot the UI copies from.
+6. (Optional) add an `XConfig` struct in settings and wire it through
+   `apply_json` / `to_json`.
+
+### 7.2 Add a new settings field
+
+1. Add the field to the right config struct in `settings.h`.
+2. Add load/save lines in `settings::begin()` and `settings::save()` (NVS key
+   must be ≤ 15 chars).
+3. Add a `maybe_set<T>(patch["…"], …)` line in `settings::apply_json`.
+4. Add an output line in `settings::to_json`.
+5. Add an `<input>` + a wire-up call in `data/app.js`.
+
+### 7.3 Use the IMU (QMI8658)
+
+Pins are already in `board_config.h` (`IMU_SDA=6`, `IMU_SCL=7`, two
+interrupts on GPIO 3/4). Add an I²C driver, wire it into `main.cpp::loop()`,
+and expose tap/tilt events to `ui::*` for gestural mode switching.
+
+---
+
+## 8. Things you can ignore (but might wonder about)
+
+- **`LGFX_USE_V1` build flag** — tells LovyanGFX to use its v1 API. The class
+  hierarchy `lgfx::LGFX_Device` etc. lives in v1.
+- **`LV_CONF_INCLUDE_SIMPLE`** — tells LVGL to `#include "lv_conf.h"` from the
+  include path. `-I src` in build_flags makes it findable.
+- **`-std=gnu++17`** + `build_unflags = -std=gnu++11` — Arduino-ESP32 still
+  defaults to gnu++11. We force C++17 for `std::is_same_v`, structured
+  bindings, `if constexpr`.
+- **`board_build.arduino.memory_type = qio_qspi`** — QIO flash + QSPI (quad)
+  PSRAM. Must match the actual module: the unit tested has 2 MB quad PSRAM, so
+  `qio_qspi`. A genuine "R8" board with octal PSRAM would need `qio_opi`
+  instead — a mismatch fails PSRAM init at boot ("wrong PSRAM line mode").
+- **`ARDUINO_USB_CDC_ON_BOOT=0`** — routes `Serial` to UART0, which is what the
+  board's CH343 USB-UART bridge is wired to. Set to `1` only if you flash and
+  monitor through the ESP32-S3's *native* USB-C port instead.
+- **`default_16MB.csv` partition table** — gives us a 6.5 MB app slot + ~5 MB
+  LittleFS + OTA slot. The default 4 MB layout is too small once LVGL +
+  WiFi + AsyncWebServer are in.
+
+---
+
+## 9. Where to break things first
+
+If you're poking around to learn the codebase, in roughly this order:
+
+1. `data/app.js` — change a label, see it appear in the browser. Re-upload with `pio run -t uploadfs` (no firmware reflash needed).
+2. `ui.cpp` — change `SWEEP_PERIOD_MS` or a palette constant, reflash, watch the scope change.
+3. `settings::Snapshot` defaults in `settings.h` — change the default `range_km` and factory-reset to see it apply.
+4. `web_server::handle_ws_message` — add a new `type` to the WS protocol (e.g., `"ping"` that echoes `"pong"`) and call it from app.js.
+5. Build an entirely new mode (section 7.1) — `weather.{h,cpp}` is the template.

@@ -1,0 +1,484 @@
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include <atomic>
+#include <esp_display_panel.hpp>
+#include <lvgl.h>
+#include <lvgl_v8_port.h>
+#include <DisplayPanel.h>
+#include <Wireless.h>
+#include <ClockTools.h>
+#include <HttpServer.h>
+#include <OtaUpdate.h>
+#include <MqttTools.h>
+#include <ui.h>
+#include <vars.h>
+#include <structs.h>
+#include <images.h>
+#include <screens.h>
+#include <actions.h>
+#include "time_utils.h"
+#include "user_actions.h"
+#include "global_vars.h"
+#include "data_fetcher.h"
+#include "system_info.h"
+#include "http_data_handlers.h"
+#include <LogBuffer.h>
+
+static const char *TAG = "main";
+
+using namespace esp_panel::drivers;
+
+// ---------------------------------------------------------------------------
+// OTA hooks
+// ---------------------------------------------------------------------------
+
+static void on_ota_start(const char *new_version)
+{
+    ESP_LOGI(TAG, "OTA update starting: new version %s", new_version);
+
+    if (lvgl_port_lock(portMAX_DELAY)) {
+        flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_FIRMWARE_PROGRESS, Value(0));
+        flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_STATE, SystemState_FIRMWARE_UPDATE);
+        lvgl_port_unlock();
+    }
+    else {
+        ESP_LOGE(TAG, "Failed to lock LVGL mutex to show firmware update screen");
+    }
+}
+
+static void on_ota_progress(int percent)
+{
+    ESP_LOGI(TAG, "OTA progress: %d%%", percent);
+    if (lvgl_port_lock(portMAX_DELAY)) {
+        flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_FIRMWARE_PROGRESS, Value(percent));
+        lvgl_port_unlock();
+    }
+}
+
+static void on_ota_complete(bool success, const char *message)
+{
+    if (success) {
+        ESP_LOGI(TAG, "OTA complete (%s) — rebooting", message);
+    } else {
+        ESP_LOGE(TAG, "OTA failed: %s", message);
+    }
+
+    if (lvgl_port_lock(portMAX_DELAY)) {
+        flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_STATE, SystemState_RUNNING);
+        lvgl_port_unlock();
+    }
+    else {
+        ESP_LOGE(TAG, "Failed to lock LVGL mutex to dismiss firmware update screen");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-type dashboard data — written by MQTT callback, bus data also read
+// by recalculateDueTimes() in the main loop (hence the mutex).
+// ---------------------------------------------------------------------------
+
+Board *g_panel;
+
+static BusData      g_bus_data      = {};
+static SunData      g_sun_data      = {};
+static WeatherData  g_weather_data  = {};
+static RecyclingData g_recycling_data = {};
+static PresenceData  g_presence_data  = {};
+
+// Protects g_bus_data between the MQTT task and the main loop.
+static SemaphoreHandle_t s_bus_mutex = nullptr;
+
+// Set by the MQTT callback when new bus data arrives so the main loop
+// recalculates immediately rather than waiting for the next 5-second tick.
+static std::atomic<bool> s_bus_updated{false};
+std::atomic<bool> g_server_connected{false};
+
+static void update_recycling()
+{
+    time_t now = time(nullptr);
+    ArrayOfRecyclingValue recycling(g_recycling_data.num_collections);
+
+    for (int i = 0; i < g_recycling_data.num_collections; i++) {
+        char date[64] = {}, short_date[16] = {}, lead_time[16] = {};
+        time_t epoch = g_recycling_data.items[i].date_epoch;
+        if (epoch > 0) {
+            struct tm tm;
+            localtime_r(&epoch, &tm);
+            format_long_date(date,        sizeof(date),        &tm);
+            format_short_date(short_date, sizeof(short_date),  epoch, now);
+            format_lead_time(lead_time,   sizeof(lead_time),   epoch, now);
+        }
+        RecyclingValue item;
+        item.type(strcmp(g_recycling_data.items[i].type, "Recycling") == 0
+            ? RecyclingType_RECYCLING
+            : RecyclingType_GENERAL_WASTE);
+        item.date(date);
+        item.short_date(short_date);
+        item.lead_time(lead_time);
+        recycling.at(i, item);
+    }
+
+    if (lvgl_port_lock(portMAX_DELAY)) {
+        flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_RECYCLING, recycling);
+        lvgl_port_unlock();
+    }
+    else {
+        ESP_LOGE(TAG, "Failed to lock LVGL mutex to update recycling");
+    }
+}
+
+static void update_presence()
+{
+    time_t now = time(nullptr);
+    ArrayOfPresenceValue presence(g_presence_data.num_people);
+
+    for (int i = 0; i < g_presence_data.num_people; i++) {
+        char last_seen[16] = {};
+        if (!g_presence_data.items[i].connected) {
+            format_last_seen(last_seen, sizeof(last_seen),
+                             g_presence_data.items[i].last_seen_epoch, now);
+        }
+        PresenceValue item;
+        item.name(g_presence_data.items[i].name);
+        item.connected(g_presence_data.items[i].connected);
+        item.last_seen(last_seen);
+        presence.at(i, item);
+    }
+
+    if (lvgl_port_lock(portMAX_DELAY)) {
+        flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_PRESENCE, presence);
+        lvgl_port_unlock();
+    }
+    else {
+        ESP_LOGE(TAG, "Failed to lock LVGL mutex to update presence");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bus due-time recalculation — only called from the main loop task.
+// ---------------------------------------------------------------------------
+
+static void recalculateDueTimes()
+{
+    // Static so labels remain valid while referenced by the EEZ value.
+    static char bus_due_labels[BUS_STOP_COUNT][BUS_ARRIVAL_COUNT][8];
+    static int  bus_due_seconds[BUS_STOP_COUNT][BUS_ARRIVAL_COUNT];
+
+    // Snapshot under mutex so the MQTT task can safely update g_bus_data.
+    BusData bus;
+    xSemaphoreTake(s_bus_mutex, portMAX_DELAY);
+    bus = g_bus_data;
+    xSemaphoreGive(s_bus_mutex);
+
+    time_t now = time(nullptr);
+    for (int j = 0; j < BUS_STOP_COUNT; j++) {
+        for (int i = 0; i < BUS_ARRIVAL_COUNT; i++) {
+            time_t epoch = bus.stops[j].arrivals[i].due_epoch;
+            bus_due_seconds[j][i] = epoch > 0 ? (int)(epoch - now) : 0;
+            if (bus.stops[j].arrivals[i].route[0] == '\0') {
+                bus_due_labels[j][i][0] = '\0';
+            } else {
+                format_due_label(bus_due_labels[j][i], sizeof(bus_due_labels[j][i]), epoch, now);
+            }
+        }
+    }
+
+    ArrayOfBusStopValue bus_stops(BUS_STOP_COUNT);
+    for (int j = 0; j < BUS_STOP_COUNT; j++) {
+        ArrayOfBusArrivalValue arrivals(BUS_ARRIVAL_COUNT);
+        for (int i = 0; i < BUS_ARRIVAL_COUNT; i++) {
+            BusArrivalValue arrival;
+            arrival.route(bus.stops[j].arrivals[i].route);
+            arrival.destination(bus.stops[j].arrivals[i].destination);
+            arrival.due_label(bus_due_labels[j][i]);
+            arrival.due_seconds(bus_due_seconds[j][i]);
+            arrivals.at(i, arrival);
+        }
+        BusStopValue bus_stop;
+        bus_stop.name(bus.stops[j].name);
+        bus_stop.arrivals(arrivals);
+        bus_stops.at(j, bus_stop);
+    }
+
+    if (lvgl_port_lock(portMAX_DELAY)) {
+        flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_BUS_STOPS, bus_stops);
+        lvgl_port_unlock();
+    }
+    else {
+        ESP_LOGE(TAG, "Failed to lock LVGL mutex to recalculate due times");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Weather icon helper
+// ---------------------------------------------------------------------------
+
+static WeatherType icon_string_to_weather_type(const char *icon) {
+    if (strcmp(icon, "clear-day") == 0)          return WeatherType_CLEAR_DAY;
+    if (strcmp(icon, "clear-night") == 0)         return WeatherType_CLEAR_NIGHT;
+    if (strcmp(icon, "thunderstorm") == 0)        return WeatherType_THUNDERSTORM;
+    if (strcmp(icon, "rain") == 0)                return WeatherType_RAIN;
+    if (strcmp(icon, "snow") == 0)                return WeatherType_SNOW;
+    if (strcmp(icon, "sleet") == 0)               return WeatherType_SLEET;
+    if (strcmp(icon, "wind") == 0)                return WeatherType_WIND;
+    if (strcmp(icon, "fog") == 0)                 return WeatherType_FOG;
+    if (strcmp(icon, "cloudy") == 0)              return WeatherType_CLOUDY;
+    if (strcmp(icon, "partly-cloudy-day") == 0)   return WeatherType_PARTLY_CLOUDY_DAY;
+    if (strcmp(icon, "partly-cloudy-night") == 0) return WeatherType_PARTLY_CLOUDY_NIGHT;
+    if (strcmp(icon, "hail") == 0)                return WeatherType_HAIL;
+    return WeatherType_NONE;
+}
+
+// ---------------------------------------------------------------------------
+// MQTT message callback — runs on the MQTT client task
+// ---------------------------------------------------------------------------
+
+static void onMqttMessage(MqttTopic topic, const char *data, int len)
+{
+    // Helper: parse the raw payload as JSON. Caller must cJSON_Delete the result.
+    auto parse_json = [&]() -> cJSON * {
+        cJSON *root = cJSON_ParseWithLength(data, (size_t)len);
+        if (!root) ESP_LOGW(TAG, "Failed to parse JSON on topic %d", (int)topic);
+        return root;
+    };
+
+    switch (topic) {
+
+        case MqttTopic::BUS_STOPS: {
+            cJSON *json = parse_json(); if (!json) break;
+            BusData new_bus = {};
+            parse_bus_stops(json, new_bus);
+            cJSON_Delete(json);
+            xSemaphoreTake(s_bus_mutex, portMAX_DELAY);
+            g_bus_data = new_bus;
+            xSemaphoreGive(s_bus_mutex);
+            s_bus_updated = true; // trigger immediate recalculate in main loop
+            break;
+        }
+
+        case MqttTopic::WEATHER: {
+            cJSON *json = parse_json(); if (!json) break;
+            parse_weather(json, g_sun_data, g_weather_data);
+            cJSON_Delete(json);
+
+            WeatherValue weather;
+
+            WeatherCurrentValue current;
+            current.temperature(g_weather_data.current_temperature);
+            current.feels_like(g_weather_data.current_feels_like);
+            current.icon(icon_string_to_weather_type(g_weather_data.current_icon));
+            weather.current(current);
+
+            WeatherDayValue day;
+            day.min_temperature(g_weather_data.day_min_temperature);
+            day.max_temperature(g_weather_data.day_max_temperature);
+            day.precip_chance(g_weather_data.day_precip_chance);
+            day.precip_type(g_weather_data.day_precip_type);
+            weather.day(day);
+
+            ArrayOfWeatherHourValue hours(g_weather_data.num_hours);
+            for (int i = 0; i < g_weather_data.num_hours; i++) {
+                WeatherHourValue hour_val;
+                hour_val.hour(g_weather_data.hours[i].hour);
+                hour_val.icon(icon_string_to_weather_type(g_weather_data.hours[i].icon));
+                hour_val.temperature(g_weather_data.hours[i].temperature);
+                hour_val.feels_like(g_weather_data.hours[i].feels_like);
+                hour_val.precip_chance(g_weather_data.hours[i].precip_chance);
+                hour_val.wind_speed(g_weather_data.hours[i].wind_speed);
+                hour_val.uv_index(g_weather_data.hours[i].uv_index);
+                hours.at(i, hour_val);
+            }
+            weather.hours(hours);
+
+            char sun_time_str[8];
+            {
+                struct tm sun_tm;
+                localtime_r(&g_sun_data.time_utc, &sun_tm);
+                snprintf(sun_time_str, sizeof(sun_time_str), "%d:%02d", sun_tm.tm_hour, sun_tm.tm_min);
+            }
+            SunTimeValue sun;
+            sun.is_sunrise(g_sun_data.is_sunrise);
+            sun.time(sun_time_str);
+
+            if (lvgl_port_lock(portMAX_DELAY)) {
+                flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_WEATHER, weather);
+                flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_SUN, sun);
+                lvgl_port_unlock();
+            }
+            else {
+                ESP_LOGE(TAG, "Failed to lock LVGL mutex to update weather");
+            }
+            break;
+        }
+
+        case MqttTopic::RECYCLING: {
+            cJSON *json = parse_json(); if (!json) break;
+            parse_recycling(json, g_recycling_data);
+            cJSON_Delete(json);
+            update_recycling();
+            break;
+        }
+
+        case MqttTopic::PRESENCE: {
+            cJSON *json = parse_json(); if (!json) break;
+            parse_presence(json, g_presence_data);
+            cJSON_Delete(json);
+            update_presence();
+            break;
+        }
+
+        case MqttTopic::SYS_BROKER_VERSION: {
+            // Plain text payload — null-terminate into a stack buffer.
+            char version_buf[64];
+            size_t vlen = (size_t)len < sizeof(version_buf) - 1
+                          ? (size_t)len : sizeof(version_buf) - 1;
+            memcpy(version_buf, data, vlen);
+            version_buf[vlen] = '\0';
+            ESP_LOGI(TAG, "MQTT broker version: %s", version_buf);
+            update_mqtt_broker_version(version_buf);
+            break;
+        }
+
+        case MqttTopic::OTA: {
+            cJSON *json = parse_json(); if (!json) break;
+            const char *version = cjson_str(json, "version");
+            const char *url     = cjson_str(json, "url");
+
+            set_ota_information(version);
+
+            if (version[0] != '\0' && url[0] != '\0') {
+                ota_apply_mqtt_update(version, url);
+            } else {
+                ESP_LOGW(TAG, "OTA payload missing version or url");
+            }
+            cJSON_Delete(json);
+            break;
+        }
+
+        case MqttTopic::SERVER: {
+            cJSON *json = parse_json(); if (!json) break;
+            bool is_connected = cJSON_IsTrue(cJSON_GetObjectItem(json, "connected"));
+            cJSON_Delete(json);
+            g_server_connected = is_connected;
+
+            if (lvgl_port_lock(portMAX_DELAY)) {
+                flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_STATE,
+                    is_connected ? SystemState_RUNNING : SystemState_NO_DATA);
+                lvgl_port_unlock();
+            } else {
+                ESP_LOGE(TAG, "Failed to lock LVGL mutex to update server state");
+            }
+            break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// app_main
+// ---------------------------------------------------------------------------
+
+extern "C" void app_main(void)
+{
+    log_buffer_init();
+
+    g_panel = initialiseDisplayPanel();
+
+    ESP_LOGD(TAG, "Initializing LVGL");
+    lvgl_port_init(g_panel->getLCD(), g_panel->getTouch());
+
+    ESP_LOGD(TAG, "Creating UI");
+
+    while (!lvgl_port_lock(portMAX_DELAY)) {
+        ESP_LOGW(TAG, "Failed to lock LVGL mutex, retrying...");
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    //Start wifi before LVGL so SRAM is available
+    setWiFiStateCallback(update_network_information);
+    startWiFi();
+    httpd_handle_t server = startHttpServer();
+
+    ota_set_callbacks(on_ota_start, on_ota_progress, on_ota_complete);
+
+    ui_init();
+    lvgl_port_set_ui_tick_cb(ui_tick);
+    set_system_information();
+    lvgl_port_unlock();
+    init_cpu_statistics();
+
+    s_bus_mutex = xSemaphoreCreateMutex();
+
+    register_data_handlers(server);
+
+    mqtt_init(onMqttMessage);
+
+    static bool prevWifiConnected = false;
+    static uint64_t recalculateInterval = 5000;
+    static uint64_t lastRecalculateTime = 0;
+    static uint64_t statsInterval = 5000;
+    static uint64_t lastStatsTime = 0;
+    static int last_mday = -1;
+
+    while (true) {
+        uint64_t currentTime = esp_timer_get_time() / 1000ULL;
+
+        if (!isWiFiConnected()) {
+            if (prevWifiConnected) {
+                ESP_LOGW(TAG, "WiFi Disconnected");
+
+                if (lvgl_port_lock(portMAX_DELAY)) {
+                    flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_STATE, SystemState_NO_WIFI);
+                    lvgl_port_unlock();
+                    prevWifiConnected = false;
+                }
+            }
+        }
+        else {
+            if (!prevWifiConnected) {
+                ESP_LOGI(TAG, "WiFi Connected");
+
+                if (lvgl_port_lock(portMAX_DELAY)) {
+                    flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_STATE, SystemState_NO_DATA);
+                    lvgl_port_unlock();
+                    prevWifiConnected = true;
+                }
+
+                setRtcClock();
+            }
+
+            if (s_bus_updated || (currentTime - lastRecalculateTime >= recalculateInterval)) {
+                s_bus_updated = false;
+                lastRecalculateTime = currentTime;
+                recalculateDueTimes();
+            }
+
+            {
+                struct tm t;
+                time_t now = time(nullptr);
+                localtime_r(&now, &t);
+                if (last_mday >= 0 && t.tm_mday != last_mday) {
+                    ESP_LOGD(TAG, "Day changed, recalculating presence/recycling");
+                    update_recycling();
+                    update_presence();
+                }
+                last_mday = t.tm_mday;
+            }
+
+            if (lastStatsTime == 0 || (currentTime - lastStatsTime >= statsInterval)) {
+                lastStatsTime = currentTime;
+                ArrayOfMemoryUsageValue memory = buildMemoryUsage();
+                HardwareStatsValue hw_stats = buildHardwareStats();
+                if (lvgl_port_lock(portMAX_DELAY)) {
+                    flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_MEMORY_USAGE, memory);
+                    flow::setGlobalVariable(FLOW_GLOBAL_VARIABLE_HW_STATISTICS, hw_stats);
+                    lvgl_port_unlock();
+                }
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}

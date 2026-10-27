@@ -1,0 +1,1012 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file tab5-sensors-diagnostics.yaml
+# @role Entités système/diagnostic : WiFi (bloc wifi:, antenne, RSSI, IP/SSID),
+#       alimentations GPIO (internes), batterie (charge activée, état de charge, tension
+#       et niveau par l'INA226), statut API HA, uptime, RAM/loop time (debug),
+#       température coeur, horloge SNTP et intervals de la console système.
+# @batterie Batterie d'origine (discussion #278, 03/10/2026) : CHG_EN (pi4ioe2 P7),
+#           charge rapide (P5) à l'arrêt, état CHG_STAT (P6) lu toutes les 10 s, INA226
+#           en 0x41 (0x40 = ES7210). Testé par husyildiz avec la batterie d'origine
+#           (~7,2 V, la charge suit la réalité) ; l'auteur n'en a pas. Les entités de
+#           charge, tension et niveau sont désactivées par défaut.
+#           Chargeur géré (08/10/2026, tab5_batterie.h) : allumé au démarrage, il était
+#           laissé allumé sans batterie, chargeait dans le vide et faisait un léger
+#           souffle. L'interval de 1 s plus bas le commande d'après chargeur_pas() :
+#           présence lue chargeur coupé (sous 5,5 V = pas de batterie ; 1,9 V mesurés
+#           sans), coupé sans batterie, « Tab5 Limite de charge » (100 % ou 80 %) avec.
+#           Démarrage (16/10/2026) : CHG_EN coupé au setup, une sonde d'abord ; réveil de
+#           30 s seulement si elle ne voit rien, que le démarrage précédent a vu une
+#           batterie (tab5_batterie_memoire, en NVS) et que le redémarrage est normal.
+#           Sécurité (16/10/2026) : verrous thermique et électrique (tab5_batterie.h),
+#           « Tab5 Sécurité chargeur » et l'événement esphome.tab5_securite_chargeur.
+#           Batterie détectée : chaque lecture de l'INA226 passe par batterie_tension_ui
+#           (on_raw_value). Publiée par « Tab5 Batterie détectée » (activée par défaut) ;
+#           « Tab5 Batterie » vaut inconnu sans elle. Sur batterie : « Tab5
+#           Consommation » (W) et l'événement esphome.tab5_batterie_faible à 20 et 10 %.
+#           « Tab5 Mesure de consommation » (interrupteur, coupé par défaut) : INA226 lu
+#           toutes les 2 s pendant le test de packages/tab5_mesure_conso.yaml, 2 h au plus.
+#           Icône du bandeau d'état (04/10/2026) : niveau, charge et tension passés au C++
+#           (batterie_niveau_ui, batterie_charge_ui, batterie_tension_ui), affichée
+#           seulement si l'interrupteur « Tab5 Batterie montée » (tab5-ha-controls.yaml)
+#           est allumé ; une prise quand la batterie n'est pas détectée.
+#           Console système (06/10/2026) : la ligne « Batterie » relit le même état gardé
+#           par le C++ (update_console_batterie_ui, interval 2 s plus bas, console ouverte).
+#           « Tab5 Mode de charge » (09/10/2026, ADR-0045) : charge rapide (P5) en
+#           « Rapide », chargeur allumé seulement.
+# @wifi « Tab5 Wi-Fi éco » (09/10/2026, ADR-0045) : économie légère du Wi-Fi jamais, sur
+#       batterie ou toujours, appliquée à chaud (script tab5_wifi_eco_appliquer).
+# @demarrage « Tab5 Chronologie du démarrage » et « … (suite) » (10/10/2026,
+#       tab5_demarrage.h) : instant des étapes du démarrage, jusqu'à la fin de setup()
+#       puis après. Marquées ici par usb_5v_power, on_draw_start / on_draw_end, wifi
+#       on_connect, status_ha et le premier allumage du chargeur (interval de 1 s) ;
+#       ailleurs par le rétroéclairage (tab5-hardware.yaml), le premier style LVGL
+#       (tab5-styles.yaml) et l'on_boot de tab5-ha-hmi.yaml (marques seules, accord
+#       d'Axel du 10/10/2026). Liste et lecture : docs/performance.md.
+# @architecture_constraint Ce fichier ne DOIT contenir AUCUNE logique de présentation.
+#                         Les blocs on_value: doivent se contenter d'appeler des fonctions
+#                         C++ depuis tab5_custom.cpp (ex: update_console_diagnostics_ui(...) ).
+# @anti_pattern_evité Ne pas utiliser std::string ou to_string() ici (hot-path).
+# @ai_instruction Fichier issu de la scission de tab5-sensors.yaml (14/07/2026).
+#                 Les entités domotique (plantes, lumières, capteurs HA, audio)
+#                 vivent dans tab5-sensors-domotique.yaml. Un nouveau capteur
+#                 système (RAM, réseau, alimentation...) se déclare ici.
+# ============================================================================
+# Wi-Fi sans identifiants compilés (lot 6b, ADR-0020) : ils arrivent par Improv (USB,
+# `improv_serial` ci-dessous, depuis le flasheur web ou ESPHome Web) ou par le portail
+# de l'AP de secours, et restent en NVS d'une OTA à l'autre (emplacement fixe quand le
+# YAML n'a pas d'identifiants). Un YAML avec identifiants les rangerait sous le hash de
+# la config : ils ne passeraient pas d'un firmware à l'autre.
+wifi:
+  # Le mode au démarrage. « Tab5 Wi-Fi éco » (plus bas, ADR-0045) passe à chaud en
+  # économie légère, puis revient ici (wifi_eco_appliquer, tab5_console.cpp).
+  power_save_mode: NONE
+  # Connexion sans balayage (01/10/2026, mesure du démarrage) : la tablette retourne
+  # directement au point d'accès et au canal de sa dernière connexion, gardés en NVS
+  # (réécrits seulement s'ils changent, emplacement fixe sans identifiants compilés).
+  # Avant, le C6 balayait tous les canaux à chaque démarrage : ~2 s mesurées par le
+  # port USB, entre « scanning for networks » et la liste des réseaux. Premier
+  # démarrage, point d'accès éteint ou autre réseau : ESPHome repasse au balayage.
+  fast_connect: true
+  # Point d'accès de secours, conservé à dessein (audit du 06/09/2026, §4.1
+  # point 16) : avec `captive_portal:` (tab5-ha-hmi.yaml), c'est le chemin sans câble
+  # USB pour donner ou changer le réseau Wi-Fi. Il démarre tout de suite sur une
+  # tablette sans réseau enregistré, sinon après l'échec de la connexion (`ap_timeout`,
+  # 1 min par défaut). OUVERT depuis le lot 6b : un mot de passe écrit dans un dépôt
+  # public ne protège rien. Au pire, quelqu'un à portée change le réseau d'une tablette
+  # qui a perdu le sien ; il ne peut ni la flasher (signature) ni parler à son API (clé).
+  # Il se coupe aussi quand la fenêtre d'appairage expire (tab5-api-logic.yaml).
+  ap:
+    ssid: "Tab5 Fallback AP"
+  # Chronologie du démarrage (10/10/2026, tab5_demarrage.h) : première connexion.
+  on_connect:
+    - lambda: 'if (demarrage_marquer(EtapeDemarrage::WIFI)) id(tab5_chronologie_publier).execute();'
+
+# Improv par le port USB (lot 6b) : le flasheur web (lot 6c) ou ESPHome Web règlent le
+# Wi-Fi juste après le flash. Partage le port du logger (USB_SERIAL_JTAG, 115 200 bauds,
+# tab5-hardware.yaml), ce qu'improv_serial accepte sur le P4.
+improv_serial:
+
+# Alimentations : internes (`internal: true`), plus aucune entité HA. Elles ne servent
+# qu'à être allumées au démarrage (ALWAYS_ON), et « WiFi Power » coupé depuis HA rendait
+# la tablette injoignable jusqu'au `reboot_timeout` de l'API, 60 min plus tard (audit des
+# ressources du 26/09/2026, §6). Aucune automation ni lambda ne les lit.
+switch:
+  - platform: gpio
+    id: wifi_power
+    name: "WiFi Power"
+    internal: true
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 0
+    restore_mode: ALWAYS_ON
+
+  - platform: gpio
+    id: usb_5v_power
+    name: "USB Power"
+    internal: true
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 3
+    restore_mode: ALWAYS_ON
+    # Chronologie du démarrage (10/10/2026, tab5_demarrage.h) : allumée par son propre
+    # setup (priorité 800, composants matériels), avant l'attente bloquante de 1 s de
+    # l'on_boot 700. Marquer seulement : une lecture d'horloge, rien de publié ici.
+    on_turn_on:
+      - lambda: 'demarrage_marquer(EtapeDemarrage::EXPANDEUR);'
+
+  # Charge de la batterie d'origine (discussion #278, 03/10/2026) : sans CHG_EN (P7) à 1,
+  # rien ne lance le chargeur. M5Unified (Power_Class.inl, OUT_SET de 0x44) et la config
+  # de référence ESPHome (PR #1396 de devices.esphome.io) le mettent à 1 au démarrage :
+  # 30 s pour réveiller une batterie dont la protection a coupé (ici depuis le 16/10/2026 :
+  # seulement après une sonde qui ne voit rien, si le démarrage précédent a vu une
+  # batterie et que le redémarrage est normal, voir plus bas). Ensuite, commandé par
+  # l'interval de 1 s plus bas (chargeur_pas, tab5_batterie.h) : coupé sans batterie
+  # (08/10/2026 : allumé dans le vide, il soufflait), selon « Tab5 Limite de charge » avec.
+  # [AI-WARNING] Ne pas le remettre allumé en permanence : c'est le souffle continu
+  # d'une tablette sans batterie (docs/troubleshooting.md).
+  # [AI-WARNING] COUPÉ au setup depuis le 10/10/2026 (demande d'Axel), plus ALWAYS_ON :
+  # sans batterie, ces 30 s de charge dans le vide pendant le démarrage (8,39 V lus)
+  # faisaient un pic de consommation. Le premier pas de l'interval (fin de setup()) décide
+  # (chargeur_demarrer, tab5_batterie.h) : depuis le 16/10/2026 (panne du 11/10), une sonde
+  # chargeur coupé d'abord ; CHG_EN ne s'allume qu'après une lecture ≥ 5,5 V, ou pour le
+  # réveil de 30 s si rien n'est vu, que le démarrage précédent a vu une batterie
+  # (globals tab5_batterie_memoire, en NVS) et que le redémarrage n'est pas anormal
+  # (journal_demarrage_anormal : une boucle de plantages ne rallume plus le chargeur).
+  # [AI-WARNING] Ne pas remettre le réveil avant la sonde : premier démarrage sans
+  # batterie (modèle vendu sans) et boucles de redémarrages chargeaient dans le vide.
+  # Batterie neuve ou totalement plate posée sur une tablette qui n'en avait pas : allumer
+  # « Tab5 Batterie montée » la réveille (docs/hardware.md, Battery).
+  - platform: gpio
+    id: charge_enable
+    name: "Charge Enable"
+    internal: true
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 7
+    restore_mode: ALWAYS_OFF
+
+  # nCHG_QC_EN (P5, actif bas) : charge rapide ARRÊTÉE au démarrage, comme la config de
+  # référence ESPHome (M5Unified l'active au démarrage). Tablette branchée : la charge
+  # standard demande moins de courant au chargeur USB (docs/hardware.md, Battery), la
+  # rapide chauffe plus. M5Unified appelle les deux modes 500 et 1 000 mA
+  # (setChargeCurrent), non mesuré. Depuis le 09/10/2026 (ADR-0045), commandé par
+  # l'interval de 1 s du chargeur d'après « Tab5 Mode de charge » : allumé seulement en
+  # « Rapide » ET chargeur allumé (charge_rapide_voulue, tab5_batterie.h).
+  - platform: gpio
+    id: quick_charge
+    name: "Quick Charge"
+    internal: true
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 5
+      inverted: true
+    restore_mode: ALWAYS_OFF
+
+  - platform: gpio
+    id: wifi_antenna_int_ext
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 0
+
+  - platform: gpio
+    id: external_5v_power
+    name: "External 5V Power"
+    internal: true
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 2
+    restore_mode: ALWAYS_ON
+
+  # Mesure de consommation (08/10/2026, test de packages/tab5_mesure_conso.yaml) :
+  # allumé, l'INA226 est lu toutes les 2 s au lieu de 60 s (interval plus bas), et
+  # « Tab5 Consommation » suit à chaque lecture. Coupé au démarrage et au bout de 2 h
+  # (script tab5_mesure_conso_fin) : un test arrêté en route ne le laisse pas allumé.
+  - platform: template
+    id: tab5_mesure_conso
+    name: "Tab5 Mesure de consommation"
+    icon: mdi:chart-bell-curve
+    entity_category: config
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - script.execute: tab5_mesure_conso_fin
+    on_turn_off:
+      - script.stop: tab5_mesure_conso_fin
+
+binary_sensor:
+  # CHG_STAT (P6), 1 = en charge (M5Unified isCharging, config de référence ESPHome,
+  # dont vient le tirage vers le bas). Lu par l'interval de 10 s plus bas ; un
+  # changement n'est publié que s'il tient 30 s (battements de fin de charge).
+  # Sans batterie, il dit « en charge » (relevé sur la tablette de l'auteur, 03/10/2026) :
+  # les trois entités de la batterie sont désactivées par défaut dans HA, à activer
+  # quand la batterie est montée.
+  - platform: gpio
+    id: batterie_en_charge
+    name: "Tab5 Batterie en charge"
+    device_class: battery_charging
+    entity_category: diagnostic
+    disabled_by_default: true
+    pin:
+      pi4ioe5v6408: pi4ioe2
+      number: 6
+      mode: INPUT_PULLDOWN
+    filters:
+      - delayed_on_off: 30s
+    # Icône de la batterie dans le bandeau d'état (éclair pendant la charge), visible
+    # si l'interrupteur « Tab5 Batterie montée » est allumé (tab5-ha-controls.yaml).
+    on_state:
+      - lambda: 'batterie_charge_ui(x);'
+      # Mode économie (tab5-economie.yaml) : la charge reprend, la tablette n'est plus
+      # sur batterie, sans attendre la lecture suivante du courant.
+      # Consommation inconnue sur secteur (batterie_consommation, tab5_batterie.h).
+      - lambda: |-
+          if (economie_charge(x)) {
+            id(tab5_sur_batterie).publish_state(false);
+            id(batterie_consommation_w).publish_state(batterie_consommation(NAN, false));
+          }
+      - script.execute: tab5_economie_appliquer
+
+  # Batterie détectée (discussion #278, 05/10/2026) : la décision de la tablette, d'après
+  # la tension lue chargeur coupé (batterie_tension_ui, on_raw_value de batterie_tension
+  # plus bas ; règle dans tab5_batterie.h, 08/10/2026). Publiée à chaque changement ;
+  # inconnue les 30 premières secondes. Activée par défaut : c'est elle qui dit, sans
+  # batterie, que la tension et le niveau ne veulent rien dire.
+  - platform: template
+    id: batterie_detectee
+    name: "Tab5 Batterie détectée"
+    icon: mdi:battery-check
+    entity_category: diagnostic
+
+  # Sécurité du chargeur (16/10/2026, après la panne du 11/10) : allumé quand un verrou
+  # coupe le chargeur (tab5_batterie.h) : thermique (CPU ≥ 55 °C, gardé en NVS) ou
+  # électrique (tension trop haute ou aucun courant de charge, deux fois dans l'heure :
+  # jusqu'au redémarrage). Publié par l'interval du chargeur ; chaque coupure part aussi
+  # dans l'événement esphome.tab5_securite_chargeur (garde (h) de packages/tab5_health.yaml).
+  - platform: template
+    id: chargeur_securite
+    name: "Tab5 Sécurité chargeur"
+    device_class: problem
+    icon: mdi:battery-alert-variant-outline
+    entity_category: diagnostic
+
+  - platform: status
+    name: "HA API Status"
+    id: status_ha
+    on_state:
+      - lambda: 'set_icon_active_ui(id(icon_ha), x, UIColor.INFO, UIColor.INACTIVE);'
+      # Chronologie du démarrage (tab5_demarrage.h) : premier client de l'API.
+      - lambda: |-
+          if (x && demarrage_marquer(EtapeDemarrage::API)) id(tab5_chronologie_publier).execute();
+      # Pré-fetch calendrier au reconnect HA (rising edge) : recharge le mois
+      # courant + M+1 pour que le popup s'ouvre instantanément même après une coupure.
+      - if:
+          condition:
+            binary_sensor.is_on: status_ha
+          then:
+            - delay: 2s
+            - script.execute: tab5_cal_prefetch_boot
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      id: sys_wifi_ip
+      name: "Tab5 IP"
+    ssid:
+      id: sys_wifi_ssid
+      name: "Tab5 SSID"
+
+  # Raison du dernier démarrage (esp_reset_reason), publiée une fois par démarrage :
+  # « Software Reset », « Exception », « Task Watchdog », « Brownout », « Power On »…
+  # L'historique HA dit si un redémarrage était un plantage (26/09/2026, journal des
+  # démarrages, voir Tab5/ecran/tab5_journal.cpp).
+  # Premier démarrage après une installation par l'USB, flash effacée (28/09/2026) : le
+  # flash finit par un reset du chien de garde RTC, « other watchdogs » devient « First
+  # boot after install (other watchdogs) », que la garde « reboot inattendu » de
+  # packages/tab5_health.yaml ne signale pas (voir Tab5/ecran/tab5_journal.cpp).
+  # Appui sur le bouton d'alimentation (06/10/2026, discussion #278) : chien de garde
+  # sans rapport de plantage. ESPHome y affichait la source du dernier redémarrage
+  # DEMANDÉ (« Reboot request from esphome.ota », jamais effacée) : le filtre publie
+  # « Power button or RTC watchdog (rst 0x..) » à la place, que la garde ne signale pas
+  # non plus ; avec un rapport de plantage, « Crash, other watchdogs (rst 0x..) ».
+  - platform: debug
+    reset_reason:
+      name: "Tab5 Raison du redémarrage"
+      filters:
+        - lambda: return journal_raison_ha(x);
+
+  # Version du logiciel ESP-Hosted du co-processeur Wi-Fi (ESP32-C6), qu'ESPHome ne met
+  # pas à jour : celle installée en usine tant que personne ne l'a reflashé. Lue une
+  # fois, Wi-Fi connecté (la requête passe par le C6). Chaque essai peut bloquer la
+  # boucle jusqu'à 1 s si le C6 ne répond pas : 3 essais au plus, puis « Unknown »
+  # (« inconnue » avant le 24/10/2026 : l'état est lu par HA, en anglais, ADR-0070 ; pas
+  # « unknown » en minuscules, l'état spécial de HA pour « aucune valeur »).
+  # `carte_c6_version` (carte-*.yaml) : false quand le C6 de la carte ne répond jamais à
+  # cette requête (Waveshare 7B, firmware d'usine) : « Unknown » tout de suite, sans
+  # requête. Mesuré sur la 7B le 16/10/2026 : 3 à 4 essais après chaque démarrage, chacun
+  # « template.text_sensor took 1001 ms » (Loop Time à 1 021 ms), l'écran figé pendant ce temps.
+  - platform: template
+    id: sys_c6_version
+    name: "Tab5 C6 Version"
+    icon: "mdi:chip"
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      static uint8_t essais = 0;
+      if (essais >= 3) return {};
+      if (!${carte_c6_version}) { essais = 3; return std::string("Unknown"); }
+      if (!network::is_connected()) return {};
+      char buf[16];
+      if (read_c6_firmware_version(buf, sizeof(buf))) { essais = 3; return std::string(buf); }
+      if (++essais >= 3) return std::string("Unknown");
+      return {};
+
+  # Préfixe des actions de CETTE tablette (ADR-0063, plusieurs écrans) : HA appelle
+  # `esphome.<préfixe>_tab5_maj_…`, où le préfixe est le nom ESPHome de l'appareil
+  # (`tab5_nom`, « - » remplacés par « _ »). HA ne lit pas ce nom (sa fiche d'appareil
+  # n'a que le nom affiché et l'adresse MAC) : la tablette le donne ici, et
+  # custom_templates/tab5_tablette.jinja (tab5_destinataires) l'y lit. Une valeur fixe,
+  # publiée dans les 5 s qui suivent le démarrage (premier passage d'un intervalle,
+  # esphome/core/scheduler.cpp), puis lue par HA à chaque abonnement.
+  - platform: template
+    id: sys_prefixe_actions
+    name: "Tab5 Préfixe des actions"
+    icon: "mdi:tag-outline"
+    entity_category: diagnostic
+    update_interval: 24h
+    lambda: 'return std::string("${ (tab5_nom | default(''tab5-ha-hmi'')) | replace(''-'', ''_'') }");'
+
+  # Chronologie du démarrage (10/10/2026, demande d'Axel ; Tab5/socle/tab5_demarrage.h),
+  # en deux textes de moins de 255 caractères (limite d'un état de Home Assistant) :
+  # « ctor=…; objets=…; setup=…; … zones=… » jusqu'à la fin de setup(), puis
+  # « ordo=…; retro=…; dessin=…; … chargeur=… » ; en ms depuis l'initialisation d'esp_timer
+  # par ESP-IDF (ni la ROM ni le bootloader, ~0,8 s le 01/10/2026). « - » : étape pas
+  # encore vue (chargeur : pas allumé, aucune batterie au démarrage précédent). Publiés
+  # par le script tab5_chronologie_publier à la première image, puis à chaque étape
+  # d'après setup() (jamais pendant setup()) ; Home Assistant lit le dernier état à son
+  # abonnement. Lecture : docs/performance.md, « Chronologie du démarrage ».
+  - platform: template
+    id: sys_chronologie
+    name: "Tab5 Chronologie du démarrage"
+    icon: "mdi:timer-outline"
+    entity_category: diagnostic
+    update_interval: never
+  - platform: template
+    id: sys_chronologie_suite
+    name: "Tab5 Chronologie du démarrage (suite)"
+    icon: "mdi:timer-outline"
+    entity_category: diagnostic
+    update_interval: never
+
+sensor:
+  # Uptime en deux capteurs (audit des ressources du 26/09/2026, H4) :
+  # - en secondes, pour la console seulement : sans `name:`, il reste interne ;
+  # - pour HA, l'heure du dernier démarrage, publiée UNE fois par démarrage, au
+  #   premier rappel de synchro de `sntp_time` où l'heure est valide
+  #   (`uptime_timestamp_sensor.cpp` ne republie jamais). Après un redémarrage
+  #   logiciel l'heure système survit : ce rappel part alors dès la première boucle,
+  #   avant le Wi-Fi. Avant, la valeur en secondes partait chaque minute : 1 440
+  #   lignes par jour en base et autant d'exécutions de la garde « reboot inattendu »
+  #   de packages/tab5_health.yaml.
+  #   Même nom que l'ancien capteur, donc même entité HA
+  #   (sensor.m5stack_tab5_home_assistant_hmi_tab5_uptime), qui devient un horodatage.
+  #   Précision ±64 s : l'état passe par un float 32 bits, qui arrondit un horodatage
+  #   Unix au multiple de 128 s (reboot à 19:36:29 UTC publié 19:35:28, le 26/09/2026).
+  #   Mise à jour depuis l'ancien capteur en secondes : recharger l'intégration ESPHome
+  #   dans HA, sinon l'entité garde son unité « s » et reste `unavailable`
+  #   (docs/troubleshooting.md).
+  - platform: uptime
+    id: sys_uptime
+    update_interval: 60s
+    on_value:
+      - lambda: |-
+          if (!reglages_page_visible(REGLAGES_PAGE_SYSTEME)) return;
+          update_console_uptime_label(id(lbl_sys_uptime_val), x);
+
+  - platform: uptime
+    type: timestamp
+    name: "Tab5 Uptime"
+    time_id: sntp_time
+
+  - platform: wifi_signal
+    id: sys_wifi_rssi
+    name: "Tab5 WiFi Signal"
+    update_interval: 60s
+    # ≈ 42 lignes/h dans la base HA pour ±1 dB de bruit : publié quand le signal
+    # bouge de 2 dB, et au moins toutes les 15 min pour le graphe (audit 26/09, lot 3).
+    filters:
+      - or:
+          - throttle: 15min
+          - delta: 2.0
+    on_value:
+      - lambda: |-
+          if (!reglages_page_visible(REGLAGES_PAGE_SYSTEME)) return;
+          update_console_rssi_label(id(lbl_sys_rssi_val), x);
+
+  - platform: internal_temperature
+    id: sys_core_temp
+    name: "Tab5 Core Temp"
+    update_interval: 10s
+    filters:
+      - or:
+          - throttle: 60s
+          - delta: 1.0
+    on_value:
+      - lambda: |-
+          chargeur_thermique_releve(x, millis());
+          if (!reglages_page_visible(REGLAGES_PAGE_SYSTEME)) return;
+          update_console_temp_label(id(lbl_sys_temp_val), x);
+
+  - platform: debug
+    free:
+      id: sys_free_heap
+      name: "Tab5 Free Ram"
+    loop_time:
+      id: sys_loop_time
+      name: "Tab5 Loop Time"
+
+  # Mesures de référence des expériences de performance (audit du 25/09/2026, §3.3),
+  # publiées chaque minute comme le temps de boucle.
+  # Image LVGL la plus longue de la minute écoulée : rendu + envoi à l'écran, de
+  # LV_EVENT_RENDER_START à LV_EVENT_REFR_READY (on_draw_start / on_draw_end, bloc
+  # lvgl: plus bas). 0 = aucune image dessinée pendant la minute.
+  # `internal: true` (audit ressources du 26/09/2026, lot 2) : la campagne de mesure est
+  # close et la valeur change chaque minute — ≈ 1 500 lignes par jour dans la base HA
+  # pour rien. Un capteur interne n'apparaît plus non plus dans `esphome logs` (vérifié
+  # après le flash du 26/09) : pour une nouvelle mesure, retirer `internal: true`.
+  - platform: template
+    id: sys_draw_max
+    name: "Tab5 Draw Max"
+    internal: true
+    unit_of_measurement: ms
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      const float v = id(draw_max_us) / 1000.0f;
+      id(draw_max_us) = 0;
+      return v;
+
+  # Pile libre minimale de la boucle ESPHome depuis le démarrage (16 Ko en tout, #150).
+  # La lambda tourne dans la boucle elle-même : nullptr = la tâche courante.
+  - platform: template
+    id: sys_stack_free
+    name: "Tab5 Stack Free Min"
+    unit_of_measurement: B
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: 'return (float) uxTaskGetStackHighWaterMark(nullptr);'
+
+  # Tension de la batterie (INA226, présent en 0x41 sur la tablette de l'auteur le
+  # 26/09/2026 ; 0x40, défaut d'ESPHome, est l'ES7210). Shunt et max_current de la
+  # config de référence ESPHome, utiles au seul courant. Publiée à 50 mV
+  # près ou toutes les 15 min (50 mV : 1 à 20 % du niveau selon la zone de la courbe
+  # de décharge, le plus sur le plateau 8,00-8,05 V, 62-81 %). Sans batterie, chargeur allumé, elle lit le
+  # chargeur : 4,2 V (husyildiz), 4,2 ↔ 8,39 V ou 5,71 V stable (tablette de l'auteur,
+  # 03 et 04/10/2026) ; chargeur coupé, 1,83 à 1,94 V (08/10/2026). D'où
+  # disabled_by_default, et « Tab5 Batterie détectée ».
+  # ESPHome lit la tension avant le courant à chaque mesure (ina226.cpp) : quand le
+  # courant arrive, « batterie détectée » a déjà vu la lecture du même instant.
+  # Une lecture de plus à la fin d'une sonde du chargeur (component.update, interval de
+  # 1 s plus bas) : la présence est décidée 8 s après la coupure, pas à la minute suivante.
+  - platform: ina226
+    id: ina226_batterie
+    i2c_id: bsp_bus
+    address: 0x41
+    shunt_resistance: 0.005ohm
+    max_current: 8.192A
+    adc_averaging: 16
+    update_interval: 60s
+    bus_voltage:
+      id: batterie_tension
+      name: "Tab5 Tension batterie"
+      accuracy_decimals: 2
+      entity_category: diagnostic
+      disabled_by_default: true
+      filters:
+        - or:
+            - throttle: 15min
+            - delta: 0.05
+      # Chaque lecture (toutes les 60 s, avant les filtres) décide si la batterie est là
+      # quand le chargeur est coupé (tab5_batterie.h). Au changement : « Tab5 Batterie
+      # détectée », et le niveau recalculé depuis cette lecture (sinon, tension stable, il
+      # attendrait jusqu'à 15 min la suivante publiée).
+      on_raw_value:
+        - lambda: |-
+            if (batterie_tension_ui(x, millis())) {
+              id(batterie_detectee).publish_state(batterie_presente());
+              id(batterie_niveau).publish_state(x);
+            }
+    # Courant de la batterie (06/10/2026, mode économie) : + = elle se décharge, la
+    # tablette tourne sur elle ; − = elle charge. Sens d'après M5Unified
+    # (getBatteryCurrent : le shunt du Tab5 est câblé pour que la charge se lise
+    # négative ; ESPHome publie le registre signé tel quel), vu le 07/10/2026 sur la
+    # tablette de husyildiz. Chaque lecture (avant les filtres) décide « Tab5 Sur
+    # batterie » (tab5_economie.h), sauf pendant une sonde du chargeur (coupé alors que
+    # la tablette est peut-être branchée), puis « Tab5 Consommation ». Sans batterie il
+    # ne veut rien dire : désactivé par défaut, comme la tension.
+    current:
+      id: batterie_courant
+      name: "Tab5 Courant batterie"
+      accuracy_decimals: 3
+      entity_category: diagnostic
+      disabled_by_default: true
+      filters:
+        - or:
+            - throttle: 15min
+            - delta: 0.05
+      # Verrou électrique (16/10/2026) : chargeur allumé, un courant nul pendant 30 s est la
+      # signature d'une charge dans le vide (chargeur_courant, tab5_batterie.h).
+      on_raw_value:
+        - lambda: |-
+            chargeur_courant(x, millis());
+            if (chargeur_sonde_en_cours(millis())) return;
+            economie_courant(x, batterie_presente(), id(batterie_en_charge).state);
+            id(tab5_sur_batterie).publish_state(economie_sur_batterie());
+            id(batterie_consommation_w).publish_state(batterie_consommation(x, economie_sur_batterie()));
+        - script.execute: tab5_economie_appliquer
+
+  # Niveau d'après la tension, courbe de décharge mesurée sur un Tab5 (15/10/2026,
+  # discussion #278 ; avant, la droite 6,0 → 8,23 V de la référence ESPHome, puis la table
+  # Samsung de la 3.9.0-rc.2) : 6,6 V = 0 %, 8,35 V = 100 % ; trop haut pendant la charge
+  # (batterie_niveau_pct, mesure et limites de la table dans tab5_batterie.h). Inconnu (pas 0 ni 100 %) tant que la batterie n'est pas détectée :
+  # sans batterie, le 8,39 V du chargeur donnait 100 % et le 5,71 V 0 %.
+  - platform: copy
+    source_id: batterie_tension
+    id: batterie_niveau
+    name: "Tab5 Batterie"
+    device_class: battery
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    disabled_by_default: true
+    filters:
+      - lambda: 'return batterie_niveau_de(x);'
+    # Glyphe et couleur de l'icône du bandeau (même échelle que le téléphone,
+    # get_battery_color) ; NAN = point d'interrogation gris, ou la prise si la batterie
+    # n'est pas détectée (batterie_peindre lit la décision, pas ce niveau).
+    on_value:
+      - lambda: 'batterie_niveau_ui(x);'
+      # Mode économie : à 35 % ou moins sur batterie, la luminosité au plus bas.
+      - lambda: 'economie_niveau(x);'
+      - script.execute: tab5_economie_appliquer
+      # Batterie faible (08/10/2026) : sur batterie, sous 20 % puis sous 10 %, une fois
+      # par seuil (batterie_alerte, tab5_batterie.h). HA prévient le téléphone (garde
+      # « batterie faible » de packages/tab5_health.yaml).
+      - lambda: |-
+          const int seuil = batterie_alerte(x, economie_sur_batterie());
+          if (seuil > 0) id(tab5_batterie_faible).execute(tab5_float_vers_int(x, 0, 100, 0), seuil);
+
+  # Consommation de la tablette sur batterie (08/10/2026, demande d'Axel) : tension ×
+  # courant de l'INA226, à chaque lecture du courant (60 s, 2 s pendant une mesure de
+  # consommation). Inconnue sur secteur : le
+  # courant de l'USB n'est pas mesuré. Activée par défaut : sans batterie, elle reste
+  # inconnue et ne coûte rien.
+  - platform: template
+    id: batterie_consommation_w
+    name: "Tab5 Consommation"
+    device_class: power
+    state_class: measurement
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+    icon: mdi:flash
+    entity_category: diagnostic
+    update_interval: never
+
+select:
+  # Limite de charge de la batterie (08/10/2026, demande d'Axel) : « 80 % » pour une
+  # tablette branchée en permanence (arrêt à 80 %, reprise à 70 %, au moins 10 min
+  # d'arrêt ; tab5_batterie.h). Sans batterie, le chargeur reste coupé quel que soit le
+  # choix. Gardé en mémoire : la tablette garde l'INDEX, une option nouvelle s'ajoute à
+  # la fin, avec sa valeur dans LimiteCharge (tests/test_batterie.py relit les deux).
+  - platform: template
+    id: tab5_limite_charge
+    name: "Tab5 Limite de charge"
+    icon: mdi:battery-charging-80
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - "100 %"
+      - "80 %"
+    initial_option: "100 %"
+    on_value:
+      # Page Batterie des Réglages (tab5-reglages.yaml) : repeinte s'il a déjà été ouvert.
+      - script.execute: tab5_reglages_sync_ui
+
+  # Mode de charge de la batterie (09/10/2026, demande d'Axel ; ADR-0045) : « Classic »
+  # (le défaut, le comportement d'avant : charge rapide arrêtée) ou « Fast »
+  # (nCHG_QC_EN, `quick_charge`). Sans effet chargeur coupé (sans batterie, pendant une
+  # sonde, en pause à 80 %) : l'interval de 1 s plus bas ne l'allume qu'avec CHG_EN.
+  # Gardé en mémoire : la tablette garde l'INDEX, une option nouvelle s'ajoute à la fin,
+  # avec sa valeur dans ModeCharge (tests/test_batterie.py relit les deux). Options en
+  # anglais, lues par HA (ADR-0070 ; « Classique », « Rapide » avant le 24/10/2026).
+  - platform: template
+    id: tab5_mode_charge
+    name: "Tab5 Mode de charge"
+    icon: mdi:battery-charging-high
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - "Classic"
+      - "Fast"
+    initial_option: "Classic"
+    on_value:
+      - script.execute: tab5_reglages_sync_ui
+
+  # Wi-Fi éco (09/10/2026, demande d'Axel ; ADR-0045) : économie légère du Wi-Fi
+  # (WIFI_PS_MIN_MODEM, envoyée au C6 par ESP-Hosted) jamais (le défaut, le comportement
+  # d'avant : power_save_mode NONE plus haut), sur batterie ou toujours, comme « Tab5
+  # Économie d'énergie » ; jamais pendant la voix, un son ou une OTA (wifi_eco_voulu,
+  # tab5_economie.h). Appliqué à chaud par le script tab5_wifi_eco_appliquer. Options en
+  # anglais, lues par HA (ADR-0070 ; « Jamais », « Sur batterie », « Toujours » avant le
+  # 24/10/2026), dans l'ordre de « Tab5 Économie d'énergie ».
+  - platform: template
+    id: tab5_wifi_eco
+    name: "Tab5 Wi-Fi éco"
+    icon: mdi:wifi-cog
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - "Never"
+      - "On battery"
+      - "Always"
+    initial_option: "Never"
+    on_value:
+      - script.execute: tab5_wifi_eco_appliquer
+      - script.execute: tab5_reglages_sync_ui
+
+  - platform: template
+    id: wifi_antenna_select
+    name: "WiFi Antenna"
+    options:
+      - "Internal"
+      - "External"
+    optimistic: true
+    on_value:
+      - if:
+          condition:
+            lambda: return i == 0;
+          then:
+            - switch.turn_off: wifi_antenna_int_ext
+          else:
+            - switch.turn_on: wifi_antenna_int_ext
+
+time:
+  # Fuseau horaire de Home Assistant (lot 6b, ADR-0020), plus de `tab5_fuseau` : HA
+  # (≥ 2026.3) l'envoie avec l'heure, à chaque connexion puis toutes les 6 h, et
+  # ESPHome l'applique à toutes les horloges (sntp et rx8130 compris). Rien ne le garde
+  # d'un démarrage à l'autre : fuseau_memoriser() le range en NVS (tick minute
+  # ci-dessous) et fuseau_restaurer() le remet au démarrage (interval plus bas), pour
+  # que le réveil sonne à l'heure locale même quand HA manque après une coupure. Avant
+  # la toute première connexion à HA, c'est le fuseau du PC qui a compilé (UTC pour
+  # un firmware compilé par la CI). SNTP reste la source de l'heure elle-même.
+  - platform: homeassistant
+    id: ha_time
+    update_interval: 6h
+    on_time_sync:
+      then:
+        - lambda: 'fuseau_recu_de_ha();'
+
+  - platform: sntp
+    id: sntp_time
+    # Peint l'horloge dès la 1re sync NTP (sinon placeholders YAML jusqu'au
+    # prochain tick minute de on_time). Indépendant de HA.
+    on_time_sync:
+      then:
+        # Recale l'horloge matérielle à chaque synchro NTP (elle stocke l'heure UTC).
+        - rx8130.write_time:
+            id: rtc_time
+        - lambda: |-
+            auto t_now = id(sntp_time).now();
+            if (t_now.is_valid()) {
+              update_clock_date_ui(id(lbl_date),
+                  t_now.hour, t_now.minute, t_now.day_of_week, t_now.day_of_month, t_now.month);
+            }
+    on_time:
+      - seconds: 0
+        minutes: "*"
+        then:
+          - lambda: |-
+              auto t_now = id(sntp_time).now();
+              if (t_now.is_valid()) {
+                update_clock_date_ui(id(lbl_date),
+                    t_now.hour, t_now.minute, t_now.day_of_week, t_now.day_of_month, t_now.month);
+              }
+              // Décompte « dans N mn » de la phrase pluie, fait ici depuis le lot 4c :
+              // HA n'a plus à renvoyer la phrase à chaque minute.
+              rain_phrase_tick();
+              // Fuseau reçu de HA (lot 6b) : rangé en NVS s'il a changé, pour le
+              // prochain démarrage. Simple comparaison en RAM le reste du temps.
+              fuseau_memoriser();
+
+  # Horloge matérielle RX8130 (0x32 sur bsp_bus, sauvegardée par un supercondensateur
+  # de 70 000 µF) : le Tab5 a l'heure dès le démarrage, même sans réseau (horloge,
+  # réveil). Lue une seule fois au démarrage (interval plus bas), écrite à chaque synchro
+  # NTP. Pas de lecture périodique : elle recalerait l'heure système à la seconde près
+  # et pourrait faire sauter les déclencheurs « on_time ».
+  # Au setup, le composant écrit ses registres de contrôle, dont la charge du
+  # supercondensateur (comme M5Unified, la bibliothèque de M5Stack).
+  - platform: rx8130
+    id: rtc_time
+    i2c_id: bsp_bus
+    update_interval: never
+    on_time_sync:
+      then:
+        - lambda: |-
+            auto t_now = id(sntp_time).now();
+            if (t_now.is_valid()) {
+              update_clock_date_ui(id(lbl_date),
+                  t_now.hour, t_now.minute, t_now.day_of_week, t_now.day_of_month, t_now.month);
+            }
+
+interval:
+  # Heure de l'horloge RX8130 au démarrage, avant le réseau. Un interval s'exécute pour la
+  # première fois dans les 5 s qui suivent le setup (décalage aléatoire du planificateur
+  # d'ESPHome) : pas besoin de toucher à on_boot. Ensuite, une fois par jour, sans effet
+  # tant que l'heure système est valide.
+  # `id` (ADR-0061) : une carte sans RX8130 (carte-waveshare-7b.yaml) retire cet interval
+  # par `!remove` et garde seulement fuseau_restaurer(). Sans effet sur le Tab5.
+  - interval: 24h
+    id: tab5_rtc_demarrage
+    then:
+      - lambda: |-
+          // Fuseau du dernier passage de HA (lot 6b), avant de lire l'horloge. N'agit
+          // qu'au premier appel, au démarrage ; HA le remplacera à sa prochaine connexion.
+          fuseau_restaurer();
+          if (id(sntp_time).now().is_valid()) return;
+          id(rtc_time).read_time();
+          const auto t = id(rtc_time).utcnow();
+          if (t.is_valid()) {
+            ESP_LOGI("tab5.rtc", "Heure reprise de l'horloge RX8130 : %04d-%02d-%02d %02d:%02d:%02d UTC",
+                     t.year, t.month, t.day_of_month, t.hour, t.minute, t.second);
+          } else {
+            ESP_LOGW("tab5.rtc", "Horloge RX8130 illisible ou pas encore réglée : attente de NTP");
+          }
+
+  # Journal des démarrages et des coupures (Tab5/ecran/tab5_journal.cpp) : quand le Wi-Fi
+  # manque depuis 90 s, une copie en NVS pour survivre à une coupure de courant (au plus
+  # une toutes les 15 min, seulement s'il y a du nouveau). Rien à faire Wi-Fi présent.
+  - interval: 30s
+    then:
+      - lambda: 'journal_tick();'
+
+  # Chargeur (08/10/2026, tab5_batterie.h) : CHG_EN suit chargeur_pas() ; à la fin du
+  # repos d'une sonde (chargeur coupé 8 s), une lecture de l'INA226 tout de suite.
+  # Charge rapide (09/10/2026, ADR-0045) : nCHG_QC_EN suit « Tab5 Mode de charge », mais
+  # seulement chargeur allumé (charge_rapide_voulue) ; posée après CHG_EN, dans l'ordre de
+  # M5Unified (setChargeCurrent : P7 puis P5).
+  # Démarrage (10/10/2026) : le premier pas lit tab5_batterie_memoire (une batterie vue au
+  # démarrage précédent ?) ; la mémoire n'est réécrite (NVS) que quand elle change.
+  # Sécurité (16/10/2026) : le premier pas sait si le redémarrage est anormal (pas de
+  # réveil du chargeur) ; chaque pas publie « Tab5 Sécurité chargeur » au changement et
+  # envoie la coupure de sécurité à HA, une fois (chargeur_securite_signal).
+  # [AI-DEBUG] Chaque commande est journalisée (tag tab5.batterie) avec sa raison.
+  - interval: 1s
+    then:
+      - lambda: |-
+          const auto a = chargeur_pas(id(tab5_limite_charge).active_index().value_or(0),
+                                      id(tab5_batterie_montee).state, id(tab5_batterie_memoire),
+                                      journal_demarrage_anormal(), millis());
+          const bool securite = chargeur_securite_active();
+          if (!id(chargeur_securite).has_state() || id(chargeur_securite).state != securite)
+            id(chargeur_securite).publish_state(securite);
+          const SignalSecurite coupure = chargeur_securite_signal();
+          if (coupure.cause != CauseSecurite::AUCUNE)
+            id(tab5_securite_chargeur).execute(cause_securite_texte(coupure.cause), coupure.mesure, coupure.verrouille);
+          if (a.allumer != id(charge_enable).state) {
+            if (a.allumer) {
+              id(charge_enable).turn_on();
+              if (demarrage_marquer(EtapeDemarrage::CHARGEUR)) id(tab5_chronologie_publier).execute();
+            } else {
+              id(charge_enable).turn_off();
+            }
+          }
+          const uint8_t memoire = chargeur_memoire(id(tab5_batterie_memoire));
+          if (memoire != id(tab5_batterie_memoire)) id(tab5_batterie_memoire) = memoire;
+          const bool rapide = charge_rapide_voulue(id(tab5_mode_charge).active_index().value_or(0), a.allumer);
+          if (rapide != id(quick_charge).state) {
+            ESP_LOGI("tab5.batterie", "Charge rapide %s", rapide ? "allumee" : "arretee");
+            if (rapide) id(quick_charge).turn_on();
+            else id(quick_charge).turn_off();
+          }
+          if (a.lire) id(ina226_batterie).update();
+
+  # Wi-Fi éco (09/10/2026, ADR-0045) : la décision suit « sur batterie » et les flux
+  # (voix, son, OTA) ; le script n'envoie une commande au C6 que si elle change.
+  - interval: 1s
+    then:
+      - script.execute: tab5_wifi_eco_appliquer
+
+  # Mesure de consommation (interrupteur « Tab5 Mesure de consommation » plus haut) :
+  # une lecture de l'INA226 toutes les 2 s en plus de celle de la minute.
+  - interval: 2s
+    then:
+      - if:
+          condition:
+            switch.is_on: tab5_mesure_conso
+          then:
+            - component.update: ina226_batterie
+
+  # État de charge : sans interruption sur pi4ioe2, ESPHome relirait l'expandeur en I²C
+  # à chaque tour de boucle. Comme la prise casque (tab5-sensors-domotique.yaml).
+  - interval: 10s
+    then:
+      - lambda: |-
+          id(batterie_en_charge)->disable_loop();
+          id(batterie_en_charge)->loop();
+
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - lambda: 'set_icon_active_ui(id(icon_wifi), true, UIColor.SUCCESS, UIColor.INACTIVE);'
+          else:
+            - lambda: 'set_icon_active_ui(id(icon_wifi), false, UIColor.SUCCESS, UIColor.INACTIVE);'
+
+  - interval: 2s
+    then:
+      - lambda: |-
+          // Garde #T222 : pas de LVGL si la console (page Système des Réglages) est
+          // masquée ; la page Batterie a la même garde (reglages_batterie_peindre).
+          reglages_batterie_peindre();
+          if (reglages_page_visible(REGLAGES_PAGE_SYSTEME)) {
+             update_console_diagnostics_ui(id(lbl_sys_sram_val), id(bar_sys_sram),
+                 id(lbl_sys_psram_val), id(bar_sys_psram), id(lbl_sys_frag_val), id(lbl_sys_flash_val),
+                 id(sys_loop_time).has_state(), id(sys_loop_time).state, id(lbl_sys_loop_val),
+                 id(sys_wifi_ip).has_state(), id(sys_wifi_ip).state.c_str(), id(lbl_sys_ip_val),
+                 id(sys_wifi_ssid).has_state(), id(sys_wifi_ssid).state.c_str(), id(lbl_sys_ssid_val));
+             // État connexion HA (carte RÉSEAU de la console) — reprend aussi la main
+             // apres le "Redémarrage..." affiché par le bouton Redemarrer HA.
+             update_console_ha_status_ui(id(lbl_sys_ha_val), id(status_ha).state);
+             // Carte SYSTÈME (discussion #278, 06/10/2026) : charge de chaque cœur sur les
+             // 2 s écoulées, batterie d'après le dernier état gardé par le C++.
+             update_console_cpu_ui(id(lbl_sys_cpu_val), false);
+             update_console_batterie_ui(id(lbl_sys_batterie_icone), id(lbl_sys_batterie_val));
+          }
+
+# Envoi du journal des démarrages et des coupures (Tab5/ecran/tab5_journal.cpp), lancé à
+# chaque connexion de Home Assistant (on_client_connected, tab5-api-logic.yaml).
+# 10 s : laisser HA finir ses abonnements (états, services, logs). Événement seulement
+# si quelque chose le justifie (journal_has_report(), bits `anomalie` de
+# tab5_journal.cpp) : jamais pour un démarrage normal. Côté HA, la garde (e) de
+# packages/tab5_health.yaml en fait une notification. Journal vidé une fois HA joint.
+script:
+  # Chronologie du démarrage (tab5_demarrage.h) : les deux textes, publiés à chaque étape
+  # nouvelle après setup() (image, fin de l'on_boot -100, Wi-Fi, API, fin de l'on_boot
+  # 600, chargeur : six fois au plus par démarrage), et deux lignes de journal, les seules.
+  # Le premier texte ne change plus après setup() : HA ignore l'état republié identique.
+  - id: tab5_chronologie_publier
+    then:
+      - lambda: |-
+          char buf[kChronoTexteMax];
+          demarrage_texte(PartieChrono::SETUP, buf, sizeof(buf));
+          ESP_LOGI("tab5.demarrage", "Chronologie : %s", buf);
+          id(sys_chronologie).publish_state(buf);
+          demarrage_texte(PartieChrono::SUITE, buf, sizeof(buf));
+          ESP_LOGI("tab5.demarrage", "Chronologie (suite) : %s", buf);
+          id(sys_chronologie_suite).publish_state(buf);
+
+  # Wi-Fi éco (09/10/2026, ADR-0045) : décision pure (wifi_eco_voulu, tab5_economie.h),
+  # appliquée par wifi_eco_appliquer() (tab5_console.cpp), qui ne parle au C6 que quand
+  # la décision change, Wi-Fi connecté (une fois de plus après chaque reconnexion).
+  # Flux : assistant vocal (comme l'extinction auto, tab5-ha-controls.yaml), lecteur qui
+  # joue ou annonce, mise à jour du firmware.
+  - id: tab5_wifi_eco_appliquer
+    then:
+      - lambda: |-
+          const auto etat = id(speaker_player)->state;
+          const bool flux = id(va)->is_running() || id(va)->is_continuous() || id(ota_en_cours) ||
+                            etat == media_player::MEDIA_PLAYER_STATE_PLAYING ||
+                            etat == media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+          wifi_eco_appliquer(wifi_eco_voulu(id(tab5_wifi_eco).active_index().value_or(0),
+                                            economie_sur_batterie(), flux));
+
+  # Fin de la mesure de consommation : 2 h après l'allumage de l'interrupteur (un test
+  # complet dure environ 1 h). Arrêté quand on le coupe ; restart s'il est rallumé.
+  - id: tab5_mesure_conso_fin
+    mode: restart
+    then:
+      - delay: 2h
+      - switch.turn_off: tab5_mesure_conso
+
+  # Batterie faible (08/10/2026) : événement (ADR-0025), niveau en % et seuil franchi
+  # (« 20 » ou « 10 »). Côté HA, la garde « batterie faible » de packages/tab5_health.yaml
+  # en fait une notification persistante et une notification sur le téléphone.
+  - id: tab5_batterie_faible
+    mode: queued
+    max_runs: 2
+    parameters:
+      niveau: int
+      seuil: int
+    then:
+      - homeassistant.event:
+          event: esphome.tab5_batterie_faible
+          data:
+            niveau: !lambda 'return niveau;'
+            seuil: !lambda 'return seuil;'
+
+  # Coupure de sécurité du chargeur (16/10/2026) : événement (ADR-0025), cause
+  # (« thermique », « tension », « courant »), mesure (°C, V ou A, en texte) et verrouille
+  # (« oui » : chargeur bloqué jusqu'au redémarrage). Côté HA, la garde (h) de
+  # packages/tab5_health.yaml en fait une notification persistante et sur le téléphone.
+  - id: tab5_securite_chargeur
+    mode: queued
+    max_runs: 3
+    parameters:
+      cause: string
+      mesure: float
+      verrouille: bool
+    then:
+      - homeassistant.event:
+          event: esphome.tab5_securite_chargeur
+          data:
+            cause: !lambda 'return cause;'
+            mesure: !lambda |-
+              char b[16];
+              snprintf(b, sizeof(b), cause == "thermique" ? "%.1f" : cause == "tension" ? "%.2f" : "%.3f", mesure);
+              return std::string(b);
+            verrouille: !lambda 'return verrouille ? std::string("oui") : std::string("non");'
+
+  - id: tab5_journal_envoi
+    mode: restart
+    then:
+      - delay: 10s
+      - if:
+          condition:
+            api.connected:
+              state_subscription_only: true
+          then:
+            - if:
+                condition:
+                  lambda: 'return journal_has_report();'
+                then:
+                  - lambda: |-
+                      id(tab5_journal_evenement).execute(journal_reset_reason(), journal_boot_count(),
+                          journal_is_serious() ? std::string("oui") : std::string("non"),
+                          journal_report_text());
+            - lambda: 'journal_mark_delivered();'
+
+  # [AI-WARNING] L'événement du journal reçoit ses valeurs en paramètres, calculées par la
+  # `lambda:` de tab5_journal_envoi : depuis ESPHome 2026.10.0, les champs `data:` d'un
+  # événement HA sont écrits avant les `includes:` et ne voient pas nos fonctions C++
+  # (journal_*). Un paramètre du script, lui, est toujours visible
+  # (tests/test_includes_esphome.py).
+  - id: tab5_journal_evenement
+    mode: queued
+    max_runs: 2
+    parameters:
+      raison: string
+      demarrages: string
+      grave: string
+      lignes: string
+    then:
+      - homeassistant.event:
+          event: esphome.tab5_journal
+          data:
+            raison: !lambda 'return raison;'
+            demarrages: !lambda 'return demarrages;'
+            grave: !lambda 'return grave;'
+            lignes: !lambda 'return lignes;'
+
+# Chronométrage des images LVGL pour « Tab5 Draw Max » (plus haut). Fusionné avec les
+# blocs lvgl: de tab5-styles.yaml et tab5-lvgl.yaml. Deux lectures de micros() par
+# image : coût négligeable, rien n'est touché à l'affichage.
+# Chronologie du démarrage (tab5_demarrage.h) : le premier dessin (juste après setup())
+# et la fin de la première image, marqués une fois ; ensuite, un test d'un bit par image.
+lvgl:
+  on_draw_start:
+    - lambda: |-
+        id(draw_t0_us) = micros();
+        demarrage_marquer(EtapeDemarrage::DESSIN);
+  # LV_EVENT_REFR_READY part à CHAQUE passage du timer de rafraîchissement, même
+  # sans rien à redessiner (lv_refr.c : `goto refr_finish`) : sans l'appariement
+  # avec un début de dessin, on mesurait le temps écoulé depuis la dernière image
+  # (2,5 à 4,5 s au repos, relevé le 25/09 sur la première version).
+  on_draw_end:
+    - lambda: |-
+        if (id(draw_t0_us) == 0) return;
+        const uint32_t d = micros() - id(draw_t0_us);
+        id(draw_t0_us) = 0;
+        if (d > id(draw_max_us)) id(draw_max_us) = d;
+        if (demarrage_marquer(EtapeDemarrage::IMAGE)) id(tab5_chronologie_publier).execute();
+
+globals:
+  - id: draw_t0_us
+    type: uint32_t
+    initial_value: '0'
+  - id: draw_max_us
+    type: uint32_t
+    initial_value: '0'
+  # Batterie vue au démarrage précédent (10/10/2026, MemoireBatterie de tab5_batterie.h) :
+  # 0 inconnu (premier démarrage), 1 aucune, 2 vue. En NVS, écrite seulement au changement
+  # (interval du chargeur). 1 : le chargeur n'est pas allumé au démarrage suivant.
+  - id: tab5_batterie_memoire
+    type: uint8_t
+    restore_value: true
+    initial_value: '0'

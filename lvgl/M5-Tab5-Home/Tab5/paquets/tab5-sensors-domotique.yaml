@@ -1,0 +1,247 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file tab5-sensors-domotique.yaml
+# @role Emplacements de la maison poussés par HA : plantes (humidité + détails),
+#       lumières, températures/humidité, batterie du téléphone, PC, TV ; et l'audio
+#       (ampli, jack, wake word).
+# @emplacements Depuis le lot 6a (ADR-0019), la tablette ne connaît plus aucune entité
+#       de la maison : ces capteurs sont des `template` internes, sans entity_id. Le
+#       blueprint « Tab5 — emplacements » leur pousse les valeurs par l'action
+#       tab5_maj_emplacements (tab5-api-logic.yaml), qui les publie par clé (lumiere_1,
+#       pot_3_ec…) ; leurs on_value n'ont pas changé. Ajouter un emplacement = un
+#       capteur ici, sa ligne dans la table de tab5_maj_emplacements et son entrée dans
+#       le blueprint (tests/test_emplacements.py compare).
+# @architecture_constraint Ce fichier ne DOIT contenir AUCUNE logique de présentation.
+#                         Les blocs on_value: doivent se contenter d'appeler des fonctions
+#                         C++ depuis tab5_custom.cpp (ex: tuiles_heritage_lumiere(...) ).
+# @anti_pattern_evité Ne pas utiliser std::string ou to_string() ici (hot-path).
+# @ai_instruction Nouveau capteur de température : un `platform: template` (voir plus
+#                 haut), et dans on_value, appeler simplement update_temp_ui(id(mon_label), x);
+#                 Ne génère pas de lv_label_set_text ici.
+#                 (Scission de tab5-sensors.yaml le 14/07/2026 ; entités
+#                 système dans tab5-sensors-diagnostics.yaml.)
+# @zones Chaque capteur qui porte une zone de l'écran (lumières, PC, TV, téléphone,
+#        salon, serre, pots) commence son on_value par zone_vue() : une donnée reçue
+#        fait revenir une zone que HA avait déclarée absente (lot 5, tab5-zones.yaml).
+# ============================================================================
+switch:
+  - platform: gpio
+    id: speaker_enable
+    name: "Speaker Enable"
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 1
+    restore_mode: DISABLED
+
+  - platform: template
+    name: "Tab5 Wake Word Active"
+    id: tab5_wake_word_active
+    icon: mdi:microphone-outline
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - micro_wake_word.start:
+      - lambda: 'assist_wake_word_indicator_ui(id(lbl_ok_nabu), true);'
+    on_turn_off:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - micro_wake_word.stop:
+      - lambda: 'assist_wake_word_indicator_ui(id(lbl_ok_nabu), false);'
+
+binary_sensor:
+  # Prise casque (tuile « Jack casque » du tableau de bord HA). pi4ioe1 n'a pas de
+  # broche d'interruption : ESPHome relisait l'expander en I²C à CHAQUE tour de
+  # boucle (≈ 60 lectures/s sur bsp_bus, partagé avec le tactile, l'IMU et
+  # l'horloge). L'interval plus bas coupe cette boucle et lit la prise une fois par
+  # seconde (audit du 26/09/2026, lot 3) ; seul un changement est publié.
+  - platform: gpio
+    id: headphone_detect
+    name: "Headphone Detect"
+    pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 7
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          // disable_loop() / loop() sont publics (esphome/core/component.h) :
+          // GPIOBinarySensor::loop() lit la broche et publie si elle a changé.
+          id(headphone_detect)->disable_loop();
+          id(headphone_detect)->loop();
+
+text_sensor:
+  - platform: template
+    id: pc_status
+    update_interval: never
+    on_value:
+      - lambda: |-
+          if (zone_vue(Zone::PC)) id(tab5_zones_apply).execute();
+          // Accepte device_tracker (home) et switch (on). La carte du mode HA est la
+          // tuile 0 de la pièce 0 du mode héritage (ADR-0023, tab5_tuiles.cpp).
+          const bool actif = x == "home" || x == "on";
+          update_pc_status_ui(actif, id(icon_pc));
+          tuiles_heritage_pc(actif);
+
+  # TV → icône moniteur existante sur la carte J0 (icon_card_pc), pas une 4e icône bandeau
+  - platform: template
+    id: tv_status
+    update_interval: never
+    on_value:
+      - lambda: |-
+          if (zone_vue(Zone::TV)) id(tab5_zones_apply).execute();
+          // Épaule de la tuile 0 de l'accueil en mode héritage (ADR-0023, tab5_tuiles.cpp).
+          tuiles_heritage_tv(x == "home" || x == "on" || x == "playing" || x == "idle" || x == "paused");
+
+  - platform: template
+    id: light_chambre_state
+    update_interval: never
+    on_value:
+      # Lumières 3.x = tuiles 2 à 4 de la pièce 0 du mode héritage (ADR-0023) : épaules,
+      # carte du mode HA et popup dessinés par tab5_tuiles.cpp.
+      - lambda: |-
+          if (zone_vue(Zone::LUMIERE_1)) id(tab5_zones_apply).execute();
+          tuiles_heritage_lumiere(0, x == "on");
+
+  - platform: template
+    id: light_salon_state
+    update_interval: never
+    on_value:
+      - lambda: |-
+          if (zone_vue(Zone::LUMIERE_2)) id(tab5_zones_apply).execute();
+          tuiles_heritage_lumiere(1, x == "on");
+
+  - platform: template
+    id: light_led_state
+    update_interval: never
+    on_value:
+      - lambda: |-
+          if (zone_vue(Zone::LUMIERE_3)) id(tab5_zones_apply).execute();
+          tuiles_heritage_lumiere(2, x == "on");
+
+# Détails pots (popup appui long) : les 4 capteurs × 5 pots viennent d'UN
+# package paramétré (pot_sensors.yaml, règle 5) inclus 5 fois — ESPHome
+# concatène les listes `sensor:` des packages (un `- !include` dans une liste
+# imbriquerait la liste). Un 6ᵉ pot : voir l'en-tête de pot_sensors.yaml.
+packages:
+  pot_sensors_1: !include { file: pot_sensors.yaml, vars: { n: 1 } }
+  pot_sensors_2: !include { file: pot_sensors.yaml, vars: { n: 2 } }
+  pot_sensors_3: !include { file: pot_sensors.yaml, vars: { n: 3 } }
+  pot_sensors_4: !include { file: pot_sensors.yaml, vars: { n: 4 } }
+  pot_sensors_5: !include { file: pot_sensors.yaml, vars: { n: 5 } }
+
+script:
+  # Une mise à jour d'un des 5 capteurs d'humidité (08/10/2026, audit YML-7 : avant, une
+  # lambda recopiée sur les 5 capteurs par une ancre YAML, #T164). Les widgets ne sont
+  # joignables que par id() : la lambda les passe à pots_humidite_maj() (tab5_rangee.cpp),
+  # qui fait le reste. `queued` : une mise à jour arrivée pendant qu'il tourne n'est pas
+  # perdue (il ne contient aucune attente, il tourne d'un trait).
+  - id: tab5_pots_maj
+    mode: queued
+    then:
+      - lambda: |-
+          const bool publies[5] = {id(moisture_1).has_state(), id(moisture_2).has_state(),
+              id(moisture_3).has_state(), id(moisture_4).has_state(), id(moisture_5).has_state()};
+          const float vals[5] = {id(moisture_1).state, id(moisture_2).state, id(moisture_3).state,
+              id(moisture_4).state, id(moisture_5).state};
+          MoistureSlotUI slots[4] = {{id(icon_pot_s0)}, {id(icon_pot_s1)}, {id(icon_pot_s2)}, {id(icon_pot_s3)}};
+          PotDetailUI cards[5] = {
+              {id(icon_pot_d1), id(lbl_pot_d1_moist), id(lbl_pot_d1_status)},
+              {id(icon_pot_d2), id(lbl_pot_d2_moist), id(lbl_pot_d2_status)},
+              {id(icon_pot_d3), id(lbl_pot_d3_moist), id(lbl_pot_d3_status)},
+              {id(icon_pot_d4), id(lbl_pot_d4_moist), id(lbl_pot_d4_status)},
+              {id(icon_pot_d5), id(lbl_pot_d5_moist), id(lbl_pot_d5_status)}
+          };
+          if (pots_humidite_maj(publies, vals, slots, cards)) id(tab5_zones_apply).execute();
+
+sensor:
+  # Luminosité (attribut brightness 0-255) des 3 lumières 3.x — l'arc du popup lumière
+  # quand il la montre (inerte popup fermé ou pendant un glissement, tab5_tuiles.cpp).
+  - platform: template
+    id: light_chambre_brightness
+    update_interval: never
+    on_value:
+      - lambda: 'tuiles_heritage_luminosite(0, x);'
+
+  - platform: template
+    id: light_salon_brightness
+    update_interval: never
+    on_value:
+      - lambda: 'tuiles_heritage_luminosite(1, x);'
+
+  - platform: template
+    id: light_led_brightness
+    update_interval: never
+    on_value:
+      - lambda: 'tuiles_heritage_luminosite(2, x);'
+
+  - platform: template
+    id: phone_battery
+    update_interval: never
+    on_value:
+      - lambda: |-
+          if (zone_vue(Zone::TELEPHONE)) id(tab5_zones_apply).execute();
+          // Echelle de couleur factorisee dans get_battery_color (partagee popup pots)
+          set_icon_color_ui(id(icon_phone), get_battery_color(x));
+
+  - platform: template
+    id: temp_serre
+    update_interval: never
+    on_value:
+      - lambda: |-
+          if (zone_vue(Zone::SERRE)) id(tab5_zones_apply).execute();
+          // Gardée, et peinte quand la zone des températures montre la serre (en mode HA,
+          // elle peut montrer la pièce : ADR-0040, ecran/tab5_piece_climat.cpp).
+          accueil_serre_temperature(x);
+
+  - platform: template
+    id: temp_salon
+    update_interval: never
+    on_value:
+      - lambda: |-
+          if (zone_vue(Zone::SALON)) id(tab5_zones_apply).execute();
+          accueil_salon_temperature(x);  // gardée, peinte quand la zone montre le salon
+
+  - platform: template
+    id: hum_salon
+    update_interval: never
+    on_value:
+      - lambda: 'accueil_salon_humidite(x);'  # couleur de l'icône du salon (NaN : inchangée)
+
+  # Humidité des 5 pots : chaque mise à jour relance le script tab5_pots_maj (plus bas),
+  # qui trie les 4 emplacements de la ligne des plantes et peint le popup « Mes Plantes ».
+  - platform: template
+    id: moisture_1
+    update_interval: never
+    on_value:
+      - script.execute: tab5_pots_maj
+
+  - platform: template
+    id: moisture_2
+    update_interval: never
+    on_value:
+      - script.execute: tab5_pots_maj
+
+  - platform: template
+    id: moisture_3
+    update_interval: never
+    on_value:
+      - script.execute: tab5_pots_maj
+
+  - platform: template
+    id: moisture_4
+    update_interval: never
+    on_value:
+      - script.execute: tab5_pots_maj
+
+  - platform: template
+    id: moisture_5
+    update_interval: never
+    on_value:
+      - script.execute: tab5_pots_maj

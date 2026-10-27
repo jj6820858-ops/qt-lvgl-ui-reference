@@ -1,0 +1,126 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file tab5-zones.yaml
+# @role Zones optionnelles (lot 5 de l'audit « ouverture », 27/09/2026) : une zone sans
+#       entité disparaît de l'écran, avec ses boutons. Depuis le lot 6a (ADR-0019), une
+#       zone est absente quand son emplacement n'est pas choisi dans le blueprint
+#       « Tab5 — emplacements », ou que l'entité choisie n'existe pas. Ce fichier porte :
+#       - la demande à HA (événement esphome.tab5_zones, une fois par connexion) ;
+#       - l'application aux widgets et le capteur de diagnostic « Zones masquées ».
+#       Le blueprint répond par l'action tab5_maj_zones (tab5-api-logic.yaml).
+# @architecture_constraint La décision vit dans tab5_zones.cpp (pourquoi la tablette ne
+#       décide pas seule : tab5_custom.h, « Zones optionnelles »). Aucun lv_* ici : le
+#       script pose les pointeurs et appelle zones_apply_ui(). Chargé APRÈS tab5_lvgl :
+#       il référence des widgets.
+# @ai_instruction Nouvelle zone suivie par la tablette = sa clé dans tab5_zones_demande
+#       (ordre de l'enum Zone) et dans kCles (tab5_zones.cpp), un zone_vue() dans le
+#       on_value de son capteur (tab5-sensors-domotique.yaml), et son entrée dans le
+#       blueprint. tests/test_zones.py et tests/test_emplacements.py vérifient la concordance.
+# ============================================================================
+
+script:
+  # Pose les widgets dans g_zones_ui et applique l'état des zones. Appelé à la fin du
+  # setup (on_boot -100, tab5-ha-hmi.yaml, avant la première image), après chaque
+  # réponse de HA, et quand une donnée fait revenir une zone.
+  - id: tab5_zones_apply
+    then:
+      # Widgets des pièces (ADR-0023, tab5-tuiles.yaml) : zones_apply_ui() les redessine
+      # (le premier appel charge les pièces gardées en NVS), avant la première image.
+      - script.execute: tab5_tuiles_ui
+      # Prévisions gardées en NVS (16/10/2026, tab5-scripts.yaml) : les tuiles météo
+      # repartent des dernières prévisions, avant la première image (une fois).
+      - script.execute: tab5_previsions_relire
+      # Widgets de la clim (ADR-0026, tab5-scripts.yaml) : posés avant que HA pousse ses
+      # réglages (clé climr).
+      - script.execute: tab5_clim_ui
+      # Widgets de la rangée sous l'horloge (ADR-0031, tab5-rangee.yaml) : zones_apply_ui()
+      # la dessine (plantes présentes ou non), avant la première image.
+      - script.execute: tab5_rangee_ui
+      # Widgets de la tuile − / + au choix (ADR-0033, tab5-reglables.yaml) : zones_apply_ui()
+      # la montre ou la masque et peint l'appareil choisi, avant la première image.
+      - script.execute: tab5_reglables_ui
+      # Widgets du lecteur de musique (ADR-0050, tab5-lecteur.yaml) : le lecteur compact de
+      # la zone à gauche de l'horloge (ADR-0051) peut être le contenu de départ, avant toute
+      # poussée de HA.
+      - script.execute: tab5_lecteur_lier
+      # Widgets des capteurs suivis (ADR-0054, tab5-suivi.yaml) : la carte du capteur de la
+      # zone à gauche de l'horloge peut être le contenu de départ.
+      - script.execute: tab5_suivi_lier
+      - lambda: |-
+          ZonesUI& u = g_zones_ui;
+          // Bandeau d'état, une ligne par valeur de BandeauIcone (tab5_custom.h).
+          u.bandeau[BANDEAU_PC] = id(icon_pc);
+          u.bandeau[BANDEAU_TELEPHONE] = id(icon_phone);
+          u.bandeau[BANDEAU_WIFI] = id(icon_wifi);
+          u.bandeau[BANDEAU_REVEIL] = id(icon_alarm_status);
+          u.bandeau[BANDEAU_SOLAIRE] = id(icon_solaire);
+          u.bandeau[BANDEAU_BATTERIE] = id(icon_batterie);
+          // Mini icônes des boutons du haut, une ligne par valeur de BoutonHaut.
+          u.mini[BOUTON_MAISON] = id(icon_mini_ha);
+          u.mini[BOUTON_ENGRENAGE] = id(icon_mini_sys);
+          u.mini[BOUTON_MANETTE] = id(icon_mini_tv);
+          // Leurs icônes centrales : ce que fait le tap quand le blueprint l'a changé.
+          u.icone[BOUTON_MAISON] = id(icon_ha);
+          u.icone[BOUTON_ENGRENAGE] = id(icon_engrenage);
+          u.icone[BOUTON_MANETTE] = id(icon_manette);
+          u.icon_salon = id(icon_salon);
+          u.val_salon = id(val_temp_salon);
+          u.icon_serre = id(icon_serre);
+          u.val_serre = id(current_serre);
+          u.pot_card[0] = id(pot_card_1);
+          u.pot_card[1] = id(pot_card_2);
+          u.pot_card[2] = id(pot_card_3);
+          u.pot_card[3] = id(pot_card_4);
+          u.pot_card[4] = id(pot_card_5);
+          u.btn_domo = id(btn_mode_domo);
+          u.btn_discu = id(btn_mode_discu);
+          u.assist_domo = id(btn_assist_pipe_domo);
+          u.assist_discu = id(btn_assist_pipe_discu);
+          u.assist_cerveau = id(lbl_assist_cerveau);
+          zones_apply_ui();
+          // Zone à gauche de l'horloge (ADR-0051) : vocal, graphique, lecteur ou capteur, d'après la
+          // NVS puis le blueprint (clé « gauche »), avant la première image.
+          ZoneGaucheUI& g = g_zone_gauche_ui;
+          g.vocal = id(zone_vocal);
+          g.graphique = id(zone_graphique);
+          g.lecteur = id(zone_lecteur);
+          g.capteur = id(zone_suivi);
+          g.police = id(roboto_22);
+          zone_gauche_appliquer();
+          id(tab5_zones_masquees).publish_state(zones_texte_masquees());
+      # Zone « discussion » absente (aucun pipeline de discussion dans HA) : ses boutons
+      # sont masqués, rien ne permettrait plus de quitter le mode Discussion (popup ouvert
+      # à chaque demande) — retour au mode Domotique.
+      - if:
+          condition:
+            lambda: 'return zone_absente(Zone::DISCUSSION) && id(conversation_mode);'
+          then:
+            - script.execute:
+                id: tab5_set_assist_mode
+                discussion: false
+
+  # Demande à HA quelles zones sont absentes. Depuis le lot 6a (ADR-0019), la tablette
+  # ne connaît plus les entités : elle envoie seulement les clés de ses emplacements
+  # (ordre de l'enum Zone), et le blueprint « Tab5 — emplacements », qui sait lesquels
+  # sont choisis, répond, en y ajoutant clim, volet, planning et discussion (il répond
+  # aussi seul quand le pipeline de discussion change). Lancé par la première
+  # poussée des prévisions après chaque connexion (tab5-api-logic.yaml) : elle prouve
+  # que les automatisations de HA tournent, ce qui n'est pas le cas pendant son
+  # démarrage.
+  - id: tab5_zones_demande
+    then:
+      - homeassistant.event:
+          event: esphome.tab5_zones
+          data:
+            zones: "lumiere_1,lumiere_2,lumiere_3,pc,tv,telephone,salon,serre,pot_1,pot_2,pot_3,pot_4,pot_5"
+
+text_sensor:
+  # Diagnostic : les zones que HA a déclarées absentes (« none » sinon, « aucune » avant le
+  # 24/10/2026, ADR-0070). Une faute de frappe dans user_entities.yaml fait disparaître une
+  # zone ; c'est ici qu'on le voit. Clés fixes, jamais traduites (lues par HA).
+  - platform: template
+    id: tab5_zones_masquees
+    name: "Zones masquées"
+    icon: mdi:eye-off-outline
+    entity_category: diagnostic
+    update_interval: never

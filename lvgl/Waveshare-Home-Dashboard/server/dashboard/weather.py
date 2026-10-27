@@ -1,0 +1,56 @@
+"""Fetch Weather data from Pirate Weather API"""
+
+from datetime import datetime, timezone
+import requests
+from .config import CONFIG
+
+
+def get_weather_data() -> dict:
+    """Fetch temperature and chance of rain from Pirate Weather API"""
+
+    url = f'https://api.pirateweather.net/forecast/{
+        CONFIG.pirate_api_key}/{
+        CONFIG.lat_long}?units=uk&exclude=minutely,alerts'
+    response = requests.get(url, timeout=5)
+    response.raise_for_status()
+    data = response.json()
+
+    now = datetime.now(timezone.utc)
+    current_hour = now.replace(minute=0, second=0, microsecond=0)
+    hourly = []
+
+    for entry in data.get('hourly', {}).get('data', []):
+        entry_time = datetime.fromtimestamp(entry['time'], tz=timezone.utc)
+        if entry_time >= current_hour:
+            hour = {
+                'time': entry_time,
+                'icon': entry['icon'],
+                'temperature': entry['temperature'],
+                'feels_like': entry['apparentTemperature'],
+                'precip_chance_percent': entry['precipProbability'] * 100,
+                'wind_speed': entry['windSpeed'],
+                'uv_index': entry['uvIndex']
+            }
+            hourly.append(hour)
+        if len(hourly) >= 24:
+            break
+
+    today = data['daily']['data'][0]
+    return {
+        'sunrise': datetime.fromtimestamp(today['sunriseTime'], tz=timezone.utc),
+        'sunset': datetime.fromtimestamp(today['sunsetTime'], tz=timezone.utc),
+        'current': {
+            'temperature': data['currently']['temperature'],
+            'icon': data['currently']['icon'],
+            'feels_like': data['currently']['apparentTemperature'],
+        },
+        'day': {
+            'min_temperature': today['temperatureLow'],
+            'max_temperature': today['temperatureHigh'],
+            'precip_chance_percent': today['precipProbability'] * 100,
+            'precip_type': ('Snow' if today.get('precipType') == 'snow'
+                            else 'Sleet' if today.get('precipType') == 'sleet'
+                            else 'Rain'),
+        },
+        'hourly': hourly,
+    }

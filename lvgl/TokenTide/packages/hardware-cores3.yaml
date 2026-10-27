@@ -1,0 +1,155 @@
+# M5Stack CoreS3 hardware: PMU, IO expander, display, touch, backlight.
+# Schema taken from M5Stack's official ESPHome configs
+# (github://m5stack/esphome-yaml, common/cores3-satellite-base.yaml).
+
+# FT6336U reset is driven here, NOT via the ft63x6 reset_pin: the driver
+# pulses reset and probes the chip immediately, but the FT6336U needs
+# ~300ms after reset before it answers on I2C, so on every warm (SW)
+# reboot the probe failed and touch stayed dead until a power cycle.
+# Priority 850 lands between the AW9523B hub (IO, 900) and the
+# touchscreen (HARDWARE, 800); the blocking lambda holds the rest of
+# setup until the chip is ready. The expander is driven directly - an
+# ESPHome gpio output would re-assert its OFF state during its own
+# setup at priority 800 and hold the chip in reset again.
+# The same early hook powers the AW88298 amp (AW9523B P0_2): the amp
+# does not ACK on I2C while unpowered, and the audio_dac component runs
+# its register init during setup - a gated amp came up FAILED and the
+# chime never played. It stays on (idle = soft mute, no hiss).
+esphome:
+  on_boot:
+    - priority: 850
+      then:
+        - lambda: |-
+            id(aw9523b_hub).pin_mode(2, gpio::FLAG_OUTPUT);
+            id(aw9523b_hub).digital_write(2, true);
+            id(aw9523b_hub).pin_mode(0, gpio::FLAG_OUTPUT);
+            id(aw9523b_hub).digital_write(0, false);
+            delay(10);
+            id(aw9523b_hub).digital_write(0, true);
+            delay(300);
+
+i2c:
+  - id: bsp_bus
+    sda: GPIO12
+    scl: GPIO11
+
+spi:
+  - id: spi_bus
+    clk_pin: GPIO36
+    mosi_pin: GPIO37
+
+external_components:
+  - source: github://m5stack/esphome-yaml/components
+    components: [axp2101, aw9523b, aw88298]
+    refresh: 1d
+
+# Sound path for the shared chime package: AW88298 I2S smart amp, pins
+# and rates from M5Stack's cores3-satellite-base.yaml. Amp power is
+# raised in the on_boot hook above, before the audio_dac setup.
+i2s_audio:
+  id: i2s_audio_bus
+  i2s_lrclk_pin: GPIO33
+  i2s_bclk_pin: GPIO34
+  i2s_mclk_pin:
+    number: GPIO0
+    ignore_strapping_warning: true
+
+audio_dac:
+  - platform: aw88298
+    id: aw88298_dac
+    i2c_id: bsp_bus
+    sample_rate: 48000
+
+speaker:
+  - platform: i2s_audio
+    id: i2s_speaker
+    i2s_audio_id: i2s_audio_bus
+    dac_type: external
+    i2s_dout_pin: GPIO13
+    audio_dac: aw88298_dac
+
+rtttl:
+  id: chime_rtttl
+  speaker: i2s_speaker
+
+script:
+  # Chime hardware contract: the amp is already powered from boot.
+  - id: sound_begin
+    mode: single
+    then:
+      - lambda: return;
+
+axp2101:
+  id: axp2101_pmu
+  i2c_id: bsp_bus
+
+aw9523b:
+  id: aw9523b_hub
+  i2c_id: bsp_bus
+  p0_drive_mode: PUSH_PULL
+
+output:
+  # LCD power doubles as backlight: AXP2101 DLDO1 rail, 2.6-3.3 V.
+  - platform: axp2101
+    type: range
+    channel: DLDO1
+    id: lcd_backlight_output
+    min_voltage: 2600
+    max_voltage: 3300
+
+light:
+  - platform: monochromatic
+    id: lcd_backlight
+    name: "LCD Backlight"
+    output: lcd_backlight_output
+    restore_mode: RESTORE_DEFAULT_ON
+    default_transition_length: 250ms
+
+sensor:
+  - platform: axp2101
+    id: axp2101_sensor
+    battery_level:
+      name: "Battery Level"
+      id: battery_level
+    battery_charging:
+      name: "Battery Charging"
+      id: battery_charging
+
+# Forces the binary_sensor component into the build: the M5Stack axp2101
+# component includes its headers unconditionally but declares no AUTO_LOAD.
+binary_sensor:
+  - platform: gpio
+    id: touch_int_p1_2
+    internal: true
+    pin:
+      aw9523b_id: aw9523b_hub
+      number: 10
+
+display:
+  - platform: mipi_spi
+    id: main_lcd
+    model: M5CORE
+    dc_pin: GPIO35
+    reset_pin:
+      aw9523b_id: aw9523b_hub
+      number: 9
+    cs_pin:
+      number: GPIO3
+      ignore_strapping_warning: true
+    data_rate: 40MHz
+    invert_colors: true
+    # LVGL owns the framebuffer
+    update_interval: never
+    auto_clear_enabled: false
+
+touchscreen:
+  - platform: ft63x6
+    id: main_touch
+    i2c_id: bsp_bus
+    calibration:
+      x_min: 0
+      x_max: 320
+      y_min: 0
+      y_max: 240
+    on_touch:
+      - script.execute: note_activity

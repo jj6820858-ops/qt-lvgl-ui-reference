@@ -1,0 +1,387 @@
+name: ESPHome Tab5 Compilation
+
+# Cinq jobs (durées lues sur les runs de main du 07/10/2026) :
+#   - changes : dorny/paths-filter dit si le firmware (`firmware`) ou les écrans des
+#     autres révisions (`ecrans`) changent ; les jobs de compilation en dépendent.
+#     Quelques secondes.
+#   - python : hooks pre-commit (yamllint, BOM, secrets, placeholders HA), esptool
+#     figé (mêmes commandes que publication.yml), tests hôte (pytest = tests/ +
+#     outils + miroirs Python des échecs et des dames + garde-fous de contenu, dont
+#     le contrat HA ↔ firmware contre les tags publiés, récupérés sans historique), vrais
+#     moteurs Go, échecs, dames et réveil, socle commun et lecture des payloads de HA
+#     compilés par g++ (échecs, dames et payloads sous ASan + UBSan), dry-run du demo pusher. Toujours exécuté. Check REQUIS.
+#   - build  : compilation ESPHome complète (~5 min avec le ccache). Check REQUIS
+#     par la protection de `main`, donc le job existe toujours ; il est SAUTÉ
+#     (statut « skipped » = succès pour la protection) quand le push/la PR ne
+#     touche ni tab5-ha-hmi.yaml, ni Tab5/, ni ce workflow — une typo Markdown
+#     ne recompile plus le firmware. `workflow_dispatch` force la compilation.
+#   - build-min : la même compilation avec la version PLANCHER d'ESPHome, lue dans
+#     `min_version:` de tab5-ha-hmi.yaml (26/09/2026). Sans elle, rien ne vérifiait
+#     que le plancher annoncé compile encore : une option apparue après lui
+#     passerait inaperçue. Mêmes conditions de déclenchement que `build`, sans
+#     artefact. Check REQUIS de `main` depuis le 26/09/2026 (réglage du dépôt),
+#     comme `build` : sauté (« skipped ») quand le firmware ne change pas.
+#   - build-revisions : la même compilation pour les révisions du Tab5 que la
+#     tablette d'Axel n'a pas (ST7121, ILI9881C ; docs/hardware.md), choisies par
+#     `tab5_ecran:` dans user_entities.yaml (26/09/2026). Elles ne sont testées sur
+#     aucun appareil : la CI garantit seulement qu'elles compilent encore. Lancé
+#     quand l'écran, le matériel, l'entrée ou ce workflow changent ; check NON requis.
+#     Les deux révisions en parallèle, 5 à 8 min. `build-min` : ~6 min.
+#   - build-carte-7b : la même compilation pour la carte Waveshare ESP32-P4-WIFI6-Touch-
+#     LCD-7B (`tab5_carte: waveshare-7b`, ADR-0061), prise en charge : la carte de l'auteur
+#     depuis le 14/10/2026, publiée avec les releases (publication.yml). Mêmes déclencheurs
+#     que `build` ; check NON requis.
+#
+# Les autres workflows (rendu hors tablette, sanitizers, installation dans un HA neuf,
+# intégration HACS, site, publication) ne sont pas requis : docs/INVENTAIRE_CONFIGS_TESTS.md.
+#
+# `esphome/build-action` sans `version:` tire l'image `latest` : c'est VOULU pour
+# `build`. La CI sert de banc d'essai gratuit de la dernière ESPHome (le 25/08/2026
+# elle compilait déjà en 2026.8.1, le 16/09/2026 en 2026.9.0, chaque fois avant que
+# le projet ne relève son plancher). Une rupture amont se voit ici avant de toucher
+# l'appareil ; `build-min` garde l'autre borne. `min_version:` dans tab5-ha-hmi.yaml
+# reste la seule contrainte de version, et la seule source du plancher.
+
+# `push` limité à main : une branche avec PR était compilée deux fois (push +
+# pull_request), 2 × ~10 min par modification. Une branche sans PR se teste par
+# `workflow_dispatch`.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Un nouveau commit sur une PR annule la compilation devenue inutile. Jamais sur
+# main : chaque merge doit produire son artefact.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Jeton du run en lecture seule, écrit ici plutôt que tiré du réglage du dépôt (audit
+# sécurité du 30/09/2026) : checkout lit le code ; cache et upload-artifact passent
+# par le jeton d'exécution d'Actions, pas par celui-ci ; build-action ne s'en sert pas.
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    # dorny/paths-filter, sur une PR, lit la liste des fichiers modifiés par l'API
+    # (« Requires pull-requests: read », README de l'action). Un bloc de job remplace
+    # celui du workflow : contents est redonné.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      firmware: ${{ steps.filter.outputs.firmware }}
+      ecrans: ${{ steps.filter.outputs.ecrans }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        with:
+          # Inclus si un motif positif correspond ET aucun motif `!` : une PR
+          # qui ne touche que Tab5/README.md ne recompile plus le firmware.
+          predicate-quantifier: some-with-excludes
+          filters: |
+            firmware:
+              - 'tab5-ha-hmi.yaml'
+              - 'Tab5/**'
+              - '.github/workflows/esphome-tab5.yml'
+              - '!**/*.md'
+            ecrans:
+              - 'tab5-ha-hmi.yaml'
+              - 'Tab5/paquets/tab5-hardware.yaml'
+              - 'Tab5/paquets/carte-tab5.yaml'
+              - 'Tab5/paquets/geometrie-tab5.yaml'
+              - 'Tab5/paquets/ecran-*.yaml'
+              - '.github/workflows/esphome-tab5.yml'
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Tags publiés (contrat HA ↔ firmware contre les versions précédentes)
+        # tests/test_contrat_versions.py lit le code des tags v* (semver du contrat, matrice
+        # N-1) ; le checkout superficiel n'en a aucun. Un commit par tag, sans historique.
+        run: git fetch --no-tags --depth=1 origin "+refs/tags/v*:refs/tags/v*"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Dépendances des outils
+        # Réessais : PyPI répond parfois « from versions: none » (tools/ci/pip_reessai.sh).
+        run: bash tools/ci/pip_reessai.sh -r requirements-dev.txt
+      - name: esptool (espsecure), versions et empreintes figées
+        # Les mêmes commandes que publication.yml (tests/test_ci_securite.py les
+        # compare), qui ne tourne qu'à une release : chaque PR vérifie ici, sur Linux,
+        # que les fichiers figés s'installent encore (versions, empreintes, roues).
+        # Dans un venv à part : les outils du job gardent leurs versions.
+        run: |
+          python -m venv "$RUNNER_TEMP/esptool"
+          export PATH="$RUNNER_TEMP/esptool/bin:$PATH"
+          o=tools
+          bash "$o/ci/pip_reessai.sh" --require-hashes --only-binary :all: \
+            -r "$o/publication/requirements-esptool-build.txt"
+          bash "$o/ci/pip_reessai.sh" --require-hashes --no-build-isolation --only-binary :all: --no-binary esptool \
+            -r "$o/publication/requirements-esptool.txt"
+          python -m espsecure --help >/dev/null
+      - name: Correspondances réelles des placeholders HA (secret du dépôt)
+        # Sans placeholders.yaml, `render_ha_config.py --check` n'a rien à
+        # chercher et répond 0 : le hook passait sans rien vérifier. Le fichier
+        # (gitignoré) vient du secret HA_PLACEHOLDERS ; absent (fork, Dependabot),
+        # on le dit au lieu de réussir en silence.
+        env:
+          HA_PLACEHOLDERS: ${{ secrets.HA_PLACEHOLDERS }}
+        run: |
+          if [ -n "$HA_PLACEHOLDERS" ]; then
+            printf '%s\n' "$HA_PLACEHOLDERS" > HomeAssistant_Config/placeholders.yaml
+          else
+            echo "::warning::Secret HA_PLACEHOLDERS absent : render_ha_config.py --check ne vérifie rien."
+          fi
+      - name: Hooks pre-commit (yamllint, BOM, secrets, placeholders HA)
+        run: pre-commit run --all-files --show-diff-on-failure
+      - name: Tests hôte (outils, miroirs des moteurs, garde-fous de contenu)
+        run: python -m pytest
+      - name: Moteur Go C++ (le vrai go_engine.cpp)
+        # Le poste de dev n'a qu'un cross-compilateur RISC-V : ce test ne
+        # tourne qu'ici. Seul test du moteur Go depuis le 08/10/2026 (son miroir
+        # Python, en double, est retiré : OUT-2 de l'audit du 07/10/2026).
+        run: |
+          g++ -std=c++17 -O2 -Wall -Wextra -I Tab5/jeux -o "$RUNNER_TEMP/test_go_engine" \
+            tools/test_go_engine.cpp Tab5/jeux/go_engine.cpp
+          "$RUNNER_TEMP/test_go_engine"
+      # Échecs et dames : les vrais moteurs contre les perft de référence, sous ASan + UBSan
+      # (OUT-2 de l'audit du 07/10/2026 : chess_ai.cpp avait changé de +255/−145 lignes
+      # depuis son miroir Python). Ils font foi ; tools/test_chess_perft.py et
+      # tools/test_draughts_engine.py restent les miroirs pour le poste de dev, sans g++.
+      # tools/hote/esphome.h remplace l'en-tête d'ESPHome (millis, ESP_LOG*), et
+      # tests/test_moteurs_hote.py tient chaque tools/test_*.cpp branché ici.
+      - name: Moteur d'échecs C++ (le vrai chess_ai.cpp contre la suite perft)
+        run: |
+          g++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+            -Wall -Wextra -I tools/hote -I Tab5/rendu/hote -I Tab5/socle -I Tab5/jeux -o "$RUNNER_TEMP/test_chess_engine" \
+            tools/test_chess_engine.cpp Tab5/jeux/chess_ai.cpp Tab5/socle/tab5_i18n.cpp
+          "$RUNNER_TEMP/test_chess_engine"
+      - name: Moteur de dames C++ (le vrai draughts_engine.cpp contre les perft)
+        # Module pur : compilé tel quel, sans tools/hote/esphome.h (s'il en avait besoin,
+        # il ne serait plus pur et cette étape casserait).
+        run: |
+          g++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+            -Wall -Wextra -I Tab5/jeux -o "$RUNNER_TEMP/test_draughts_engine" \
+            tools/test_draughts_engine.cpp Tab5/jeux/draughts_engine.cpp
+          "$RUNNER_TEMP/test_draughts_engine"
+      - name: Moteur du réveil C++ (alarm_clock.cpp + tab5_core.cpp + tab5_i18n.cpp, horloge simulée)
+        # Le réveil doit sonner sans Home Assistant : son moteur est pur (lot 8b)
+        # et se teste ici, fuseau Europe/Paris, changements d'heure compris.
+        run: |
+          g++ -std=c++17 -O2 -Wall -Wextra -I Tab5/socle -o "$RUNNER_TEMP/test_alarm_clock" \
+            tools/test_alarm_clock.cpp Tab5/socle/alarm_clock.cpp Tab5/socle/tab5_core.cpp Tab5/socle/tab5_i18n.cpp
+          "$RUNNER_TEMP/test_alarm_clock"
+      - name: Socle C++ commun (tab5_champs.cpp + tab5_core.cpp, géométrie, modèle des tuiles)
+        # Lecture bornée des payloads, dates et heures « HH:MM », ce que les tuiles
+        # partagent (audit du 07/10/2026, lot L5) : pur, testé ici comme le réveil.
+        run: |
+          g++ -std=c++17 -O2 -Wall -Wextra -I Tab5/socle -o "$RUNNER_TEMP/test_tab5_socle" \
+            tools/test_tab5_socle.cpp Tab5/socle/tab5_champs.cpp Tab5/socle/tab5_core.cpp Tab5/socle/tab5_i18n.cpp
+          "$RUNNER_TEMP/test_tab5_socle"
+      - name: Lecture des payloads de HA (tab5_parse.cpp, sous ASan + UBSan)
+        # Les parseurs des services sortis de l'écran (lot F de l'audit du 30/09/2026) :
+        # cas normaux, champs vides, tronqués, extrêmes, nan/inf ; comportements figés.
+        run: |
+          g++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+            -Wall -Wextra -I Tab5/socle -o "$RUNNER_TEMP/test_parse" \
+            tools/test_parse.cpp Tab5/socle/tab5_parse.cpp Tab5/socle/tab5_champs.cpp \
+            Tab5/socle/tab5_core.cpp Tab5/socle/tab5_i18n.cpp
+          "$RUNNER_TEMP/test_parse"
+      - name: Payloads du mode démo conformes au contrat firmware
+        run: python tools/demo/demo_pusher.py --dry-run
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.firmware == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: user_entities.yaml du modèle et clé de signature jetable
+        run: |
+          cp Tab5/user_entities.example.yaml Tab5/user_entities.yaml
+          # Firmware sans secret (lot 6b, ADR-0020) : plus de secrets.yaml, seulement
+          # une clé de signature JETABLE, créée pour ce run et jamais conservée. Un
+          # binaire signé avec elle est refusé en OTA par une tablette du projet.
+          openssl genrsa -out tab5_signature.pem 3072
+      # ccache est déjà actif dans le conteneur ESPHome (« ccache will be used for
+      # faster recompilation » dans le log), mais son cache mourait avec le
+      # runner : ~2 000 objets ESP-IDF/LVGL/composants recompilés à chaque run
+      # (8 min 20 s sur 10 min le 25/09/2026). build-action transmet CCACHE_DIR
+      # au conteneur et monte $HOME au même chemin : un dossier sous
+      # runner.temp est donc le même dedans et dehors. Clé unique par run ; la
+      # restauration prend le plus récent (celui de la branche, sinon de main).
+      - name: Cache ccache (objets de la compilation précédente)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-esp32p4-${{ github.run_id }}
+          restore-keys: ccache-esp32p4-
+      - name: Configuration ccache
+        # CCACHE_DIR exporté pour tout le reste du job (dont les steps internes de
+        # build-action). compiler_check = content : la toolchain est réinstallée
+        # à chaque run, son mtime ne doit pas invalider tout le cache.
+        run: |
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ccache"
+          printf 'max_size = 2G\ncompiler_check = content\n' > "$RUNNER_TEMP/ccache/ccache.conf"
+      - name: Build ESPHome Firmware
+        id: esphome-build
+        uses: esphome/build-action@ae5408cdbc4f70692bf8e345c4982bca05a93667 # v8.1.0
+        with:
+          yaml-file: tab5-ha-hmi.yaml
+      - name: Statistiques ccache
+        # Diagnostic seulement : ne doit jamais faire échouer le check requis.
+        # Remises à zéro après lecture : le run suivant n'affiche que les siennes.
+        if: always()
+        continue-on-error: true
+        run: |
+          ccache_run() {
+            docker run --rm --entrypoint ccache --user "$(id -u):$(id -g)" \
+              -e CCACHE_DIR -v "$HOME:$HOME" ghcr.io/esphome/esphome:latest "$@"
+          }
+          stats=$(ccache_run --show-stats)
+          echo "$stats"
+          printf '### ccache\n```\n%s\n```\n' "$stats" >> "$GITHUB_STEP_SUMMARY"
+          ccache_run --zero-stats >/dev/null
+      - name: Upload Artifact
+        # Le binaire n'a d'usage que pour un push sur main (ou un lancement
+        # manuel) : inutile d'en stocker un par commit de branche.
+        # build-action copie ses binaires dans `<nom>-<variante>/`
+        # (tab5-ha-hmi-esp32p4/ : .factory.bin, .ota.bin, manifest.json) — pas
+        # dans l'ancien `.pioenvs/…/firmware.bin` de PlatformIO, d'où plus aucun
+        # artefact du 15/07 au 25/09/2026 sans que la CI ne le signale.
+        # Depuis le lot 6b, il est signé par la clé jetable du run : une tablette du
+        # projet le refuse en OTA, seul un flash USB (.factory.bin) le pose. Les
+        # binaires à distribuer sont ceux des releases, signés par la clé du projet
+        # (publication.yml, lot 6c, ADR-0022).
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tab5-firmware
+          path: ${{ steps.esphome-build.outputs.name }}
+          if-no-files-found: error
+          retention-days: 30
+
+  build-min:
+    needs: changes
+    if: needs.changes.outputs.firmware == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Version plancher (min_version de tab5-ha-hmi.yaml)
+        id: plancher
+        # Lue dans le fichier plutôt que recopiée ici : relever le plancher dans
+        # tab5-ha-hmi.yaml suffit, le job suit.
+        run: |
+          v=$(sed -n 's/^[[:space:]]*min_version:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' tab5-ha-hmi.yaml | head -n 1)
+          if [ -z "$v" ]; then
+            echo "::error file=tab5-ha-hmi.yaml::min_version introuvable"
+            exit 1
+          fi
+          echo "ESPHome plancher : $v" >> "$GITHUB_STEP_SUMMARY"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: user_entities.yaml du modèle et clé de signature jetable
+        run: |
+          cp Tab5/user_entities.example.yaml Tab5/user_entities.yaml
+          # Firmware sans secret (lot 6b, ADR-0020) : plus de secrets.yaml, seulement
+          # une clé de signature JETABLE, créée pour ce run et jamais conservée. Un
+          # binaire signé avec elle est refusé en OTA par une tablette du projet.
+          openssl genrsa -out tab5_signature.pem 3072
+      # Cache ccache à part : les objets d'une autre version d'ESPHome (ou d'ESP-IDF)
+      # ne resserviraient pas, et chaque job écraserait le cache de l'autre.
+      - name: Cache ccache (objets de la compilation précédente)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-p4-min-${{ steps.plancher.outputs.version }}-${{ github.run_id }}
+          restore-keys: ccache-p4-min-${{ steps.plancher.outputs.version }}-
+      - name: Configuration ccache
+        run: |
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ccache"
+          printf 'max_size = 2G\ncompiler_check = content\n' > "$RUNNER_TEMP/ccache/ccache.conf"
+      - name: Build ESPHome Firmware (version plancher)
+        uses: esphome/build-action@ae5408cdbc4f70692bf8e345c4982bca05a93667 # v8.1.0
+        with:
+          yaml-file: tab5-ha-hmi.yaml
+          version: ${{ steps.plancher.outputs.version }}
+
+  # Révisions du Tab5 absentes de la tablette d'Axel (docs/hardware.md) : on vérifie
+  # seulement que leurs fichiers Tab5/paquets/ecran-*.yaml compilent encore. Même compilation
+  # que `build` (image `latest`), la révision ajoutée au user_entities.yaml factice.
+  # Cache de `build` restauré mais jamais sauvegardé : les objets sont presque tous
+  # communs, et trois jobs n'écrasent pas le même cache. Pas d'artefact : un binaire
+  # signé par une clé jetable ne sert à aucune tablette.
+  build-revisions:
+    name: build-revisions (${{ matrix.ecran }})
+    needs: changes
+    if: needs.changes.outputs.ecrans == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ecran: [st7121, ili9881c]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: user_entities.yaml (révision ${{ matrix.ecran }}) et clé de signature jetable
+        run: |
+          cp Tab5/user_entities.example.yaml Tab5/user_entities.yaml
+          printf '\ntab5_ecran: %s\n' "${{ matrix.ecran }}" >> Tab5/user_entities.yaml
+          # Firmware sans secret (lot 6b, ADR-0020) : plus de secrets.yaml, seulement
+          # une clé de signature JETABLE, créée pour ce run et jamais conservée. Un
+          # binaire signé avec elle est refusé en OTA par une tablette du projet.
+          openssl genrsa -out tab5_signature.pem 3072
+      - name: Cache ccache (restauré depuis build, jamais sauvegardé)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-esp32p4-${{ github.run_id }}
+          restore-keys: ccache-esp32p4-
+      - name: Configuration ccache
+        run: |
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ccache"
+          printf 'max_size = 2G\ncompiler_check = content\n' > "$RUNNER_TEMP/ccache/ccache.conf"
+      - name: Build ESPHome Firmware (révision ${{ matrix.ecran }})
+        uses: esphome/build-action@ae5408cdbc4f70692bf8e345c4982bca05a93667 # v8.1.0
+        with:
+          yaml-file: tab5-ha-hmi.yaml
+
+  # Carte Waveshare 7B (ADR-0061, Tab5/paquets/carte-waveshare-7b.yaml) : on vérifie qu'elle
+  # compile entièrement. Même compilation que `build` (image `latest`), la carte ajoutée au
+  # user_entities.yaml factice, comme une révision. Cache de `build` restauré, jamais
+  # sauvegardé ; pas d'artefact (clé de signature jetable, carte jamais testée).
+  build-carte-7b:
+    needs: changes
+    if: needs.changes.outputs.firmware == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: user_entities.yaml (carte waveshare-7b) et clé de signature jetable
+        run: |
+          cp Tab5/user_entities.example.yaml Tab5/user_entities.yaml
+          printf '\ntab5_carte: waveshare-7b\n' >> Tab5/user_entities.yaml
+          # Firmware sans secret (lot 6b, ADR-0020) : clé de signature JETABLE.
+          openssl genrsa -out tab5_signature.pem 3072
+      - name: Cache ccache (restauré depuis build, jamais sauvegardé)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-esp32p4-${{ github.run_id }}
+          restore-keys: ccache-esp32p4-
+      - name: Configuration ccache
+        run: |
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ccache"
+          printf 'max_size = 2G\ncompiler_check = content\n' > "$RUNNER_TEMP/ccache/ccache.conf"
+      - name: Build ESPHome Firmware (carte waveshare-7b)
+        uses: esphome/build-action@ae5408cdbc4f70692bf8e345c4982bca05a93667 # v8.1.0
+        with:
+          yaml-file: tab5-ha-hmi.yaml

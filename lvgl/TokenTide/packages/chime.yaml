@@ -1,0 +1,93 @@
+# Session chime: plays when the 5h usage window rolls over, i.e. when a
+# fresh Claude session budget becomes available. Fully HA-configurable:
+# enable, melody, volume, plus a test button.
+#
+# Hardware contract: the board's hardware package provides an rtttl
+# instance with id chime_rtttl (speaker- or PWM-backed) and a
+# sound_begin script (amp power-up where needed, no-op elsewhere).
+# Boards without a sound path simply do not include this package.
+
+substitutions:
+  # First-boot default for the chime switch: "OFF" or "ON". Override it
+  # in your device YAML; the state saved via HA always wins afterwards.
+  # OFF by default - a device that makes noise unasked is rude.
+  chime_default: "OFF"
+
+globals:
+  - id: chime_melody_idx
+    type: int
+    restore_value: no
+    initial_value: "1"
+
+switch:
+  - platform: template
+    id: chime_enabled
+    name: "Session Chime"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_${chime_default}
+
+number:
+  - platform: template
+    id: chime_volume
+    name: "Chime Volume"
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 60
+    restore_value: true
+    optimistic: true
+
+select:
+  - platform: template
+    id: chime_melody
+    name: "Chime Melody"
+    entity_category: config
+    options: ["Beep", "Chime", "Coin", "Nokia"]
+    initial_option: "Chime"
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lambda: |-
+          if (x == "Beep") id(chime_melody_idx) = 0;
+          else if (x == "Chime") id(chime_melody_idx) = 1;
+          else if (x == "Coin") id(chime_melody_idx) = 2;
+          else id(chime_melody_idx) = 3;
+
+button:
+  - platform: template
+    id: chime_test
+    name: "Chime Test"
+    entity_category: config
+    on_press:
+      - script.execute: play_chime
+
+script:
+  - id: play_chime
+    mode: single
+    then:
+      - script.execute: sound_begin
+      - lambda: "id(chime_rtttl).set_gain(id(chime_volume).state / 100.0f);"
+      - rtttl.play:
+          rtttl: !lambda |-
+            switch (id(chime_melody_idx)) {
+              case 0: return std::string("beep:d=16,o=6,b=140:c");
+              case 2: return std::string("coin:d=16,o=6,b=200:b5,8e6");
+              case 3: return std::string("nokia:d=4,o=5,b=180:8e6,8d6,f#,g#,8c#6,8b,d,e,8b,8a,c#,e,2a");
+              default: return std::string("chime:d=8,o=5,b=160:c,e,g,4c6");
+            }
+
+interval:
+  # The 5h reset timestamp is stable within a window and jumps forward
+  # when it rolls over - that jump is the "new session" moment.
+  - interval: 2s
+    then:
+      - lambda: |-
+          static long prev_r5 = 0;
+          long cur = id(reset_5h_epoch);
+          if (cur != 0 && prev_r5 != 0 && cur > prev_r5 && id(chime_enabled).state)
+            id(play_chime).execute();
+          if (cur != 0)
+            prev_r5 = cur;

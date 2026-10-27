@@ -1,0 +1,421 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file packages/tab5_calendar.yaml
+# @role Réponses aux requêtes du popup calendrier du Tab5 (calendar_popup.yaml).
+#       Le firmware appelle script.tab5_calendrier_mois (annee, mois) à l'ouverture
+#       et à chaque changement de mois non caché, et script.tab5_calendrier_jour
+#       (date) au tap sur une cellule. Les réponses repartent vers l'écran via
+#       esphome.tab5_ha_hmi_tab5_maj_calendrier_mois / _jour (tab5-api-logic.yaml).
+# @payload_contract codes = 62 hex (2 par jour, 31 jours) — bits : 1 travail,
+#       2 férié, 4 vacances scolaires, 8 RDV, 16 anniversaire. heures = 31 champs
+#       "HH:MM-HH:MM" séparés par | (vide si pas de travail). details = 31 champs
+#       "type|texte;..." séparés par ~ (même contrat que tab5_calendrier_jour,
+#       max 6 lignes/jour ; textes sanitisés | -> /, ; -> ,). Détail jour solo =
+#       fallback si le firmware n'a pas reçu details.
+# @ai_instruction Les trois templates importent custom_templates/tab5_calendar.jinja
+#       (macros ev_start / ev_end / ev_summary / couvre : normalisation d'un
+#       événement calendar.get_events, journée entière ou horodaté). Ce fichier
+#       doit être déployé dans config/custom_templates/ et rechargé
+#       (homeassistant.reload_custom_templates) AVANT ce package, sinon les
+#       deux scripts échouent à la ligne d'import. Ne pas recopier ces lignes ici.
+#       Même chose pour custom_templates/tab5_tablette.jinja (garde « tablette
+#       connectée », 08/10/2026).
+# @data_sources Cinq agendas choisis dans HA (listes « Tab5 · … calendar »,
+#       packages/tab5_reglages.yaml, ADR-0024) : travail, jours fériés, rendez-vous,
+#       anniversaires, vacances scolaires. Un agenda non choisi est simplement absent.
+#       Travail : les événements dont le titre contient un des mots de « Tab5 · work event keyword » (sans casse ; vide = tous) ; ses autres événements
+#       sont des RDV. Fériés : un agenda de l'intégration « Jours fériés » (holiday)
+#       ne contient que des jours fériés ; un autre (Google « Jours fériés et autres
+#       fêtes en France ») mélange fériés et fêtes civiles -> liste blanche
+#       feries_connus. Vacances : tous les événements de leur agenda.
+# @historique Jusqu'au 29/09/2026, les vacances venaient d'une table fixe de la zone A
+#       (académie de Bordeaux) écrite ici, montrée à tout le monde et arrêtée à l'été
+#       2027, et seul un titre contenant « Travail » comptait comme travail. Le flux
+#       ICS du ministère (fr.ftp.opendatasoft.com/openscol/fr-en-calendrier-scolaire/
+#       Zone-A.ics, vérifié le 29/09/2026 : 75 événements, jusqu'à l'été 2028) remplace
+#       la table, par l'intégration « Calendrier distant » (docs/installation.md).
+# @ai_warning Ne JAMAIS passer now() brut à un service — piège documenté dans
+#       packages/tab5_push.yaml (bornes dérivées de annee/mois/date ; now() servi
+#       uniquement pour clamper le début au jour courant).
+# @perf get_events mois = [max(1er du mois, aujourd'hui), 1er du mois suivant[ :
+#       pas d'événements passés (inutiles à l'affichage). Mois entièrement passé
+#       → debut=fin (fenêtre vide). Codes jours passés = vacances seules (pas
+#       travail/RDV/férié/anniv) : l'agenda des vacances est lu sur le mois ENTIER,
+#       par son propre appel. Tap jour passé = script _jour inchangé.
+# @install Nécessite homeassistant.packages: !include_dir_named packages
+# ============================================================================
+
+script:
+  tab5_calendrier_mois:
+    alias: "Tab5 — calendar codes of a month (calendar popup)"
+    description: >-
+      Calcule pour le mois demandé le bitmask jour par jour (travail, férié,
+      vacances scolaires, RDV, anniversaire) + les heures de travail, et
+      pousse le tout vers le Tab5. mode queued : chaque demande a sa réponse.
+    # queued, pas restart (28/09/2026) : la tablette demande d'affilée le mois
+    # affiché ET ses voisins (pré-chargement M-1 / M+1, tab5_cal_render de
+    # Tab5/paquets/tab5-calendar.yaml). En restart, chaque demande annulait la précédente :
+    # une seule des trois aboutissait (job « HA neuf »), les deux autres mois
+    # restaient sans travail ni fériés. Chaque réponse porte son année et son mois,
+    # la tablette range chacune dans son cache. max 10 : une navigation rapide
+    # (quelques mois, trois demandes chacun) sans file sans fin.
+    mode: queued
+    max: 10
+    fields:
+      annee:
+        description: "Année demandée (ex: 2026)"
+        required: true
+        selector:
+          text:
+      mois:
+        description: "Mois demandé (1-12)"
+        required: true
+        selector:
+          text:
+      appareil:
+        description: >-
+          device_id de la tablette qui demande (ADR-0063) : la réponse ne va qu'à elle.
+          Vide : à chaque tablette connectée.
+        required: false
+        selector:
+          text:
+    sequence:
+      # Tablette absente (pas encore ajoutée dans HA) ou hors ligne : rien à pousser,
+      # pas d'erreur « Action … not found » / « Not connected » (test « HA neuf »,
+      # 28/09/2026). Tablette trouvée par le modèle de l'appareil, pas par son nom.
+      - condition: template
+        value_template: &tab5_connectee >-
+          {%- from 'tab5_tablette.jinja' import tab5_connectee -%}
+          {{ tab5_connectee() == 'oui' }}
+      # int(0), plus `| int` nu (audit du 07/10/2026, HA-15) : une année ou un mois qui
+      # n'est pas un nombre (événement tiré à la main, champ vide) levait une erreur de
+      # rendu dans le journal. Hors bornes : arrêt sans erreur, juste après.
+      - variables:
+          y: "{{ annee | int(0) }}"
+          m: "{{ mois | int(0) }}"
+          # Le calendrier Google "Jours fériés et autres fêtes" mélange vrais
+          # fériés et fêtes civiles (Heure d'été, Fête des Mères...) : seuls
+          # ces intitulés colorent un jour en férié.
+          feries_connus: &feries_connus
+            - "Jour de l'an"
+            - "Pâques"
+            - "Le lundi de Pâques"
+            - "La fête du Travail"
+            - "Fête de la Victoire 1945"
+            - "L'Ascension"
+            - "Pentecôte"
+            - "Le lundi de Pentecôte"
+            - "La fête nationale"
+            - "L'Assomption"
+            - "La Toussaint"
+            - "L'Armistice"
+            - "Noël"
+      - condition: template
+        value_template: "{{ 1970 <= (y | int(0)) <= 2100 and 1 <= (m | int(0)) <= 12 }}"
+      # Agendas choisis dans HA : entity_id, ou '' s'il n'est pas choisi ou n'existe
+      # plus. `agendas` = ceux à interroger (sans doublon : un même agenda peut servir
+      # à deux rôles).
+      - variables: &agendas_choisis
+          ag_travail: >-
+            {%- set a = states('select.tab5_agenda_de_travail') -%}
+            {{ a if a.startswith('calendar.') and expand(a) | count > 0 else '' }}
+          ag_feries: >-
+            {%- set a = states('select.tab5_agenda_des_jours_feries') -%}
+            {{ a if a.startswith('calendar.') and expand(a) | count > 0 else '' }}
+          ag_rdv: >-
+            {%- set a = states('select.tab5_agenda_des_rendez_vous') -%}
+            {{ a if a.startswith('calendar.') and expand(a) | count > 0 else '' }}
+          ag_anniv: >-
+            {%- set a = states('select.tab5_agenda_des_anniversaires') -%}
+            {{ a if a.startswith('calendar.') and expand(a) | count > 0 else '' }}
+          # Vacances scolaires : lu à part (sur le mois entier, jours passés compris).
+          ag_vacances: >-
+            {%- set a = states('select.tab5_agenda_des_vacances_scolaires') -%}
+            {{ a if a.startswith('calendar.') and expand(a) | count > 0 else '' }}
+          agendas: "{{ [ag_travail, ag_feries, ag_rdv, ag_anniv] | reject('eq', '') | unique | list }}"
+          tous_feries: "{{ ag_feries != '' and ag_feries in integration_entities('holiday') }}"
+          # Mots des événements de travail, en minuscules ; liste vide = tout l'agenda
+          # de travail est du travail. Entité absente (package plus ancien que ce
+          # fichier) : liste vide aussi.
+          mots_travail: >-
+            {%- set m = states('input_text.tab5_mot_travail') -%}
+            {{ [] if m in ['unknown', 'unavailable'] else m.split(',') | map('trim') | map('lower') | reject('eq', '') | list }}
+      - variables:
+          # Mois civil [1er, 1er suivant[ ; get_events borné à aujourd'hui si mois courant.
+          # Mois entièrement passé → mois civil complet (voir `debut` plus bas).
+          debut_mois: "{{ '%04d-%02d-01 00:00:00' | format(y | int, m | int) }}"
+          fin: >-
+            {% set y2 = (y | int) + 1 if (m | int) == 12 else (y | int) %}
+            {% set m2 = 1 if (m | int) == 12 else (m | int) + 1 %}
+            {{ '%04d-%02d-01 00:00:00' | format(y2, m2) }}
+          today0: "{{ now().strftime('%Y-%m-%d 00:00:00') }}"
+          today_s: "{{ now().strftime('%Y-%m-%d') }}"
+      - variables:
+          ndays: "{{ ((fin | as_datetime) - (debut_mois | as_datetime)).days }}"
+          debut: >-
+            {# Mois entièrement passé : on interroge le mois civil COMPLET, et
+               surtout PAS `fin` (= debut). `calendar.get_events` exige
+               end > start STRICTEMENT et rejette la fenêtre vide avec
+               « Expected end time to be after start time » — le script
+               s'arrêtait là et ne poussait NI codes NI heures, donc la grille
+               restait figée sur le mois précédent (constaté le 06/08).
+               Récupérer ces événements ne change rien au résultat : le garde
+               `futur_ou_auj = ds >= today_s` plus bas les ignore tous, jour
+               par jour. Vérifié : un juillet chargé (travail + férié + RDV +
+               anniversaire) et un juillet vide rendent le même payload. #}
+            {% if (fin | as_datetime).date() <= now().date() %}
+              {{ debut_mois }}
+            {% elif (debut_mois | as_datetime).date() < now().date() %}
+              {{ today0 }}
+            {% else %}
+              {{ debut_mois }}
+            {% endif %}
+      # Aucun agenda choisi : pas d'appel (une cible vide lève une erreur que
+      # continue_on_error ne rattrape pas) ; `ev` reste indéfini, seules les vacances
+      # scolaires colorent la grille.
+      - if:
+          - condition: template
+            value_template: "{{ agendas | count > 0 }}"
+        then:
+          - action: calendar.get_events
+            continue_on_error: true
+            data:
+              start_date_time: "{{ debut }}"
+              end_date_time: "{{ fin }}"
+            target:
+              entity_id: "{{ agendas }}"
+            response_variable: ev
+      - if:
+          - condition: template
+            value_template: "{{ ag_vacances != '' }}"
+        then:
+          - action: calendar.get_events
+            continue_on_error: true
+            data:
+              start_date_time: "{{ debut_mois }}"
+              end_date_time: "{{ fin }}"
+            target:
+              entity_id: "{{ ag_vacances }}"
+            response_variable: ev_vac
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+            {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{{ repeat.item }}"
+            - action: "esphome.{{ tablette }}_tab5_maj_calendrier_mois"
+              continue_on_error: true
+              data:
+                annee: "{{ y }}"
+                mois: "{{ m }}"
+                codes: >-
+                  {% from 'tab5_calendar.jinja' import couvre, ev_start, ev_end, ev_summary %}
+                  {% set trav = ev[ag_travail].events if ev is defined and ag_travail in ev else [] %}
+                  {% set fer = ev[ag_feries].events if ev is defined and ag_feries in ev else [] %}
+                  {% set fam = ev[ag_rdv].events if ev is defined and ag_rdv in ev and ag_rdv != ag_travail else [] %}
+                  {% set ann = ev[ag_anniv].events if ev is defined and ag_anniv in ev else [] %}
+                  {% set vac = ev_vac[ag_vacances].events if ev_vac is defined and ag_vacances in ev_vac else [] %}
+                  {% set ns = namespace(out='') %}
+                  {% for d in range(1, 32) %}
+                    {% set f = namespace(trav=false, ferie=false, vac=false, rdv=false, anniv=false) %}
+                    {% if d <= (ndays | int) %}
+                      {% set ds = '%04d-%02d-%02d' | format(y | int, m | int, d) %}
+                      {% set futur_ou_auj = ds >= today_s %}
+                      {% for e in vac %}
+                        {% if couvre(e, ds) %}
+                          {% set f.vac = true %}
+                        {% endif %}
+                      {% endfor %}
+                      {% if futur_ou_auj %}
+                        {% for e in trav %}
+                          {% set summ = ev_summary(e) | lower %}
+                          {% set c = couvre(e, ds) %}
+                          {% if c and (mots_travail | count == 0 or mots_travail | select('in', summ) | list | count > 0) %}
+                            {% set f.trav = true %}
+                          {% elif c %}
+                            {% set f.rdv = true %}
+                          {% endif %}
+                        {% endfor %}
+                        {% for e in fer %}
+                          {% if couvre(e, ds) and (tous_feries or ev_summary(e) in feries_connus) %}
+                            {% set f.ferie = true %}
+                          {% endif %}
+                        {% endfor %}
+                        {% for e in fam %}
+                          {% if couvre(e, ds) %}
+                            {% set f.rdv = true %}
+                          {% endif %}
+                        {% endfor %}
+                        {% for e in ann %}
+                          {% if couvre(e, ds) %}
+                            {% set f.anniv = true %}
+                          {% endif %}
+                        {% endfor %}
+                      {% endif %}
+                    {% endif %}
+                    {% set val = (1 if f.trav else 0) + (2 if f.ferie else 0) + (4 if f.vac else 0) + (8 if f.rdv else 0) + (16 if f.anniv else 0) %}
+                    {% set ns.out = ns.out ~ '%02X' | format(val) %}
+                  {% endfor %}
+                  {{ ns.out }}
+                heures: >-
+                  {% from 'tab5_calendar.jinja' import couvre, ev_start, ev_end, ev_summary %}
+                  {% set trav = ev[ag_travail].events if ev is defined and ag_travail in ev else [] %}
+                  {% set ns = namespace(out='') %}
+                  {% for d in range(1, 32) %}
+                    {% set h = namespace(txt='') %}
+                    {% if d <= (ndays | int) %}
+                      {% set ds = '%04d-%02d-%02d' | format(y | int, m | int, d) %}
+                      {% if ds >= today_s %}
+                        {% for e in trav %}
+                          {% set st = ev_start(e) %}
+                          {% set en = ev_end(e) %}
+                          {% set summ = ev_summary(e) | lower %}
+                          {% if h.txt == '' and (mots_travail | count == 0 or mots_travail | select('in', summ) | list | count > 0) and 'T' in st and st[:10] == ds %}
+                            {% set h.txt = (st | as_datetime).strftime('%H:%M') ~ '-' ~ (en | as_datetime).strftime('%H:%M') %}
+                          {% endif %}
+                        {% endfor %}
+                      {% endif %}
+                    {% endif %}
+                    {% set ns.out = ns.out ~ h.txt ~ ('' if loop.last else '|') %}
+                  {% endfor %}
+                  {{ ns.out }}
+                # HA a redécouvert le schéma ESPHome post-OTA (details désormais requis
+                # par le service) : "required key not provided @ data['details']" sur
+                # tab5_calendrier_mois sinon. On envoie vide -> has_details=false côté
+                # firmware -> tap jour retombe sur script._jour (comportement voulu).
+                details: ""
+
+  tab5_calendrier_jour:
+    alias: "Tab5 — details of a day (calendar popup)"
+    description: >-
+      Construit les lignes de détail du jour tapé (férié nommé, vacances
+      scolaires, horaires de travail, RDV, anniversaires, fêtes civiles) et les
+      pousse vers le sous-popup du Tab5.
+    # queued, comme tab5_calendrier_mois : aucune demande n'en annule une autre. La
+    # tablette ignore une réponse dont la date n'est plus celle du détail affiché
+    # (tab5_maj_calendrier_jour, Tab5/paquets/tab5-api-logic.yaml) : taper vite plusieurs
+    # jours n'affiche que le dernier.
+    mode: queued
+    max: 10
+    fields:
+      date:
+        description: "Jour demandé (YYYY-MM-DD)"
+        required: true
+        selector:
+          text:
+      appareil:
+        description: >-
+          device_id de la tablette qui demande (ADR-0063) : la réponse ne va qu'à elle.
+          Vide : à chaque tablette connectée.
+        required: false
+        selector:
+          text:
+    sequence:
+      # Tablette absente ou hors ligne : voir tab5_calendrier_mois.
+      - condition: template
+        value_template: *tab5_connectee
+      - variables:
+          ds: "{{ date | string }}"
+          feries_connus: *feries_connus
+      - variables: *agendas_choisis
+      - variables:
+          fin_jour: "{{ ((ds ~ ' 00:00:00') | as_datetime + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S') }}"
+          # Un seul jour : les vacances dans le même appel que les autres agendas.
+          agendas_jour: "{{ (agendas + [ag_vacances]) | reject('eq', '') | unique | list }}"
+      - if:
+          - condition: template
+            value_template: "{{ agendas_jour | count > 0 }}"
+        then:
+          - action: calendar.get_events
+            continue_on_error: true
+            data:
+              start_date_time: "{{ ds }} 00:00:00"
+              end_date_time: "{{ fin_jour }}"
+            target:
+              entity_id: "{{ agendas_jour }}"
+            response_variable: ev
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+            {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{{ repeat.item }}"
+            - action: "esphome.{{ tablette }}_tab5_maj_calendrier_jour"
+              continue_on_error: true
+              data:
+                date: "{{ ds }}"
+                payload: >-
+                  {% from 'tab5_calendar.jinja' import couvre, ev_start, ev_end, ev_summary %}
+                  {% set trav = ev[ag_travail].events if ev is defined and ag_travail in ev else [] %}
+                  {% set fer = ev[ag_feries].events if ev is defined and ag_feries in ev else [] %}
+                  {# Même agenda pour le travail et les rendez-vous : ses rendez-vous sont
+                     déjà lus avec le travail, pas deux fois. #}
+                  {% set fam = ev[ag_rdv].events if ev is defined and ag_rdv in ev and ag_rdv != ag_travail else [] %}
+                  {% set ann = ev[ag_anniv].events if ev is defined and ag_anniv in ev else [] %}
+                  {% set vac = ev[ag_vacances].events if ev is defined and ag_vacances in ev else [] %}
+                  {% set ns = namespace(lines=[]) %}
+                  {% for e in fer %}
+                    {% set summ = ev_summary(e) %}
+                    {% set txt = summ | replace('|', '/') | replace(';', ',') | replace('~', '-') %}
+                    {% if couvre(e, ds) and (tous_feries or summ in feries_connus) %}
+                      {% set ns.lines = ns.lines + ['ferie|' ~ txt] %}
+                    {% endif %}
+                  {% endfor %}
+                  {% for e in vac %}
+                    {% if couvre(e, ds) %}
+                      {% set ns.lines = ns.lines + ['vacances|' ~ (ev_summary(e) | replace('|', '/') | replace(';', ',') | replace('~', '-'))] %}
+                    {% endif %}
+                  {% endfor %}
+                  {% set seen = namespace(keys=[]) %}
+                  {% for e in trav %}
+                    {% set st = ev_start(e) %}
+                    {% set en = ev_end(e) %}
+                    {% set summ = ev_summary(e) | lower %}
+                    {% if (mots_travail | count == 0 or mots_travail | select('in', summ) | list | count > 0) and 'T' in st and st[:10] == ds %}
+                      {% set k = st ~ en %}
+                      {% if k not in seen.keys %}
+                        {% set seen.keys = seen.keys + [k] %}
+                        {% set ns.lines = ns.lines + ['travail|Travail ' ~ (st | as_datetime).strftime('%H:%M') ~ ' – ' ~ (en | as_datetime).strftime('%H:%M')] %}
+                      {% endif %}
+                    {% endif %}
+                  {% endfor %}
+                  {% for e in trav %}
+                    {% set st = ev_start(e) %}
+                    {% set summ = ev_summary(e) %}
+                    {% set txt = summ | replace('|', '/') | replace(';', ',') | replace('~', '-') %}
+                    {% if couvre(e, ds) and not (mots_travail | count == 0 or mots_travail | select('in', summ | lower) | list | count > 0) %}
+                      {% if 'T' in st %}
+                        {% set ns.lines = ns.lines + ['rdv|' ~ (st | as_datetime).strftime('%H:%M') ~ ' · ' ~ txt] %}
+                      {% else %}
+                        {% set ns.lines = ns.lines + ['rdv|' ~ txt] %}
+                      {% endif %}
+                    {% endif %}
+                  {% endfor %}
+                  {% for e in fam %}
+                    {% set st = ev_start(e) %}
+                    {% set txt = ev_summary(e) | replace('|', '/') | replace(';', ',') | replace('~', '-') %}
+                    {% if couvre(e, ds) %}
+                      {% if 'T' in st %}
+                        {% set ns.lines = ns.lines + ['rdv|' ~ (st | as_datetime).strftime('%H:%M') ~ ' · ' ~ txt] %}
+                      {% else %}
+                        {% set ns.lines = ns.lines + ['rdv|' ~ txt] %}
+                      {% endif %}
+                    {% endif %}
+                  {% endfor %}
+                  {% for e in ann %}
+                    {% set st = ev_start(e) %}
+                    {% set txt = ev_summary(e) | replace('|', '/') | replace(';', ',') | replace('~', '-') %}
+                    {% if couvre(e, ds) %}
+                      {% set ns.lines = ns.lines + ['anniv|' ~ txt] %}
+                    {% endif %}
+                  {% endfor %}
+                  {% for e in fer %}
+                    {% set summ = ev_summary(e) %}
+                    {% set txt = summ | replace('|', '/') | replace(';', ',') | replace('~', '-') %}
+                    {% if couvre(e, ds) and not tous_feries and summ not in feries_connus %}
+                      {% set ns.lines = ns.lines + ['fete|' ~ txt] %}
+                    {% endif %}
+                  {% endfor %}
+                  {{ ns.lines[:6] | join(';') }}

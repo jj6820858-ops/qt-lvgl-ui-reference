@@ -1,0 +1,332 @@
+name: Publication (release, page de flashage)
+
+# Lot 6c, ADR-0022. À la publication d'une release (ou relancé à la main pour un tag) :
+#   1. les trois révisions d'écran du Tab5, puis les autres cartes que le tag connaît (la
+#      Waveshare 7B, ADR-0061 ; job `preparation`, `matrice`), sont compilées, SIGNÉES par
+#      la clé du projet (secret TAB5_CLE_SIGNATURE de l'environnement protégé
+#      `publication`, posé par Axel : lu seulement depuis `main` ou un tag `v*`, après son
+#      accord dans Actions) — jamais une clé jetable comme en PR ;
+#   2. leurs binaires et manifestes sont joints à la release, avec l'archive Home
+#      Assistant tab5_home_assistant.zip (job home-assistant, ADR-0024) et l'intégration
+#      pour HACS tab5_hacs.zip (même job, ADR-0035) ;
+#   3. le site GitHub Pages est reconstruit par site.yml à partir des fichiers des
+#      releases : `stable/` = dernière release 3.x non « pre-release », `beta/` = la plus
+#      récente. Les firmwares publiés y lisent leur mise à jour (Tab5/paquets/publication-*.yaml).
+# Une pre-release compile en canal `beta` (son entité de mise à jour lit `beta/`).
+# L'ELF de chaque variante est gardé 90 jours (artefact `elf-<variante>`) : c'est lui qui
+# décode la pile d'appels d'un plantage de ce firmware (tools/capture_serie.py --elf).
+# `elf_seulement` recompile une version déjà publiée pour retrouver son ELF, sans rien
+# publier ni remplacer, et vérifie que le code est le même que l'image publiée
+# (tools/publication/meme_code.py).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag de la release à (re)publier, par exemple v3.0.0
+        required: true
+      elf_seulement:
+        description: Recompiler seulement, pour garder l'ELF d'une version déjà publiée (rien n'est publié ni remplacé)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publication
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  # Empreinte SBv2 (SHA-256) de la clé PUBLIQUE du projet (ADR-0020) : le secret doit
+  # la redonner, sinon rien n'est signé. Publique, elle ne permet pas de signer.
+  EMPREINTE_CLE: 17600dd727976131c81d25ec2160b93a6f649424297a7d6afe859a9d6d718402
+  # Version d'ESPHome des binaires publiés : celle essayée sur la tablette, FIGÉE (la CI
+  # des PR suit `latest` et `min_version`, esphome-tab5.yml). À relever volontairement,
+  # après un essai sur la tablette ; jamais sous `min_version` (test_publication.py).
+  ESPHOME_PUBLICATION: "2026.9.0"
+  # Les autres cartes (ADR-0061) : la 7B exige 2026.9.1 (static_assert de
+  # Tab5/ecran/carte_7b_version.h), la version qui tourne sur la carte de l'auteur. Le
+  # Tab5 garde ESPHOME_PUBLICATION : ses binaires ne changent pas.
+  ESPHOME_PUBLICATION_CARTES: "2026.9.1"
+  # Variantes publiées (tools/publication/preparer.py, VARIANTES) : les révisions d'écran
+  # du Tab5 (`tab5_ecran`, Tab5/paquets/ecran-*.yaml), puis les autres cartes
+  # (`tab5_carte`, Tab5/paquets/carte-*.yaml).
+  ECRANS_TAB5: st7123 st7121 ili9881c
+  CARTES: waveshare-7b
+
+jobs:
+  preparation:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      canal: ${{ steps.release.outputs.canal }}
+      nom: ${{ steps.release.outputs.nom }}
+      url: ${{ steps.release.outputs.url }}
+      matrice: ${{ steps.variantes.outputs.matrice }}
+    steps:
+      - name: Release, version et canal
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$TAG" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
+            || { echo "::error::tag $TAG : vX.Y.Z[-suffixe] attendu"; exit 1; }
+          (( BASH_REMATCH[1] >= 3 )) || { echo "::error::$TAG : binaires publiés depuis la 3.0 seulement"; exit 1; }
+          infos=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft,name,url)
+          [[ $(jq -r .isDraft <<<"$infos") == false ]] || { echo "::error::$TAG est un brouillon"; exit 1; }
+          canal=$([[ $(jq -r .isPrerelease <<<"$infos") == true ]] && echo beta || echo stable)
+          {
+            echo "version=${TAG#v}"
+            echo "canal=$canal"
+            echo "nom=$(jq -r '.name // empty' <<<"$infos")"
+            echo "url=$(jq -r .url <<<"$infos")"
+          } >> "$GITHUB_OUTPUT"
+          echo "### $TAG : version ${TAG#v}, canal $canal" >> "$GITHUB_STEP_SUMMARY"
+      # Une ligne de la matrice `firmware` par variante : chaque révision d'écran du Tab5,
+      # puis chaque autre carte que le tag connaît (un tag d'avant la 7B n'a pas son
+      # carte-*.yaml : sans elle, rien ne casse). `elf_seulement` : seulement les variantes
+      # dont la release porte l'image, que meme_code.py compare.
+      - name: Variantes à compiler
+        id: variantes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ELF_SEULEMENT: ${{ inputs.elf_seulement }}
+        run: |
+          {
+            for ecran in $ECRANS_TAB5; do
+              jq -nc --arg v "$ecran" --arg esphome "$ESPHOME_PUBLICATION" \
+                '{variante: $v, subs: "tab5_ecran=\($v)", esphome: $esphome}'
+            done
+            for carte in $CARTES; do
+              gh api "repos/$GITHUB_REPOSITORY/contents/Tab5/paquets/carte-$carte.yaml?ref=$TAG" --silent 2>/dev/null || continue
+              jq -nc --arg v "$carte" --arg esphome "$ESPHOME_PUBLICATION_CARTES" \
+                '{variante: $v, subs: "tab5_carte=\($v)", esphome: $esphome}'
+            done
+          } > variantes.jsonl
+          if [[ "$ELF_SEULEMENT" == true ]]; then
+            images=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name]')
+            jq -c --argjson images "$images" \
+              'select(.variante as $v | $images | any(. == "tab5-ha-hmi-\($v).ota.bin"))' variantes.jsonl > choisies.jsonl
+            mv choisies.jsonl variantes.jsonl
+          fi
+          matrice=$(jq -sc '{include: .}' variantes.jsonl)
+          [[ $(jq '.include | length' <<<"$matrice") -gt 0 ]] || { echo "::error::$TAG : aucune variante à compiler"; exit 1; }
+          echo "matrice=$matrice" >> "$GITHUB_OUTPUT"
+          echo "Variantes : $(jq -r '[.include[].variante] | join(", ")' <<<"$matrice")" >> "$GITHUB_STEP_SUMMARY"
+
+  # Archive Home Assistant (ADR-0024) : packages, custom_templates, blueprint et packages
+  # optionnels du tag, sans placeholder, dans l'arborescence de config/ : ce que
+  # docs/installation.md fait décompresser. Indépendante des firmwares : un échec ici ne
+  # retient ni les binaires ni le site. Un ancien tag (placeholders, ≤ 3.1) n'en a pas :
+  # l'outil le dit (code 3) et rien n'est envoyé.
+  # Puis tab5_hacs.zip (ADR-0035) : l'intégration custom_components/tab5/ du tag et les
+  # mêmes fichiers, l'asset que HACS télécharge (hacs.json, filename). Un tag sans
+  # l'intégration (3.7.0-rc.4 et avant) : code 3, rien n'est envoyé.
+  home-assistant:
+    needs: preparation
+    if: ${{ !inputs.elf_seulement }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.TAG }}
+          path: tag
+      # L'outil vient du commit du workflow (comme meme_code.py plus bas) : un ancien
+      # tag ne l'a pas.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: outils-workflow
+          sparse-checkout: tools/publication
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Archive tab5_home_assistant.zip
+        id: archive
+        run: |
+          set +e
+          python outils-workflow/tools/publication/archive_ha.py --version "${{ needs.preparation.outputs.version }}" \
+            --base tag/HomeAssistant_Config --sortie publie-ha
+          code=$?
+          set -e
+          if [ "$code" -eq 3 ]; then echo "envoyer=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          [ "$code" -eq 0 ] || exit "$code"
+          echo "envoyer=true" >> "$GITHUB_OUTPUT"
+          echo "Archive Home Assistant : tab5_home_assistant.zip" >> "$GITHUB_STEP_SUMMARY"
+      - name: Jointe à la release
+        if: steps.archive.outputs.envoyer == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" publie-ha/tab5_home_assistant.zip --clobber --repo "$GITHUB_REPOSITORY"
+      - name: Archive tab5_hacs.zip (intégration pour HACS)
+        id: hacs
+        if: steps.archive.outputs.envoyer == 'true'
+        run: |
+          set +e
+          python outils-workflow/tools/publication/archive_hacs.py --version "${{ needs.preparation.outputs.version }}"             --base tag/HomeAssistant_Config --integration tag/custom_components/tab5 --sortie publie-hacs
+          code=$?
+          set -e
+          if [ "$code" -eq 3 ]; then echo "envoyer=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          [ "$code" -eq 0 ] || exit "$code"
+          echo "envoyer=true" >> "$GITHUB_OUTPUT"
+          echo "Intégration pour HACS : tab5_hacs.zip" >> "$GITHUB_STEP_SUMMARY"
+      - name: Jointe à la release (HACS)
+        if: steps.hacs.outputs.envoyer == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" publie-hacs/tab5_hacs.zip --clobber --repo "$GITHUB_REPOSITORY"
+
+  firmware:
+    needs: preparation
+    runs-on: ubuntu-latest
+    # Seul job qui lit la clé (S2, audit du 30/09/2026) : l'environnement attend l'accord
+    # d'Axel (« Review deployments ») et refuse toute autre branche que `main` et les tags `v*`.
+    environment: publication
+    strategy:
+      fail-fast: true
+      # {variante, subs, esphome} par ligne : job `preparation`, étape « Variantes à compiler ».
+      matrix: ${{ fromJSON(needs.preparation.outputs.matrice) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.TAG }}
+      # Les sources compilées sont celles du tag ; les outils (réessais pip, dépendances
+      # figées d'esptool, comparaison de l'ELF) viennent du commit du workflow, à part :
+      # une version publiée avant eux ne les a pas.
+      - name: Outils du workflow (pip, esptool figé, comparaison)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: outils-workflow
+          sparse-checkout: |
+            tools/ci
+            tools/publication
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: esptool (espsecure), versions et empreintes figées
+        # espsecure lit la clé du projet à l'étape suivante : ni « esptool>=5 » ni paquet
+        # sans empreinte (audit sécurité du 30/09/2026). setuptools figé d'abord, qui
+        # construit esptool (sdist seulement) sans isolation ; le reste en roues.
+        # Réessais : PyPI répond parfois « from versions: none » (28/09/2026).
+        run: |
+          o=outils-workflow/tools
+          bash "$o/ci/pip_reessai.sh" --require-hashes --only-binary :all: \
+            -r "$o/publication/requirements-esptool-build.txt"
+          bash "$o/ci/pip_reessai.sh" --require-hashes --no-build-isolation --only-binary :all: --no-binary esptool \
+            -r "$o/publication/requirements-esptool.txt"
+          python -m espsecure --help >/dev/null
+      - name: Clé de signature du projet (secret), vérifiée par son empreinte
+        env:
+          CLE: ${{ secrets.TAB5_CLE_SIGNATURE }}
+        run: |
+          [[ -n "$CLE" ]] || { echo "::error::secret TAB5_CLE_SIGNATURE absent (docs/decisions/0022)"; exit 1; }
+          ( umask 077; printf '%s\n' "$CLE" > tab5_signature.pem )
+          python -m espsecure digest-sbv2-public-key --keyfile tab5_signature.pem --output empreinte.bin >/dev/null
+          empreinte=$(od -An -tx1 -v empreinte.bin | tr -d ' \n')
+          rm -f empreinte.bin
+          [[ "$empreinte" == "$EMPREINTE_CLE" ]] || { echo "::error::le secret n'est pas la clé du projet (empreinte $empreinte)"; exit 1; }
+          cp Tab5/user_entities.example.yaml Tab5/user_entities.yaml
+      - name: Compilation (${{ matrix.variante }}, canal ${{ needs.preparation.outputs.canal }})
+        id: esphome-build
+        uses: esphome/build-action@ae5408cdbc4f70692bf8e345c4982bca05a93667 # v8.1.0
+        with:
+          yaml-file: tab5-ha-hmi.yaml
+          version: ${{ matrix.esphome }}
+          complete-manifest: true
+          release-summary: ${{ needs.preparation.outputs.nom }}
+          release-url: ${{ needs.preparation.outputs.url }}
+          substitutions: |
+            ${{ matrix.subs }}
+            tab5_publication=${{ needs.preparation.outputs.canal }}
+            tab5_version=${{ needs.preparation.outputs.version }}
+      - name: Signature vérifiée, puis clé effacée
+        if: always()
+        run: |
+          trap 'rm -f tab5_signature.pem' EXIT
+          ota=$(ls "${{ steps.esphome-build.outputs.name }}"/*.ota.bin)
+          python -m espsecure verify-signature --version 2 --keyfile tab5_signature.pem "$ota"
+      - name: ELF gardé (décoder un plantage de ce firmware)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: elf-${{ matrix.variante }}
+          path: ${{ steps.esphome-build.outputs.name }}/*.elf
+          if-no-files-found: error
+          retention-days: 90
+      # meme_code.py : dans outils-workflow/ (commit du workflow, étape « Outils du
+      # workflow »), une version publiée avant cet outil ne l'a pas.
+      - name: Même code que l'image publiée (ELF seulement)
+        if: inputs.elf_seulement
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ota=$(ls "${{ steps.esphome-build.outputs.name }}"/*.ota.bin)
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "tab5-ha-hmi-${{ matrix.variante }}.ota.bin" --output publie.ota.bin
+          python outils-workflow/tools/publication/meme_code.py publie.ota.bin "$ota" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      # preparer.py du commit du workflow, comme meme_code.py : celui d'un ancien tag ne
+      # connaît pas les variantes ajoutées après lui.
+      - name: Binaires et manifeste de la variante
+        if: ${{ !inputs.elf_seulement }}
+        run: |
+          python outils-workflow/tools/publication/preparer.py --source "${{ steps.esphome-build.outputs.name }}" \
+            --variante ${{ matrix.variante }} --version ${{ needs.preparation.outputs.version }} --sortie publie
+          ls -l publie
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: ${{ !inputs.elf_seulement }}
+        with:
+          name: publie-${{ matrix.variante }}
+          path: publie
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: firmware
+    if: ${{ !inputs.elf_seulement }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Attestation de provenance (lot J de l'audit du 30/09/2026) : GitHub signe, avec l'identité
+      # de ce workflow, que ces fichiers sortent de ce dépôt, de ce commit et de ce run.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: publie-*
+          path: publie
+          merge-multiple: true
+      - name: Sommes de contrôle (SHA256SUMS)
+        run: |
+          cd publie
+          sha256sum -- * > ../SHA256SUMS
+          mv ../SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
+      - name: Attestation de provenance des fichiers de la release
+        # Ne bloque jamais la publication : une panne du service d'attestation ne doit pas
+        # laisser une release sans binaires ni le site sans déploiement (pages dépend de ce job).
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: publie/*
+      - name: Fichiers joints à la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l publie
+          gh release upload "$TAG" publie/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Le site (documentation, page de flashage, canaux) est reconstruit par site.yml, qui sert aussi
+  # à le redéployer seul, sans recompiler ni remplacer les fichiers de la release.
+  pages:
+    needs: release
+    uses: ./.github/workflows/site.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

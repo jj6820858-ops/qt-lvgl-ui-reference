@@ -1,0 +1,117 @@
+/**
+ * [AI-CONTEXT]
+ * @file arkanoid_game.h
+ * @role Jeu « Arcanoïde » — casse-briques rétro Atari / borne arcade 80's.
+ * @architecture_constraint Flux PLEIN ECRAN 1280x720, exception assumée au chrome
+ *      modal v4 (ADR-0009) : pas de carte 1250x690 ni de barre de titre de 52 px,
+ *      le playfield doit dominer. Le YAML (ui_components/arkanoid_game.yaml) ne
+ *      déclare QUE 4 conteneurs vides ; tout le contenu (HUD, menus, briques,
+ *      balles, raquette, power-ups) est construit en C++ ici. Aucune dépendance
+ *      Home Assistant : les high scores sont persistés en NVS via
+ *      esphome::global_preferences.
+ * @ai_instruction Ne PAS remettre de logique de jeu dans le YAML. Ne PAS appeler
+ *      Arkanoid::tick() manuellement : il est piloté par un lv_timer créé à
+ *      l'ouverture et détruit à la fermeture (zéro tick gameplay quand le jeu
+ *      est fermé).
+ */
+#pragma once
+#include "esphome.h"
+#include "tab5_tokens.h"   // UIColor seulement (lot 8a : plus de tab5_custom.h)
+
+namespace esphome { namespace font { class Font; } }
+
+// ---------------------------------------------------------------------------
+// Sauvegarde inter-sessions (NVS).
+// DOIT rester trivially copyable : ESPPreferences fait un memcpy de sizeof(T).
+// Toute modification de ce layout doit s'accompagner d'un bump de ARK_SAVE_MAGIC
+// (une sauvegarde au mauvais format est alors rejetée et repart à zéro).
+// ---------------------------------------------------------------------------
+#define ARK_MAX_SCORES 10
+
+struct ArkScoreEntry {
+    uint32_t score;       // score de la partie
+    uint8_t  level;       // niveau atteint (1..8)
+    uint8_t  ctrl_mode;   // 0=IMU, 1=boutons, 2=les deux
+    uint16_t pad;         // alignement
+    uint32_t timestamp;   // uptime secondes au moment du score
+};
+
+struct ArkanoidSave {
+    uint32_t       magic;              // ARK_SAVE_MAGIC — sinon reset usine
+    ArkScoreEntry  scores[ARK_MAX_SCORES];  // top 10, trié décroissant
+    uint8_t        score_count;        // nombre d'entrées valides (0..10)
+    uint8_t        ctrl_mode;          // 0=IMU, 1=boutons, 2=les deux
+    uint8_t        sensitivity;        // sensibilité IMU (0..4, défaut 2)
+    uint8_t        muted;              // 1 = SFX coupés
+    int16_t        cal_x;              // offset calibration IMU, en milli-g
+    int16_t        cal_y;
+};
+
+namespace Arkanoid {
+
+// Palette LOCALE du jeu (ex-`UIColor::ARK_*` de tab5_custom.h, deplacee ici le
+// 08/09/2026, lot (f) de l'audit : meme convention que Lode::Pal, Go::Pal, Chess::Pal,
+// Trivia::Pal et Draughts::Pal — un sous-module de jeu ne touche pas aux fichiers
+// partages du HMI, ADR-0014). Les tokens « miroir » de tab5-styles.yaml (fond, sol,
+// HUD) restent alignes a la main : verifier les deux quand une valeur change.
+namespace Pal {
+// Palette rétro Atari / borne arcade 80's : fond sombre, briques vives,
+// contraste fort. Utilisée uniquement par le namespace Arkanoid.
+static constexpr uint32_t VOID      = 0x0A0A0F;  // fond hors terrain (noir bleuté)
+static constexpr uint32_t FLOOR     = 0x111118;  // sol jouable (gris très sombre)
+static constexpr uint32_t HUD_BG    = 0x0D0D14;  // bandeau HUD
+static constexpr uint32_t PADDLE    = 0xE8E8E8;  // raquette (blanc cassé)
+static constexpr uint32_t BALL      = 0xFFDD44;  // balle (jaune arcade)
+static constexpr uint32_t WALL      = 0x556677;  // briques indestructibles
+static constexpr uint32_t TOUGH     = 0x8899AA;  // briques renforcées (plein)
+static constexpr uint32_t TOUGH_HIT = 0xBB6633;  // briques renforcées (entamées)
+static constexpr uint32_t DANGER    = 0xFF3333;  // flash de mort
+static constexpr uint32_t CYAN      = 0x44DDDD;  // accent cyan
+static constexpr uint32_t GREEN     = 0x44DD44;  // accent vert (expand, vie)
+static constexpr uint32_t ORANGE    = 0xFF8800;  // accent orange (shrink)
+static constexpr uint32_t MAGENTA   = 0xFF44AA;  // accent magenta (bonus, colle)
+static constexpr uint32_t BTN       = 0x334455;  // boutons tactiles latéraux
+}  // namespace Pal
+
+// Pointeurs LVGL + polices fournis par le YAML au moment de l'ouverture.
+// Les 4 conteneurs sont déclarés dans ui_components/arkanoid_game.yaml ; les
+// polices viennent de tab5-styles.yaml (on ne peut pas faire `id(...)` hors lambda).
+struct UI {
+    lv_obj_t* root  = nullptr;  // page LVGL plein écran 1280x720
+    lv_obj_t* field = nullptr;  // aire de jeu 1280x672 (sous le HUD)
+    lv_obj_t* hud   = nullptr;  // bandeau compact 1280x48
+    lv_obj_t* panel = nullptr;  // calque menus (hub / pause / game over / scores)
+    esphome::lvgl::LvglComponent* lvgl = nullptr;  // pour navigation pages
+    size_t home_idx = 0;        // index de la page de retour (page_arcade = 1)
+    const esphome::font::Font* f_small = nullptr;  // roboto_22
+    const esphome::font::Font* f_mid   = nullptr;  // roboto_32_b
+    const esphome::font::Font* f_big   = nullptr;  // roboto_45_b
+};
+
+// Ouvre le jeu sur le hub : alloue l'état, construit l'UI et démarre le lv_timer
+// de gameplay. Idempotent. Si la mémoire manque, revient à l'arcade sans ouvrir.
+void open(const UI& ui);
+
+// Ferme le jeu : arrête le timer, sauvegarde en NVS, revient à l'arcade puis
+// détruit l'UI et rend l'état (rien ne reste réservé). Idempotent.
+void close();
+
+// True tant que l'overlay est visible (utilisé pour router les événements IMU).
+bool is_open();
+
+// Alimente le filtre d'inclinaison. Appelé par les capteurs BMI270
+// (tab5-imu.yaml) — ne fait que stocker, aucun calcul lourd ici.
+void on_imu(float ax, float ay, float az);
+
+// Prend l'inclinaison courante comme référence « tablette à plat ».
+// Accessible depuis le hub et l'écran de pause.
+void calibrate();
+
+// Écrit immédiatement la sauvegarde en NVS (appelé aux moments clés ; sans effet
+// jeu fermé : la sauvegarde n'est en mémoire que jeu ouvert).
+void persist_save();
+
+// Recharge la sauvegarde depuis la NVS (appelé à chaque open()).
+void persist_load();
+
+}  // namespace Arkanoid

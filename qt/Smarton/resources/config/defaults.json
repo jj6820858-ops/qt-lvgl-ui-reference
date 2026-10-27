@@ -1,0 +1,9 @@
+{
+  "simulation": {
+    "intervalMs": 250
+  },
+  "ui": {
+    "darkMode": true,
+    "minimumCellWidth": 220
+  }
+}

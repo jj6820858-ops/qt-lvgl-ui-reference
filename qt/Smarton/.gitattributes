@@ -1,0 +1,11 @@
+* text=auto eol=lf
+*.png  binary
+*.jpg  binary
+*.ttf  binary
+*.otf  binary
+*.svg  text
+*.qml  text
+*.js   text
+*.ts   text
+*.sh   text eol=lf
+*.bat  text eol=crlf

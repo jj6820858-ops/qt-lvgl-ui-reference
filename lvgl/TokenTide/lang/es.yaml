@@ -1,0 +1,22 @@
+# Spanish UI strings. Include as a package after the board, or copy the
+# substitutions you want into your own config (top-level always wins).
+substitutions:
+  str_waiting: "esperando datos"
+  str_refreshing: "actualizando..."
+  str_refresh_btn: "Actualizar"
+  str_resets_in: "reinicio en"
+  str_net_error: "error de red"
+  str_token_error: "token caducado"
+  str_status_ok: "ok"
+  str_status_warning: "cerca del límite"
+  str_status_limit: "límite alcanzado"
+  str_no_data: "sin datos"
+  str_no_data_short: "s/d"
+  str_setup: "configurar"
+  str_time: "tiempo"
+  str_time_short: "t"
+  str_tokens: "tokens"
+  str_elapsed: "transcurrido"
+  str_fast: "rápido"
+  str_battery: "bat"
+  str_tok_day: "tok/día"

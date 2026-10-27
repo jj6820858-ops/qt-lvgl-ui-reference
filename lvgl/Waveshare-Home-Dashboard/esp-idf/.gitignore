@@ -1,0 +1,22 @@
+# ESP-IDF build artifacts
+build/
+build_release/
+.cache
+sdkconfig
+sdkconfig.old
+
+# Local settings not for committing (WiFi credentials, etc.)
+sdkconfig.local
+sdkconfig.release_local
+
+# IDF Component Manager downloads
+managed_components/
+dependencies.lock
+
+# eez-framework (cloned via setup.sh)
+components/eez-framework/
+
+# Generated UI files (copied from eez-studio by copy-ui.sh)
+components/ui/*.h
+components/ui/*.c
+

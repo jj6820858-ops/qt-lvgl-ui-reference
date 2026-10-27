@@ -1,0 +1,52 @@
+# Board-agnostic services shared by every tokentide device.
+
+# UI strings - English defaults. Override any of them in your own config,
+# or include one of the ready-made packs from lang/ (it, de, fr, es).
+substitutions:
+  # Running firmware version - bumped as part of each release (see
+  # CONTRIBUTING.md "Releasing").
+  tokentide_version: "0.2.1"
+  str_waiting: "waiting for data"
+  str_refreshing: "updating..."
+  str_refresh_btn: "Refresh"
+  str_resets_in: "resets in"
+  str_net_error: "network error"
+  str_token_error: "token expired"
+  str_status_ok: "ok"
+  str_status_warning: "near limit"
+  str_status_limit: "limit reached"
+  str_no_data: "no data"
+  # "no data" for the narrow multi-provider labels of Classic.
+  str_no_data_short: "n/a"
+  str_setup: "setup"
+  # Time elapsed in a window, "time 40%" (short form for small screens).
+  str_time: "time"
+  str_time_short: "t"
+  # Legend word next to a scene theme's token usage symbol.
+  str_tokens: "tokens"
+  # "time 40% elapsed", "time 40% (+25% fast)": the 5h/7d detail line.
+  str_elapsed: "elapsed"
+  str_fast: "fast"
+  str_battery: "bat"
+  str_tok_day: "tok/day"
+
+# ota/wifi/captive_portal are deliberately NOT declared here: the ESPHome
+# Builder wizard generates them in the user's device YAML, and a duplicate
+# ota entry fails validation (lists concatenate). CLI users get them from
+# the local entry points (tokentide*.yaml).
+
+# api IS declared, but only to neutralize its reboot_timeout: with the
+# default (15min) a device with no Home Assistant client connected reboots
+# every 15 minutes by design. tokentide works standalone, so that failsafe
+# is wrong here. Dictionaries merge key-by-key with the user's config, so
+# the wizard's encryption key survives; users who want no native API at
+# all can put "api: !remove" in their device YAML.
+api:
+  reboot_timeout: 0s
+
+logger:
+  level: INFO
+
+time:
+  - platform: sntp
+    id: sntp_time

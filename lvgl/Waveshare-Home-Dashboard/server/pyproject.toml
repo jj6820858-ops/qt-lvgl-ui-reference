@@ -1,0 +1,35 @@
+[project]
+name = "dashboard"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "icalendar",
+    "paho-mqtt",
+    "python-dateutil",
+    "recurring-ical-events",
+    "requests",
+    "schedule",
+]
+
+[dependency-groups]
+dev = [
+    "autopep8",
+    "pylint",
+    "mypy",
+    "types-python-dateutil",
+    "types-requests",
+]
+
+[tool.autopep8]
+max_line_length = 120
+in-place = true
+recursive = true
+aggressive = 2
+
+[tool.pylint.FORMAT]
+max-line-length = 120
+
+[tool.mypy]
+disallow_untyped_calls = true
+mypy_path = "stubs"
+packages = "dashboard"

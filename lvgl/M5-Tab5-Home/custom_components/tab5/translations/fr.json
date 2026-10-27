@@ -1,0 +1,297 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Tab5 — fichiers Home Assistant",
+        "description": "Cette intégration installe les fichiers Home Assistant du projet M5Stack Tab5 (packages, modèles, blueprint) et les remplace à chaque mise à jour faite par HACS. Les anciens fichiers sont gardés dans `tab5_sauvegardes/`. Vos propres packages, modèles et blueprints ne sont jamais touchés.\n\nÀ mettre une fois dans `configuration.yaml`, si ce n'est pas déjà fait :\n\n```yaml\nhomeassistant:\n  packages: !include_dir_named packages\n```",
+        "data": {
+          "mettre_a_jour_tablette": "Mettre ensuite la tablette à jour"
+        },
+        "data_description": {
+          "mettre_a_jour_tablette": "Une fois les fichiers en place, installer le firmware de la même version dès que l'entité « Firmware » de la tablette le propose."
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "L'intégration Tab5 est déjà ajoutée."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tab5 — fichiers Home Assistant",
+        "data": {
+          "mettre_a_jour_tablette": "Mettre ensuite la tablette à jour",
+          "reinstaller": "Réinstaller maintenant les fichiers de cette version",
+          "assistant": "Lancer l'assistant de configuration"
+        },
+        "data_description": {
+          "mettre_a_jour_tablette": "Une fois les fichiers en place, installer le firmware de la même version dès que l'entité « Firmware » de la tablette le propose.",
+          "reinstaller": "Pour un fichier du Tab5 effacé ou modifié par erreur. Les fichiers actuels sont d'abord sauvegardés.",
+          "assistant": "Prépare l'automatisation des emplacements de l'écran à partir de vos pièces de Home Assistant, puis les réglages de la maison et les listes « Tab5 · … ». Rien n'est écrit ni réglé sans votre validation ; une automatisation déjà là ne change que si vous le demandez."
+        }
+      },
+      "pieces": {
+        "title": "Assistant · pièces",
+        "description": "L'assistant prépare l'automatisation des emplacements de l'écran (blueprint « Tab5 — emplacements de l'écran ») à partir de vos pièces de Home Assistant. {nombre} pièce(s) ont des appareils que la tablette sait montrer ; les mieux équipées sont déjà choisies, {max} au plus. Rien n'est écrit avant le récapitulatif.",
+        "data": {
+          "pieces": "Pièces de la tablette"
+        },
+        "data_description": {
+          "pieces": "Dix au plus, dans l'ordre des pages de la rangée du bas : la première sur l'accueil, les suivantes d'un glissement."
+        }
+      },
+      "piece": {
+        "title": "Assistant · pièce {numero} sur {total} : {zone}",
+        "description": "Pré-rempli d'après la pièce « {zone} » de Home Assistant : ses lumières, volets, interrupteurs, ventilateurs et lecteurs ({max} au plus), son capteur de température, d'humidité et sa climatisation. Changez ce que vous voulez.",
+        "data": {
+          "nom": "Nom affiché",
+          "tuiles": "Tuiles",
+          "temperature": "Température de la pièce",
+          "humidite": "Humidité de la pièce",
+          "clim": "Climatisation de la pièce"
+        },
+        "data_description": {
+          "nom": "Vide : le nom de la pièce commune à ses appareils.",
+          "tuiles": "Vingt au plus, de gauche à droite. Au-delà de cinq, des tuiles sont coupées en deux, puis en quatre.",
+          "temperature": "Facultatif. Affichée sur l'accueil quand cette pièce est à l'écran.",
+          "humidite": "Facultatif, avec la température.",
+          "clim": "Facultatif, avec la température : les boutons − / + de l'accueil la règlent."
+        }
+      },
+      "maison": {
+        "title": "Assistant · maison",
+        "description": "Ce qui ne dépend pas d'une pièce. Un champ n'est pré-rempli que si votre Home Assistant n'a qu'une réponse possible (une seule TV, une seule clim, une seule météo…) ou si l'automatisation existante l'a déjà ; sinon il reste vide et la tablette fait sans. Changez ce que vous voulez.",
+        "data": {
+          "tv": "TV",
+          "tv_telecommande": "Télécommande de la TV",
+          "telecommandes_autres": "Autres télécommandes",
+          "telephone": "Batterie du téléphone",
+          "salon_temperature": "Température de la pièce (en haut de l'accueil)",
+          "salon_humidite": "Humidité de la pièce",
+          "serre_temperature": "Seconde température (serre, dehors…)",
+          "serre_exterieure": "La seconde température est dehors",
+          "clim": "Climatisation",
+          "pot_1": "Pot 1",
+          "pot_2": "Pot 2",
+          "pot_3": "Pot 3",
+          "pot_4": "Pot 4",
+          "pot_5": "Pot 5",
+          "meteo_previsions": "Météo des prévisions",
+          "tablette": "Nom de la tablette dans ESPHome"
+        },
+        "data_description": {
+          "tv": "Le bouton « TV » de l'écran.",
+          "tv_telecommande": "Les touches de la télécommande à l'écran.",
+          "telecommandes_autres": "Apple TV, Freebox Player… : trois au plus, une page chacune dans le popup de la télécommande.",
+          "telephone": "Une icône en haut à gauche, colorée selon la batterie.",
+          "salon_temperature": "Proposée : celle de la première pièce.",
+          "serre_temperature": "Proposée : la seule température dont le nom dit « extérieur ».",
+          "clim": "Les boutons − / consigne / + de l'accueil.",
+          "pot_1": "Capteurs d'humidité de la terre : proposés s'il y en a cinq au plus.",
+          "meteo_previsions": "Les pages des jours et des heures.",
+          "tablette": "Lu dans l'intégration ESPHome ; vide : « tab5_ha_hmi »."
+        }
+      },
+      "agendas": {
+        "title": "Assistant · agendas et personnes",
+        "description": "Les listes « Tab5 · … » (Paramètres → Appareils et services → Entités). Un choix déjà fait reste. Une liste encore sur « Not set » reçoit une proposition quand une seule entité convient (un agenda dont le nom dit « travail » ou « rendez-vous », le seul capteur de présence ou d'occupation, le pipeline préféré). Rien n'est réglé avant le récapitulatif ; vous pouvez tout remettre sur « Aucun ».",
+        "data": {
+          "agenda_travail": "Agenda de travail",
+          "agenda_rdv": "Agenda des rendez-vous",
+          "agenda_anniversaires": "Agenda des anniversaires",
+          "agenda_feries": "Agenda des jours fériés",
+          "agenda_vacances": "Agenda des vacances scolaires",
+          "telephone_suivi": "Téléphone suivi",
+          "presence": "Capteur de présence",
+          "pipeline": "Pipeline de discussion"
+        },
+        "data_description": {
+          "agenda_anniversaires": "Anniversaires, fériés, vacances et téléphone : la liste devine déjà seule s'il n'y a qu'une candidate.",
+          "telephone_suivi": "Allume l'écran au retour, l'éteint au départ.",
+          "presence": "Allume l'écran à la détection, l'éteint après 15 min sans présence.",
+          "pipeline": "Le mode « Discussion » de l'écran ; « Aucun » masque ses boutons."
+        }
+      },
+      "recapitulatif": {
+        "title": "Assistant · récapitulatif",
+        "description": "{resume}\n\n{action}",
+        "data": {
+          "mettre_a_jour": "Remplacer les pièces et les entrées de la maison de l'automatisation existante"
+        },
+        "data_description": {
+          "mettre_a_jour": "Un champ de la maison laissé vide garde sa valeur ; ses autres réglages (énergie, gestes…) restent tels quels. Les listes « Tab5 · … » sont réglées avec ou sans cette case."
+        }
+      }
+    },
+    "abort": {
+      "aucune_piece": "Aucune pièce de Home Assistant n'a d'appareil que la tablette sait montrer : l'assistant n'a rien à proposer et ne change rien. Rattachez vos appareils à des pièces dans Home Assistant, puis relancez-le (Paramètres → Appareils et services → Tab5 → Configurer, case « Lancer l'assistant de configuration »), ou remplissez l'automatisation du blueprint à la main."
+    },
+    "error": {
+      "aucune_piece_choisie": "Choisissez au moins une pièce.",
+      "trop_de_pieces": "Dix pièces au plus.",
+      "trop_de_tuiles": "Vingt tuiles au plus."
+    }
+  },
+  "issues": {
+    "fichiers_absents": {
+      "title": "Tab5 : aucun fichier Home Assistant dans l'intégration",
+      "description": "L'intégration Tab5 {version} ne contient aucun fichier : elle a été copiée depuis le dépôt au lieu d'être installée depuis une release. Installez-la par HACS (dépôt personnalisé), qui télécharge `tab5_hacs.zip` de la release."
+    },
+    "configuration_invalide": {
+      "title": "Tab5 : les fichiers {version} n'ont pas été installés",
+      "description": "Les nouveaux fichiers du Tab5 n'ont pas pu être posés (la vérification de la configuration a trouvé une erreur avec eux, ou leur écriture a échoué) : les fichiers précédents ont été remis, rien n'a changé. La raison est dans le journal (Paramètres → Système → Journaux, « tab5 »). Après une erreur de configuration, ces fichiers ne sont pas réessayés à chaque redémarrage : une fois la cause corrigée, passez par Paramètres → Appareils et services → Tab5 → Configurer, « Réinstaller maintenant les fichiers de cette version ». Si la cause n'est pas dans vos propres fichiers, merci de la signaler : {signaler}"
+    },
+    "packages_absents": {
+      "title": "Tab5 : Home Assistant ne charge pas les packages",
+      "description": "Les fichiers du Tab5 sont dans `config/packages/`, mais Home Assistant ne lit pas ce dossier. Ajoutez ces deux lignes à `configuration.yaml` (la ligne `homeassistant:` une seule fois), vérifiez la configuration, puis redémarrez :\n\n```yaml\nhomeassistant:\n  packages: !include_dir_named packages\n```"
+    },
+    "redemarrage_requis": {
+      "title": "Tab5 : redémarrez Home Assistant pour finir",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Redémarrer Home Assistant",
+            "description": "Les fichiers du Tab5 {version} sont en place, mais certains ne prennent effet qu'après un redémarrage. Validez pour redémarrer Home Assistant maintenant."
+          }
+        },
+        "error": {
+          "configuration_invalide": "La configuration a une erreur : corrigez-la d'abord (Outils de développement → YAML → Vérifier la configuration)."
+        }
+      }
+    },
+    "fichiers_remplaces": {
+      "title": "Tab5 : des fichiers déjà là ont été remplacés",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Fichiers du Tab5 déjà là, remplacés",
+            "description": "Ces fichiers du Tab5 étaient déjà dans `config/` (copiés à la main, sans doute) et différaient de ceux de la release : {fichiers}. Ils ont été remplacés quand même, et les anciens sont gardés dans {sauvegarde}. Si vous en aviez modifié un exprès, recopiez votre changement depuis là.\n\nValidez pour fermer ce message."
+          }
+        }
+      }
+    },
+    "firmware_echec": {
+      "title": "Tab5 : la tablette n'est pas passée en {version}",
+      "description": "Les fichiers du Tab5 {version} sont en place, mais la tablette tourne toujours une autre version après {essais} essais de sa mise à jour. Installez-la à la main : Paramètres → Mises à jour (ou l'entité « Firmware » de la tablette) → Installer, tablette allumée et connectée. La raison de chaque essai est dans le journal (Paramètres → Système → Journaux, « tab5 »). Ce message disparaît dès que la tablette tourne en {version}."
+    },
+    "configurer_pieces": {
+      "title": "Tab5 : configurer la tablette depuis vos pièces",
+      "fix_flow": {
+        "step": {
+          "pieces": {
+            "title": "Assistant · pièces",
+            "description": "L'assistant prépare l'automatisation des emplacements de l'écran (blueprint « Tab5 — emplacements de l'écran ») à partir de vos pièces de Home Assistant. {nombre} pièce(s) ont des appareils que la tablette sait montrer ; les mieux équipées sont déjà choisies, {max} au plus. Rien n'est écrit avant le récapitulatif.",
+            "data": {
+              "pieces": "Pièces de la tablette"
+            },
+            "data_description": {
+              "pieces": "Dix au plus, dans l'ordre des pages de la rangée du bas : la première sur l'accueil, les suivantes d'un glissement."
+            }
+          },
+          "piece": {
+            "title": "Assistant · pièce {numero} sur {total} : {zone}",
+            "description": "Pré-rempli d'après la pièce « {zone} » de Home Assistant : ses lumières, volets, interrupteurs, ventilateurs et lecteurs ({max} au plus), son capteur de température, d'humidité et sa climatisation. Changez ce que vous voulez.",
+            "data": {
+              "nom": "Nom affiché",
+              "tuiles": "Tuiles",
+              "temperature": "Température de la pièce",
+              "humidite": "Humidité de la pièce",
+              "clim": "Climatisation de la pièce"
+            },
+            "data_description": {
+              "nom": "Vide : le nom de la pièce commune à ses appareils.",
+              "tuiles": "Vingt au plus, de gauche à droite. Au-delà de cinq, des tuiles sont coupées en deux, puis en quatre.",
+              "temperature": "Facultatif. Affichée sur l'accueil quand cette pièce est à l'écran.",
+              "humidite": "Facultatif, avec la température.",
+              "clim": "Facultatif, avec la température : les boutons − / + de l'accueil la règlent."
+            }
+          },
+          "maison": {
+            "title": "Assistant · maison",
+            "description": "Ce qui ne dépend pas d'une pièce. Un champ n'est pré-rempli que si votre Home Assistant n'a qu'une réponse possible (une seule TV, une seule clim, une seule météo…) ou si l'automatisation existante l'a déjà ; sinon il reste vide et la tablette fait sans. Changez ce que vous voulez.",
+            "data": {
+              "tv": "TV",
+              "tv_telecommande": "Télécommande de la TV",
+              "telecommandes_autres": "Autres télécommandes",
+              "telephone": "Batterie du téléphone",
+              "salon_temperature": "Température de la pièce (en haut de l'accueil)",
+              "salon_humidite": "Humidité de la pièce",
+              "serre_temperature": "Seconde température (serre, dehors…)",
+              "serre_exterieure": "La seconde température est dehors",
+              "clim": "Climatisation",
+              "pot_1": "Pot 1",
+              "pot_2": "Pot 2",
+              "pot_3": "Pot 3",
+              "pot_4": "Pot 4",
+              "pot_5": "Pot 5",
+              "meteo_previsions": "Météo des prévisions",
+              "tablette": "Nom de la tablette dans ESPHome"
+            },
+            "data_description": {
+              "tv": "Le bouton « TV » de l'écran.",
+              "tv_telecommande": "Les touches de la télécommande à l'écran.",
+              "telecommandes_autres": "Apple TV, Freebox Player… : trois au plus, une page chacune dans le popup de la télécommande.",
+              "telephone": "Une icône en haut à gauche, colorée selon la batterie.",
+              "salon_temperature": "Proposée : celle de la première pièce.",
+              "serre_temperature": "Proposée : la seule température dont le nom dit « extérieur ».",
+              "clim": "Les boutons − / consigne / + de l'accueil.",
+              "pot_1": "Capteurs d'humidité de la terre : proposés s'il y en a cinq au plus.",
+              "meteo_previsions": "Les pages des jours et des heures.",
+              "tablette": "Lu dans l'intégration ESPHome ; vide : « tab5_ha_hmi »."
+            }
+          },
+          "agendas": {
+            "title": "Assistant · agendas et personnes",
+            "description": "Les listes « Tab5 · … » (Paramètres → Appareils et services → Entités). Un choix déjà fait reste. Une liste encore sur « Not set » reçoit une proposition quand une seule entité convient (un agenda dont le nom dit « travail » ou « rendez-vous », le seul capteur de présence ou d'occupation, le pipeline préféré). Rien n'est réglé avant le récapitulatif ; vous pouvez tout remettre sur « Aucun ».",
+            "data": {
+              "agenda_travail": "Agenda de travail",
+              "agenda_rdv": "Agenda des rendez-vous",
+              "agenda_anniversaires": "Agenda des anniversaires",
+              "agenda_feries": "Agenda des jours fériés",
+              "agenda_vacances": "Agenda des vacances scolaires",
+              "telephone_suivi": "Téléphone suivi",
+              "presence": "Capteur de présence",
+              "pipeline": "Pipeline de discussion"
+            },
+            "data_description": {
+              "agenda_anniversaires": "Anniversaires, fériés, vacances et téléphone : la liste devine déjà seule s'il n'y a qu'une candidate.",
+              "telephone_suivi": "Allume l'écran au retour, l'éteint au départ.",
+              "presence": "Allume l'écran à la détection, l'éteint après 15 min sans présence.",
+              "pipeline": "Le mode « Discussion » de l'écran ; « Aucun » masque ses boutons."
+            }
+          },
+          "recapitulatif": {
+            "title": "Assistant · récapitulatif",
+            "description": "{resume}\n\n{action}",
+            "data": {
+              "mettre_a_jour": "Remplacer les pièces et les entrées de la maison de l'automatisation existante"
+            },
+            "data_description": {
+              "mettre_a_jour": "Un champ de la maison laissé vide garde sa valeur ; ses autres réglages (énergie, gestes…) restent tels quels. Les listes « Tab5 · … » sont réglées avec ou sans cette case."
+            }
+          }
+        },
+        "abort": {
+          "aucune_piece": "Aucune pièce de Home Assistant n'a d'appareil que la tablette sait montrer : l'assistant n'a rien à proposer et ne change rien. Rattachez vos appareils à des pièces dans Home Assistant, puis relancez-le (Paramètres → Appareils et services → Tab5 → Configurer, case « Lancer l'assistant de configuration »), ou remplissez l'automatisation du blueprint à la main."
+        },
+        "error": {
+          "aucune_piece_choisie": "Choisissez au moins une pièce.",
+          "trop_de_pieces": "Dix pièces au plus.",
+          "trop_de_tuiles": "Vingt tuiles au plus."
+        }
+      }
+    },
+    "migrer_entites": {
+      "title": "Tab5 : passer les entités à leurs noms anglais",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Migrer les entités Tab5",
+            "description": "Les entités de la tablette ont maintenant des noms anglais dans Home Assistant, et {nombre} entités portent encore leur ancien nom ou identifiant français. Validez pour les renommer : elles gardent leur historique, et la tablette ses réglages. Vos propres tableaux de bord et automatisations qui les nomment par leur ancien identifiant sont à mettre à jour."
+          }
+        }
+      }
+    }
+  }
+}

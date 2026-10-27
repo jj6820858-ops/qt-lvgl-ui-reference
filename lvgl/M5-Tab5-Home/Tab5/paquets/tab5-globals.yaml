@@ -1,0 +1,243 @@
+# [AI-CONTEXT]
+# @file tab5-globals.yaml
+# @role Variables globales de l'interface (état des volets, page courante, mode vocal,
+#       réveil, extinction auto de l'écran).
+# @ai_instruction Ne déclarer ici que les variables globales pures.
+# ============================================================================
+# tab5-globals.yaml — État partagé entre tous les packages (voir table complète
+# dans Tab5/README.md). Règle : tout état lu/écrit par plus d'un fichier ou par
+# deux handlers différents (ex: on_short_click + on_long_press) vit ici, jamais
+# en `static` dans une lambda (bug historique du double-tap reboot `reboot_armed`,
+# corrigé le 05/07/2026 ; le pattern double-tap a depuis été remplacé par des
+# overlays de confirmation dans console_sys.yaml — le global a été retiré le 16/07).
+globals:
+  - id: clim_target_temp
+    type: float
+    initial_value: '20.0'
+  - id: volet_target_open
+    type: bool
+    initial_value: 'true'
+  - id: volet_en_mouvement
+    type: bool
+    initial_value: 'false'
+  - id: va_stop_armed
+    type: bool
+    initial_value: 'false'
+    restore_value: false
+  - id: clim_hvac_mode
+    type: std::string
+    initial_value: '"off"'
+  - id: clim_preset_mode
+    type: std::string
+    initial_value: '"none"'
+  - id: clim_fan_mode
+    type: std::string
+    initial_value: '"auto"'
+  - id: clim_swing_mode
+    type: std::string
+    initial_value: '"stop"'
+  - id: global_neige
+    type: int
+    initial_value: '0'
+  - id: global_humidite
+    type: float
+    initial_value: '50.0'
+
+  - id: plan_ligne_1
+    type: std::string
+    initial_value: '""'
+  - id: plan_ligne_2
+    type: std::string
+    initial_value: '""'
+  - id: boot_complete
+    type: bool
+    initial_value: 'false'
+    restore_value: false
+  # esphome.tab5_connected du démarrage parti vers Home Assistant (on_boot de
+  # tab5-ha-hmi.yaml, ha_evenement_envoyer()) : une fois par démarrage.
+  - id: boot_evt_connecte
+    type: bool
+    initial_value: 'false'
+    restore_value: false
+  # Page des prévisions (0-4, 2 = accueil) : g_central_ctx.forecast_page, seule source
+  # depuis le 28/09/2026 (le global forecast_page_index la recopiait).
+  - id: conversation_mode
+    type: bool
+    initial_value: 'false'
+    restore_value: true
+  # Mode HA (ex-global show_switches) : g_central_ctx.ha_mode, seule source depuis
+  # l'ADR-0023 (tuiles_mode_ha, tab5_tuiles.cpp).
+
+  - id: current_light_slot
+    type: std::string
+    initial_value: '""'
+  # Contenu et panneau courant de la carte centrale (pluie, vigilance, info,
+  # 4 bandeaux HA, index du rotateur) : PAS de global ici. Leur seule source est
+  # g_central_ctx (CentralPanelCtx, tab5_custom.h), lu et écrit directement par
+  # les lambdas. Jusqu'au lot 7 de l'audit du 26/09/2026, 8 globals doublaient
+  # ses champs et chaque script les recopiait avant et après chaque appel C++.
+  - id: ha_alert_id_0
+    type: std::string
+    initial_value: '""'
+  - id: ha_alert_id_1
+    type: std::string
+    initial_value: '""'
+  - id: ha_alert_id_2
+    type: std::string
+    initial_value: '""'
+  - id: ha_alert_id_3
+    type: std::string
+    initial_value: '""'
+  - id: temp_dismiss_alert_id
+    type: std::string
+    initial_value: '""'
+  - id: info_meteo_dismiss_id
+    type: std::string
+    initial_value: '""'
+  - id: tab5_dismissed_local
+    type: std::string
+    initial_value: '""'
+  - id: system_volume
+    type: float
+    initial_value: '1.0'
+  - id: system_muted
+    type: bool
+    initial_value: 'false'
+  # Horodatage du dernier volume poussé DEPUIS la tablette ou HA (millis()).
+  # Le rattrapage de `tab5-ha-controls.yaml` s'en sert pour ne pas recopier un
+  # volume de haut-parleur encore périmé par-dessus le réglage en cours :
+  # `media_player.volume_set` est débouncé de 150 ms et, pendant un glissement,
+  # ne part qu'une fois le doigt immobile — le haut-parleur reste donc en retard
+  # sur `system_volume` pendant tout le geste.
+  - id: volume_push_ts
+    type: uint32_t
+    initial_value: '0'
+  # Planning du tap (6 s) : plus de global, temp_planning_active() lit son timer
+  # (tab5_central.cpp, 28/09/2026). La réponse vocale garde le sien : il couvre les
+  # 8 s du script tab5_show_vocal_response, pas seulement l'affichage.
+  - id: is_showing_vocal_response
+    type: bool
+    initial_value: 'false'
+
+  # --- Popup Assistant vocal (assistant_popup.yaml) ---
+  # Ouvert => les événements vocaux (demande/réponse) alimentent le popup plein écran
+  # au lieu (en plus) du bandeau central 8 s. assist_text_size : 0=S 2=L (confort lecture ;
+  # 1, l'ancien M retiré par l'essai D8 du 26/09/2026, est lu comme S).
+  - id: assist_popup_open
+    type: bool
+    initial_value: 'false'
+    restore_value: false
+  - id: assist_text_size
+    type: int
+    initial_value: '0'
+    restore_value: true
+
+  # Popup calendrier (calendar_popup.yaml) : mois affiché + date du détail ouvert.
+  # Partagés entre tab5-calendar.yaml (open/prev/next/today/tap) et
+  # tab5-api-logic.yaml (tab5_maj_calendrier_mois/jour) — donc globals, pas de static.
+  - id: cal_view_year
+    type: int
+    initial_value: '0'
+    restore_value: false
+  - id: cal_view_month
+    type: int
+    initial_value: '0'
+    restore_value: false
+  - id: cal_detail_date
+    type: std::string
+    initial_value: '""'
+    restore_value: false
+
+  # --- Réveil matin (tab5-alarm.yaml + alarm_clock.cpp) ---
+  # Ce qui est RÉGLABLE vit dans des entités ESPHome (donc exposé à HA et
+  # persisté par elles) ; seuls l'état de la sonnerie en cours et les deux
+  # valeurs que HA n'a aucune raison de voir passent par des globals.
+  - id: alarm_ringing
+    type: bool
+    initial_value: 'false'
+    restore_value: false
+  # True seulement si la sonnerie vient d'`alarm_due` (tick planifié / snooze),
+  # pas d'un « Tester » HA ou dalle. `tab5_alarm_stop` n'appelle `alarm_dismiss`
+  # que dans ce cas — sinon un test du matin mangerait le vrai réveil.
+  - id: alarm_ring_scheduled
+    type: bool
+    initial_value: 'false'
+    restore_value: false
+  # Numéro du passage de sonnerie en cours : c'est lui qui fait monter le volume
+  # progressif (alarm_ring_gain). Remis à 0 à chaque NOUVEAU déclenchement, PAS
+  # au retour d'une répétition — un snooze reprend donc au volume déjà atteint.
+  - id: alarm_ring_cycle
+    type: int
+    initial_value: '0'
+    restore_value: false
+  # millis() du début du passage sonore courant : garde-fou « durée max ».
+  - id: alarm_ring_started
+    type: uint32_t
+    initial_value: '0'
+    restore_value: false
+  # Masque des jours (bit 0 = lundi). Écrit par les 7 chips de l'écran ET par le
+  # select de préréglages exposé à HA — les deux passent par tab5_alarm_refresh,
+  # jamais l'un sans l'autre. Défaut : lundi → vendredi.
+  - id: alarm_days_mask
+    type: uint8_t
+    initial_value: '0x1F'
+    restore_value: true
+  # Plancher de recherche de la prochaine sonnerie, miroir NVS de
+  # alarm_skip_floor(). Sans lui, un redémarrage dans les 2 min qui suivent un
+  # arrêt (fenêtre de grâce ALARM_GRACE_S) ferait re-sonner le réveil qu'on vient
+  # d'arrêter. Restauré vers le C++ au début de tab5_alarm_refresh (sinon le
+  # miroir NVS est écrasé par un floor C++ encore à 0).
+  - id: alarm_skip_before
+    type: uint32_t
+    initial_value: '0'
+    restore_value: true
+  # Tampons de passage vers les services HA (même motif que temp_dismiss_alert_id) :
+  # une lambda remplit, l'événement homeassistant.event qui suit relit (ADR-0025).
+  - id: alarm_rdv_speech
+    type: std::string
+    initial_value: '""'
+    restore_value: false
+  - id: alarm_rdv_screen
+    type: std::string
+    initial_value: '""'
+    restore_value: false
+  - id: alarm_ring_sub
+    type: std::string
+    initial_value: '""'
+    restore_value: false
+
+  # --- Extinction automatique de l'écran (select « Tab5 Extinction auto de l'écran »,
+  # tab5-ha-controls.yaml ; discussion #278, 06/10/2026) ---
+  # millis() du dernier allumage du rétroéclairage, posé par `on_turn_on` du light
+  # `backlight` (tab5-hardware.yaml). L'inactivité de LVGL ne repart de zéro qu'à un
+  # appui lu par l'indev, et LVGL est en pause écran éteint : un rallumage par HA, par
+  # la tape, par le réveil ou même par le toucher la laisse ancienne, et l'écran se
+  # rééteindrait au tick suivant. L'extinction compte donc depuis le plus récent des
+  # deux instants (dernier appui, dernier allumage).
+  - id: ecran_allume_ms
+    type: uint32_t
+    initial_value: '0'
+    restore_value: false
+  # Mise à jour du firmware en cours : vrai sur `on_begin` des deux `ota:`
+  # (tab5-hardware.yaml, publication-commune.yaml), faux sur `on_abort` / `on_error` ;
+  # une OTA réussie redémarre la tablette. L'écran ne s'éteint pas seul pendant une OTA.
+  - id: ota_en_cours
+    type: bool
+    initial_value: 'false'
+    restore_value: false
+  # Écran éteint par la nuit (« Tab5 Nuit (écran éteint) », tab5-ha-controls.yaml) : posé
+  # quand l'extinction auto éteint pendant la nuit, remis à faux à chaque allumage
+  # (on_turn_on de `backlight`), il fait rallumer l'écran à la fin de la nuit ; un écran
+  # éteint par HA ou par l'extinction auto du jour reste éteint.
+  - id: ecran_eteint_par_nuit
+    type: bool
+    initial_value: 'false'
+    restore_value: false
+  # Rien ne retient l'écran tel qu'il est : écran allumé, démarrage fini, ni réveil qui
+  # sonne, ni assistant vocal, ni jeu, ni mise à jour. Calculé toutes les 10 s par
+  # l'extinction auto (tab5-ha-controls.yaml), lu par le mode économie
+  # (tab5-economie.yaml), qui n'assombrit pas pour les mêmes raisons : une seule liste.
+  - id: ecran_veille_permise
+    type: bool
+    initial_value: 'false'
+    restore_value: false

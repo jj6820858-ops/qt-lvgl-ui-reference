@@ -1,0 +1,22 @@
+# Italian UI strings. Include as a package after the board, or copy the
+# substitutions you want into your own config (top-level always wins).
+substitutions:
+  str_waiting: "in attesa dati"
+  str_refreshing: "aggiorno..."
+  str_refresh_btn: "Aggiorna"
+  str_resets_in: "reset tra"
+  str_net_error: "errore rete"
+  str_token_error: "token scaduto"
+  str_status_ok: "ok"
+  str_status_warning: "quasi al limite"
+  str_status_limit: "limite raggiunto"
+  str_no_data: "nessun dato"
+  str_no_data_short: "n/d"
+  str_setup: "configura"
+  str_time: "tempo"
+  str_time_short: "t"
+  str_tokens: "token"
+  str_elapsed: "trascorso"
+  str_fast: "avanti"
+  str_battery: "batt"
+  str_tok_day: "tok/g"

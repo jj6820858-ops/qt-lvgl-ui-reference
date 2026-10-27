@@ -1,0 +1,423 @@
+{#-
+  Alertes de la carte centrale du Tab5 (packages/tab5_alerts.yaml, capteur « Tab5 Alerts »,
+  plan des alertes du 06/10/2026, ADR-0034). Importées par le package :
+    {% from 'tab5_alertes.jinja' import tab5_alertes_memoire %}
+
+  UNE ALERTE = une source + une révision. HA incrémente la révision quand l'alerte change
+  vraiment ; la tablette reçoit « id#révision » et renvoie exactement celle qu'elle
+  montrait au tap (esphome.tab5_alerte_lue). Si l'alerte a changé entre-temps, la
+  nouvelle reste à lire.
+    - Affichée : abonnée ET en cours ET cette révision pas encore lue.
+    - Elle revient seulement si elle change, ou si elle s'arrête vraiment puis recommence.
+    - « S'arrête vraiment » : source revenue à la normale pendant `delai_fin` (5 min) ;
+      une entité disparue, pendant 1 h. Une source indisponible ou inconnue n'est jamais
+      une fin, et rien ne se termine pendant `grace` (15 min) après un démarrage de HA :
+      sinon chaque redémarrage ferait tout revenir. Revenue à la normale, l'alerte quitte
+      l'écran tout de suite (choix d'Axel) ; la fin ne fait qu'oublier qu'elle était lue.
+    - En cas de doute (source indisponible), une alerte non lue reste affichée.
+
+  Sources et ce qui fait une révision :
+    maj        update.* à « on »                   latest_version
+    probleme   binary_sensor « problem » à « on »  (aucune : revient après une vraie fin)
+    etiquette  entités à l'étiquette « Tab5 · alerte » allumées, ouvertes, déverrouillées,
+               bloquées ou déclenchées              (aucune : revient après une vraie fin)
+    pile       capteurs « battery » sous le seuil, (aucune : revient après une recharge
+               binaires « battery » à « on »        au-dessus du seuil + 10 %)
+    meteo      source météo choisie en panne       la raison ou la source de repli
+               (sensor.tab5_meteo, attribut repli)
+    indispo    entités indisponibles depuis 10 min UNE NOUVELLE entité (la liste gardée
+                                                    est l'union depuis le début, 100
+                                                    entités au plus : voir plus bas)
+    vigilance  sensor.tab5_vigilance Jaune+        niveau ET phénomènes
+    froid      appareil de sensor.tab5_froid au    cause ET niveau (la valeur change le
+               niveau 1 (Orange) ou 2 (Rouge)      libellé, pas la révision ; ADR-0055)
+
+  Abonnements : listes « Tab5 · alerts: … » de packages/tab5_alerts.yaml. Une source à
+  laquelle on n'est pas abonné reste suivie (sans être affichée) : s'y réabonner ne fait pas
+  revenir ce qui était déjà lu.
+
+  Macros :
+    tab5_alertes_logique(memoire, sources, evenement, maintenant, abonnements)
+        PURE : ni états de HA ni heure. Testée hors HA par tests/test_alertes_ha.py, qui
+        rejoue redémarrages, plantages, versions, coupures et taps.
+    tab5_alertes_sources(suivi, anciennes, seuil_pile)
+        Ce que disent les états de HA en ce moment (suivi : pour le doute et les piles).
+    tab5_alertes_abonnements()
+        Les listes « Tab5 · alerts: … », lues dans HA (JSON).
+    tab5_alertes_memoire(type_evt, donnees)
+        Colle les trois : mémoire = attributs du capteur, heure = now().
+    tab5_alertes_historique_liste(memoire, abonnements, n) et
+    tab5_alertes_historique_payload(memoire, abonnements)
+        PURES : l'historique des alertes abonnées (n au plus, la plus récente d'abord), en
+        JSON pour le tableau de bord, en payload pour la tablette (action
+        tab5_maj_alertes_historique : « apparue|lue|terminée|gravité|libellé » séparés par
+        « ; », 20 au plus, heures en secondes epoch, 0 = pas encore).
+    tab5_alertes_historique(format)
+        Les mêmes, lues dans HA : format = 'payload' ou 'liste'.
+
+  Mémoire rendue (JSON) : suivi {id: {c clé, r révision, d début, f fin (0 = en cours),
+  g gravité, t libellé codé, s source}}, lues {id: révision}, historique (30 au plus, le
+  plus récent d'abord : i, r, t, g, s, a apparue, l lue, f terminée ; 0 = pas encore ; s
+  depuis le lot 4, déduite de l'id pour les entrées d'avant),
+  demarrage, reglages, affichees (triées : gravité puis la plus ancienne ; i = id#rév).
+
+  Déploiement : ce fichier va dans config/custom_templates/ de Home Assistant, puis
+  homeassistant.reload_custom_templates et rechargement des modèles.
+-#}
+
+{#- ── Logique pure ──────────────────────────────────────────────────────────────────── -#}
+{%- macro tab5_alertes_logique(memoire, sources, evenement, maintenant, abonnements) -%}
+  {%- set m = memoire if memoire is mapping else {} -%}
+  {%- set src = sources if sources is mapping else {} -%}
+  {%- set evt = evenement if evenement is mapping else {} -%}
+  {%- set ab = abonnements if abonnements is mapping else {} -%}
+  {%- set type_evt = evt.get('type', 'tick') -%}
+  {%- set donnees = evt.get('data') if evt.get('data') is mapping else {} -%}
+  {%- set premiere = m.get('suivi') is not mapping -%}
+  {%- set prev = {} if premiere else m.get('suivi') -%}
+  {%- set actives = src.get('actives') if src.get('actives') is mapping else {} -%}
+  {%- set incertains = src.get('incertains') or [] -%}
+  {%- set absents = src.get('absents') or [] -%}
+  {%- set hist0 = m.get('historique') -%}
+  {#- Audit du 07/10/2026, DO-7 : la liste gardée des indisponibles (c) a 100 entités au
+      plus, sinon elle grossirait sans fin tant qu'une entité reste indisponible et les
+      attributs du capteur dépasseraient les 16 Ko que l'historique de HA accepte. -#}
+  {%- set max_indispo = 100 -%}
+  {%- set ns = namespace(
+        suivi={},
+        lues=(m.get('lues') if m.get('lues') is mapping else {}),
+        hist=(hist0 if hist0 is sequence and hist0 is not string and hist0 is not mapping else []),
+        reglages=(m.get('reglages') if m.get('reglages') is mapping else {}),
+        demarrage=(m.get('demarrage', 0) | int(0))) -%}
+  {#- Réglages de test (CI) : délai de fin et grâce après un démarrage, en secondes. -#}
+  {%- if type_evt == 'reglage' -%}
+    {%- for cle in ['delai_fin', 'grace'] if cle in donnees -%}
+      {%- set ns.reglages = dict(ns.reglages, **{cle: donnees[cle] | int(0)}) -%}
+    {%- endfor -%}
+  {%- endif -%}
+  {%- if type_evt == 'demarrage' -%}{%- set ns.demarrage = maintenant -%}{%- endif -%}
+  {%- set delai = ns.reglages.get('delai_fin', 300) | int(300) -%}
+  {%- set en_grace = (maintenant - ns.demarrage) < (ns.reglages.get('grace', 900) | int(900)) -%}
+
+  {#- 1. Alertes en cours : même révision, ou la suivante si elles ont changé. -#}
+  {%- for id, a in actives.items() -%}
+    {%- set p = prev.get(id) if prev.get(id) is mapping else none -%}
+    {%- if p is none -%}
+      {%- set c = a.c[:max_indispo] if a.s == 'indispo' else a.c -%}
+      {%- set r = 1 -%}
+      {%- set d = maintenant -%}
+      {%- set nouvelle = true -%}
+    {%- else -%}
+      {%- if a.s == 'indispo' -%}
+        {%- set anciens = p.c if p.c is sequence and p.c is not string else [] -%}
+        {%- set vus = a.c[:max_indispo] -%}
+        {%- set ajouts = vus | reject('in', anciens) | list -%}
+        {%- set union = anciens + ajouts -%}
+        {%- if union | count <= max_indispo -%}
+          {%- set c = union -%}
+        {%- else -%}
+          {#- Au-delà : celles indisponibles en ce moment d'abord, puis les dernières vues
+              parmi les autres. Une entité sortie de la liste qui redevient indisponible
+              compte comme nouvelle (seulement au-delà de 100). Le libellé (@indispo:N)
+              vient de la source : il compte toujours toutes les entités. -#}
+          {%- set dedans = union | select('in', vus) | list -%}
+          {%- set autres = union | reject('in', vus) | list -%}
+          {%- set place = max_indispo - dedans | count -%}
+          {%- set c = (autres[autres | count - place:] if place > 0 else []) + dedans -%}
+        {%- endif -%}
+        {%- set change = ajouts | count > 0 -%}
+      {%- else -%}
+        {%- set c = a.c -%}
+        {%- set change = a.c != p.c -%}
+      {%- endif -%}
+      {%- set r = (p.r | int(1)) + (1 if change else 0) -%}
+      {%- set d = maintenant if change else (p.d | int(maintenant)) -%}
+      {%- set nouvelle = change -%}
+    {%- endif -%}
+    {%- set ns.suivi = dict(ns.suivi, **{id: {'c': c, 'r': r, 'd': d, 'f': 0, 'g': a.g, 't': a.t, 's': a.s}}) -%}
+    {%- if nouvelle -%}
+      {#- La version d'avant, encore ouverte dans l'historique, est remplacée. -#}
+      {%- set h = namespace(l=[]) -%}
+      {%- for e in ns.hist -%}
+        {%- set h.l = h.l + [dict(e, f=maintenant) if e.i == id and (e.f | int(0)) == 0 else e] -%}
+      {%- endfor -%}
+      {%- set ns.hist = [{'i': id, 'r': r, 't': a.t, 'g': a.g, 's': a.s, 'a': maintenant, 'l': 0, 'f': 0}] + h.l -%}
+    {%- endif -%}
+  {%- endfor -%}
+
+  {#- 2. Alertes qui ne sont plus en cours. -#}
+  {%- for id, p in prev.items() if id not in actives and p is mapping -%}
+    {%- if id in incertains -%}
+      {#- Source indisponible ou inconnue : on ne sait pas, rien ne change. -#}
+      {%- set ns.suivi = dict(ns.suivi, **{id: p}) -%}
+    {%- else -%}
+      {%- set fin = p.f | int(0) if (p.f | int(0)) > 0 else maintenant -%}
+      {%- set attente = 3600 if id in absents else delai -%}
+      {%- if not en_grace and maintenant - fin >= attente -%}
+        {#- Vraie fin : oubliée, et sa révision lue avec elle. -#}
+        {%- set h = namespace(l=[]) -%}
+        {%- for e in ns.hist -%}
+          {%- set h.l = h.l + [dict(e, f=fin) if e.i == id and (e.f | int(0)) == 0 else e] -%}
+        {%- endfor -%}
+        {%- set ns.hist = h.l -%}
+      {%- else -%}
+        {%- set ns.suivi = dict(ns.suivi, **{id: dict(p, f=fin)}) -%}
+      {%- endif -%}
+    {%- endif -%}
+  {%- endfor -%}
+
+  {#- 3. Lues : seulement celles qu'on suit encore (une vraie fin les oublie). -#}
+  {%- set l = namespace(d={}) -%}
+  {%- for id, r in ns.lues.items() if id in ns.suivi -%}
+    {%- set l.d = dict(l.d, **{id: r | int(0)}) -%}
+  {%- endfor -%}
+  {%- set ns.lues = l.d -%}
+  {#- Reprise de l'ancienne liste (input_text.tab5_alerts_dismissed), une seule fois. Pas
+      « ha:unavailable » : l'ancienne liste le gardait muet pour toujours. -#}
+  {%- if premiere -%}
+    {%- for ancien in src.get('anciennes') or [] -%}
+      {%- set cible = 'meteo:vigilance' if ancien.startswith('meteo:') else ancien -%}
+      {%- set e = ns.suivi.get(cible) -%}
+      {%- if e is mapping and ancien != 'ha:unavailable'
+            and (not ancien.startswith('meteo:') or ancien == 'meteo:' ~ (e.g | lower)) -%}
+        {%- set ns.lues = dict(ns.lues, **{cible: e.r}) -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+
+  {#- 4. Affichables : en cours, abonnées. -#}
+  {%- set rang = {'Rouge': 0, 'Orange': 1, 'Jaune': 2} -%}
+  {%- set af = namespace(l=[]) -%}
+  {%- for id, e in ns.suivi.items() if (e.f | int(0)) == 0 -%}
+    {%- if _abonnee(e.s, e.g, ab) -%}
+      {%- set af.l = af.l + [{'id': id, 'r': e.r, 'g': e.g, 't': e.t, 's': e.s, 'd': e.d, 'o': rang.get(e.g, 3)}] -%}
+    {%- endif -%}
+  {%- endfor -%}
+
+  {#- 5. Tap : « id#révision » lu (un ancien id sans révision vaut la révision en cours) ;
+      « * » = tout marquer comme lu. -#}
+  {%- if type_evt == 'lue' -%}
+    {%- set brut = donnees.get('alert_id', '') | string | trim -%}
+    {%- set morceaux = brut.split('#') -%}
+    {%- set id = morceaux[0] -%}
+    {%- set id = 'ha:indispo' if id == 'ha:unavailable' else id -%}
+    {%- set id = 'meteo:vigilance' if id.startswith('meteo:') else id -%}
+    {%- set cibles = af.l | map(attribute='id') | list if brut == '*' else [id] -%}
+    {%- for cible in cibles if ns.suivi.get(cible) is mapping -%}
+      {%- set e = ns.suivi[cible] -%}
+      {%- set rev = [(morceaux[1] | int(e.r)) if morceaux | count > 1 and brut != '*' else e.r, e.r] | min -%}
+      {%- if rev > (ns.lues.get(cible, 0) | int(0)) -%}
+        {%- set ns.lues = dict(ns.lues, **{cible: rev}) -%}
+        {%- set h = namespace(l=[]) -%}
+        {%- for x in ns.hist -%}
+          {%- set h.l = h.l + [dict(x, l=maintenant) if x.i == cible and (x.r | int(0)) <= rev and (x.l | int(0)) == 0 else x] -%}
+        {%- endfor -%}
+        {%- set ns.hist = h.l -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+
+  {#- 6. Affichées : pas encore lues ; gravité, puis la plus ancienne, puis l'id (tri
+      stable : du dernier critère au premier). -#}
+  {%- set aff = namespace(l=[]) -%}
+  {%- for e in af.l | sort(attribute='id') | sort(attribute='d') | sort(attribute='o') if (ns.lues.get(e.id, 0) | int(0)) < e.r -%}
+    {%- set aff.l = aff.l + [{'i': e.id ~ '#' ~ e.r, 'g': e.g, 't': e.t, 's': e.s}] -%}
+  {%- endfor -%}
+  {{- {'suivi': ns.suivi, 'lues': ns.lues, 'historique': ns.hist[:30], 'demarrage': ns.demarrage,
+       'reglages': ns.reglages, 'affichees': aff.l} | to_json -}}
+{%- endmacro -%}
+
+{#- Abonnée (listes « Tab5 · alerts: … ») ? Rend « o » si oui, rien sinon (une macro rend du
+    texte). Source inconnue (entrée d'historique d'avant le lot 4) : montrée. -#}
+{%- macro _abonnee(s, g, ab) -%}
+  {%- set rang = {'Rouge': 0, 'Orange': 1, 'Jaune': 2} -%}
+  {%- set seuil = rang.get(ab.get('vigilance', 'Jaune'), -1) -%}
+  {{- 'o' if (s == 'maj' and (ab.get('maj', 'toutes') == 'toutes' or (ab.get('maj') == 'ha' and g == 'Rouge')))
+             or (s == 'vigilance' and rang.get(g, 9) <= seuil)
+             or (s not in ['maj', 'vigilance'] and ab.get(s, true)) else '' -}}
+{%- endmacro -%}
+
+{#- ── Historique (lot 4 : popup « Alertes » de la tablette, tableau de bord) ─────────── -#}
+{%- macro tab5_alertes_historique_liste(memoire, abonnements, n) -%}
+  {%- set m = memoire if memoire is mapping else {} -%}
+  {%- set ab = abonnements if abonnements is mapping else {} -%}
+  {%- set h = m.get('historique') -%}
+  {%- set ns = namespace(l=[]) -%}
+  {%- for e in (h if h is sequence and h is not string and h is not mapping else []) if e is mapping -%}
+    {%- set i = e.get('i', '') | string -%}
+    {%- set s = e.get('s') or ('maj' if i.startswith('update.') else 'vigilance' if i == 'meteo:vigilance'
+                               else 'indispo' if i == 'ha:indispo' else '') -%}
+    {%- if ns.l | count < n and _abonnee(s, e.get('g', ''), ab) -%}
+      {%- set ns.l = ns.l + [e] -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{- ns.l | to_json -}}
+{%- endmacro -%}
+
+{%- macro tab5_alertes_historique_payload(memoire, abonnements) -%}
+  {%- set ns = namespace(r=[]) -%}
+  {%- for e in tab5_alertes_historique_liste(memoire, abonnements, 20) | from_json -%}
+    {%- set ns.r = ns.r + [[e.get('a', 0) | int(0), e.get('l', 0) | int(0), e.get('f', 0) | int(0),
+                            e.get('g', ''), _propre(e.get('t', ''))] | join('|')] -%}
+  {%- endfor -%}
+  {{- ns.r | join(';') -}}
+{%- endmacro -%}
+
+{#- ── Ce que disent les états de HA ─────────────────────────────────────────────────── -#}
+{#- Libellé sans les séparateurs du payload de la tablette (« | » et « ; »). -#}
+{%- macro _propre(texte) -%}{{ texte | string | replace('|', '/') | replace(';', ',') | trim }}{%- endmacro -%}
+
+{%- macro tab5_alertes_sources(suivi, anciennes, seuil_pile) -%}
+  {%- set suivi = suivi if suivi is mapping else {} -%}
+  {%- set critiques = ['update.home_assistant_core_update', 'update.home_assistant_supervisor_update',
+                       'update.home_assistant_operating_system_update'] -%}
+  {%- set ns = namespace(a={}, inc=[], abs=[]) -%}
+  {#- Entités à l'étiquette « Tab5 · alerte » : en alerte quand elles sont allumées, ouvertes,
+      déverrouillées, bloquées ou déclenchées (alarme). Rouge pour la fumée, le gaz, le CO,
+      l'eau et la sécurité. Écrites d'abord : une mise à jour ou un capteur « problème »
+      étiqueté garde sa propre source. -#}
+  {%- set rouges = ['smoke', 'gas', 'carbon_monoxide', 'moisture', 'safety'] -%}
+  {%- for i in label_entities('Tab5 · alerte') | sort -%}
+    {%- set e = states[i] -%}
+    {%- if e is not none and e.state in ['on', 'open', 'opening', 'unlocked', 'jammed', 'triggered'] -%}
+      {%- set ns.a = dict(ns.a, **{i: {'c': 'on', 's': 'etiquette', 't': _propre(e.name),
+            'g': 'Rouge' if e.attributes.device_class | default('') in rouges or e.state == 'triggered' else 'Orange'}}) -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {#- Piles faibles (capteurs « battery » en %, ou binaires « battery » allumés) : sous le
+      seuil ; une pile déjà suivie le reste jusqu'au seuil + 10 % (pas d'aller-retour à
+      chaque pour cent). -#}
+  {#- Pas les téléphones et tablettes de l'application mobile : rechargés chaque jour. -#}
+  {%- set mobiles = integration_entities('mobile_app') -%}
+  {%- for p in states.sensor | selectattr('attributes.device_class', 'defined')
+                             | selectattr('attributes.device_class', 'eq', 'battery')
+                             | selectattr('state', 'is_number')
+                             | rejectattr('entity_id', 'in', mobiles) -%}
+    {%- set v = p.state | float(100) -%}
+    {%- if v < seuil_pile or (p.entity_id in suivi and v < seuil_pile + 10) -%}
+      {%- set ns.a = dict(ns.a, **{p.entity_id: {'c': 'bas', 'g': 'Orange', 's': 'pile',
+            't': _propre(p.name) ~ ' ' ~ (v | round(0) | int) ~ ' %'}}) -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {%- for p in states.binary_sensor | selectattr('attributes.device_class', 'defined')
+                                    | selectattr('attributes.device_class', 'eq', 'battery')
+                                    | selectattr('state', 'eq', 'on') -%}
+    {%- set ns.a = dict(ns.a, **{p.entity_id: {'c': 'bas', 'g': 'Orange', 's': 'pile', 't': _propre(p.name)}}) -%}
+  {%- endfor -%}
+  {%- for u in states.update | selectattr('state', 'eq', 'on') -%}
+    {%- set titre = u.attributes.title | default(u.name, true) -%}
+    {%- set ns.a = dict(ns.a, **{u.entity_id: {
+          'c': u.attributes.latest_version | default('', true) | string,
+          'g': 'Rouge' if u.entity_id in critiques else 'Orange',
+          't': '@maj:' ~ _propre(titre), 's': 'maj'}}) -%}
+  {%- endfor -%}
+  {%- for p in states.binary_sensor | selectattr('attributes.device_class', 'defined')
+                                    | selectattr('attributes.device_class', 'eq', 'problem')
+                                    | selectattr('state', 'eq', 'on') -%}
+    {%- set ns.a = dict(ns.a, **{p.entity_id: {'c': 'on', 'g': 'Rouge', 't': _propre(p.name), 's': 'probleme'}}) -%}
+  {%- endfor -%}
+  {#- Indisponibles depuis 10 min : au démarrage de HA, une entité restaurée indisponible
+      repart de l'heure du démarrage (pas de pic à chaque redémarrage). -#}
+  {%- set limite = now() - timedelta(minutes=10) -%}
+  {%- set indispo = states | selectattr('state', 'eq', 'unavailable')
+                           | rejectattr('domain', 'in', ['update', 'automation'])
+                           | selectattr('last_changed', 'lt', limite)
+                           | map(attribute='entity_id') | sort | list -%}
+  {%- if indispo -%}
+    {%- set ns.a = dict(ns.a, **{'ha:indispo': {'c': indispo, 'g': 'Orange',
+                                               't': '@indispo:' ~ indispo | count, 's': 'indispo'}}) -%}
+  {%- endif -%}
+  {#- Météo de repli (custom_templates/tab5_meteo.jinja, 08/10/2026) : la source choisie
+      ne répond plus depuis 5 min au moins (pas d'alerte pendant le démarrage de HA, où
+      elle est indisponible quelques instants). Disparaît au retour de la source. -#}
+  {%- set mr = state_attr('sensor.tab5_meteo', 'repli') or '' -%}
+  {%- if mr in ['indisponible', 'perimee']
+        and now().timestamp() - (state_attr('sensor.tab5_meteo', 'repli_depuis') | float(0)) >= 300 -%}
+    {%- set choisi = (state_attr('sensor.tab5_meteo', 'nom_choisi') or '') | string -%}
+    {%- set eff = (state_attr('sensor.tab5_meteo', 'nom_effectif') or '') | string -%}
+    {%- set texte = 'Météo : ' ~ ((eff ~ ' utilisé, ') if eff and eff != choisi else '') ~ choisi ~ ' '
+                    ~ ('indisponible' if mr == 'indisponible' else 'ne se met plus à jour')
+                    ~ ' depuis ' ~ (state_attr('sensor.tab5_meteo', 'repli_heure') or '') -%}
+    {%- set ns.a = dict(ns.a, **{'ha:meteo_repli': {'c': mr ~ '|' ~ eff, 'g': 'Jaune',
+                                                    't': _propre(texte)[:100], 's': 'meteo'}}) -%}
+  {%- endif -%}
+  {%- set v = states('sensor.tab5_vigilance') -%}
+  {%- if v in ['Jaune', 'Orange', 'Rouge'] -%}
+    {%- set ns.a = dict(ns.a, **{'meteo:vigilance': {
+          'c': v ~ '|' ~ (state_attr('sensor.tab5_vigilance', 'phenomenes') | default('', true) | string),
+          'g': v, 't': '@vigi:' ~ v, 's': 'vigilance'}}) -%}
+  {%- endif -%}
+  {#- Réfrigérateurs et congélateurs (packages/tab5_froid.yaml, ADR-0055) : un id par
+      appareil, « froid:<entity_id> » ; libellé codé « @froid:cause:niveau:valeur:nom »,
+      composé par la tablette dans sa langue (ha_alerte_texte). -#}
+  {%- set froids = state_attr('sensor.tab5_froid', 'appareils') -%}
+  {%- for a in (froids if froids is sequence and froids is not string and froids is not mapping else [])
+       if a is mapping and a.get('e') and (a.get('n', 0) | int(0)) > 0 -%}
+    {%- set n = [a.get('n') | int(0), 2] | min -%}
+    {%- set val = '%.1f' | format(a.get('v')) if a.get('v') is number else '' -%}
+    {%- set ns.a = dict(ns.a, **{'froid:' ~ a.get('e'): {'c': (a.get('c') or 'ok') ~ '|' ~ n,
+          'g': 'Rouge' if n >= 2 else 'Orange', 's': 'froid',
+          't': '@froid:' ~ (a.get('c') or 'ok') ~ ':' ~ n ~ ':' ~ val ~ ':' ~ _propre(a.get('nom') or '')}}) -%}
+  {%- endfor -%}
+  {#- Suivies mais plus en cours : source dans le doute, ou entité disparue. -#}
+  {%- for i in suivi.keys() | list if i not in ns.a -%}
+    {%- if i == 'meteo:vigilance' -%}
+      {%- if v not in ['Vert', 'Jaune', 'Orange', 'Rouge'] -%}{%- set ns.inc = ns.inc + [i] -%}{%- endif -%}
+    {%- elif i.startswith('froid:') -%}
+      {%- if states('sensor.tab5_froid') in ['unavailable', 'unknown'] -%}{%- set ns.inc = ns.inc + [i] -%}{%- endif -%}
+    {%- elif '.' in i and ':' not in i -%}
+      {%- if states[i] is none -%}
+        {%- set ns.abs = ns.abs + [i] -%}
+      {%- elif states(i) in ['unavailable', 'unknown'] -%}
+        {%- set ns.inc = ns.inc + [i] -%}
+      {%- endif -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{- {'actives': ns.a, 'incertains': ns.inc, 'absents': ns.abs, 'anciennes': anciennes} | to_json -}}
+{%- endmacro -%}
+
+{#- ── Le capteur « Tab5 Alerts » ───────────────────────────────────────────────────── -#}
+{#- Abonnements : listes « Tab5 · alerts: … » (packages/tab5_alerts.yaml) ; liste absente =
+    choix par défaut (le premier de chaque liste). Options en anglais depuis le 24/10/2026
+    (« All », « Yellow », « No »…) ; les françaises d'avant (« Toutes », « Jaune », « Non »…)
+    restent lues : une installation sans l'intégration redémarre sur l'option restaurée.
+    Les codes rendus, eux, ne changent pas (toutes / ha / aucune, Jaune / Orange / Rouge /
+    Aucune) : la logique et la mémoire les lisent. -#}
+{%- macro tab5_alertes_abonnements() -%}
+  {%- set maj = states('input_select.tab5_alertes_maj') -%}
+  {%- set vigilance = states('input_select.tab5_alertes_vigilance') -%}
+  {%- set non = ['No', 'Non'] -%}
+  {{- {'maj': {'Home Assistant only': 'ha', 'Home Assistant seulement': 'ha',
+               'None': 'aucune', 'Aucune': 'aucune'}.get(maj, 'toutes'),
+       'vigilance': {'Orange': 'Orange', 'Red': 'Rouge', 'Rouge': 'Rouge',
+                     'None': 'Aucune', 'Aucune': 'Aucune'}.get(vigilance, 'Jaune'),
+       'probleme': states('input_select.tab5_alertes_problemes') not in non,
+       'indispo': states('input_select.tab5_alertes_indisponibles') not in non,
+       'etiquette': states('input_select.tab5_alertes_etiquette') not in non,
+       'pile': states('input_select.tab5_alertes_piles') not in ['None', 'Aucune'],
+       'froid': states('input_select.tab5_alertes_froid') not in non} | to_json -}}
+{%- endmacro -%}
+
+{%- macro tab5_alertes_memoire(type_evt, donnees) -%}
+  {%- set etat = states.sensor.tab5_alertes -%}
+  {%- set m = etat.attributes if etat is not none else {} -%}
+  {%- set suivi = m.get('suivi') if m.get('suivi') is mapping else none -%}
+  {#- L'ancienne liste n'est lue qu'à la première fois (mémoire vide). -#}
+  {%- set anciennes = (states('input_text.tab5_alerts_dismissed') or '').split('|') | reject('equalto', '') | list
+                      if suivi is none else [] -%}
+  {%- set pile = states('input_select.tab5_alertes_piles') -%}
+  {%- set seuil = pile.split(' ')[0] | int(20) if pile.endswith('%') else 20 -%}
+  {%- set abonnements = tab5_alertes_abonnements() | from_json -%}
+  {%- set sources = tab5_alertes_sources(suivi or {}, anciennes, seuil) | from_json -%}
+  {{- tab5_alertes_logique(m, sources, {'type': type_evt, 'data': donnees or {}},
+                           now().timestamp() | int, abonnements) -}}
+{%- endmacro -%}
+
+{#- Historique lu dans HA : format = 'payload' (action tab5_maj_alertes_historique de la
+    tablette) ou 'liste' (JSON, tableau de bord). -#}
+{%- macro tab5_alertes_historique(format) -%}
+  {%- set etat = states.sensor.tab5_alertes -%}
+  {%- set m = etat.attributes if etat is not none else {} -%}
+  {%- set ab = tab5_alertes_abonnements() | from_json -%}
+  {{- tab5_alertes_historique_payload(m, ab) if format == 'payload' else tab5_alertes_historique_liste(m, ab, 20) -}}
+{%- endmacro -%}

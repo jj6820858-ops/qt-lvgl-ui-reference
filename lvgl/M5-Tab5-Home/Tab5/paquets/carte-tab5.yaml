@@ -1,0 +1,31 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file carte-tab5.yaml
+# @role Carte M5Stack Tab5 (ADR-0061) : la taille de son écran, son matériel et la
+#       révision de sa dalle. Choisie par défaut par `tab5_carte:` (tab5-ha-hmi.yaml).
+# @architecture_constraint Ne fait que REGROUPER les fichiers d'avant, dans le même ordre :
+#       la configuration résolue du Tab5 est celle d'avant l'arrivée des cartes (seul le
+#       bloc `substitutions:` gagne les clés carte_*, et l'interval de l'horloge RX8130
+#       un `id:`). Écran et tactile selon la révision du Tab5 (docs/hardware.md,
+#       « Hardware revisions ») : `tab5_ecran:` dans Tab5/user_entities.yaml = st7123
+#       (défaut, testée), st7121 (tourne chez un utilisateur depuis octobre 2026) ou
+#       ili9881c (compilée par la CI, jamais testée). Le défaut Jinja évite d'imposer la
+#       clé aux user_entities.yaml existants ; `lower` tolère « ST7121 » (vérifié sur
+#       ESPHome 2026.9.0, le plancher).
+# @ai_instruction FICHIER CRITIQUE par ce qu'il inclut : aucune broche, fréquence I2C ni
+#       séquence de démarrage ne change ici sans l'accord d'Axel (tab5-hardware.yaml).
+# ============================================================================
+# Le C6 du Tab5 répond à la demande de version (1.4.1) : capteur « Tab5 C6 Version »
+# (tab5-sensors-diagnostics.yaml). La Waveshare 7B met false.
+# Attente bloquante avant l'écran ([AI-WARNING-CRITICAL] de l'on_boot 700 de
+# tab5-ha-hmi.yaml, ADR-0005) : le reset de la dalle passe par l'expandeur PI4IOE5V6408,
+# qui a besoin d'une seconde après le démarrage (écran noir après un redémarrage logiciel
+# sans elle, 06/07/2026). NE PAS BAISSER. La Waveshare 7B met 0.
+substitutions:
+  carte_c6_version: "true"
+  carte_attente_ecran_ms: "1000"
+
+packages:
+  geometrie: !include geometrie-tab5.yaml
+  tab5_hardware: !include tab5-hardware.yaml
+  tab5_ecran: !include ecran-${ tab5_ecran | default('st7123') | lower }.yaml

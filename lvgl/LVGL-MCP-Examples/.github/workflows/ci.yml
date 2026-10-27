@@ -1,0 +1,307 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The LVGL release the simulator submodule must be pinned to. Bump it
+  # together with the submodule, README.md and CHANGELOG.md.
+  LVGL_TAG: v9.6.0
+  NODE_VERSION: "22"
+
+jobs:
+  mcp-server:
+    name: MCP server (lint, typecheck, unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mcp-server
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: mcp-server/package-lock.json
+
+      # --ignore-scripts: never let postinstall download a release simulator
+      # into mcp-server/simulator (it would shadow the one built from source).
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Board tables match src/boards.ts
+        run: node scripts/gen-boards-md.mjs --check
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit and contract tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Package contents
+        run: npm pack --dry-run --ignore-scripts
+
+  simulator:
+    name: Simulator + e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    # Intel macOS is informational: a failure there does not fail the run.
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is Apple Silicon.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        experimental: [false]
+        include:
+          - os: macos-26-intel
+            experimental: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: mcp-server/package-lock.json
+
+      - name: Install Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+
+      # The macOS images ship Xcode (Apple clang), CMake and Ninja; install
+      # only what is missing.
+      - name: Toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          command -v ninja >/dev/null || brew install ninja
+          command -v cmake >/dev/null || brew install cmake
+          echo "Xcode: $(xcode-select -p)"
+          cc --version | head -n1
+          cmake --version | head -n1
+          echo "ninja $(ninja --version)"
+
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      - name: Configure simulator (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: cmake -S simulator -B simulator/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure simulator (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -S simulator -B simulator/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+
+      - name: Build simulator
+        run: cmake --build simulator/build --parallel
+
+      - name: Smoke test (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: |
+          out="$RUNNER_TEMP/smoke"
+          mkdir -p "$out"
+          node scripts/smoke-test.mjs simulator/build/lvgl_sim 320 240
+          node scripts/smoke-test.mjs simulator/build/lvgl_sim 480 320 \
+            --ui examples/06-ui.json --expect-names title,target,settings_btn
+          # Keep a screenshot for the artifact below.
+          ./simulator/build/lvgl_sim --width 480 --height 320 --ui examples/06-ui.json \
+            --output-png "$out/smoke.png" --output-json "$out/smoke.json"
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "smoke"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          node scripts/smoke-test.mjs simulator/build/lvgl_sim.exe 320 240
+          if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
+          node scripts/smoke-test.mjs simulator/build/lvgl_sim.exe 480 320 --ui examples/06-ui.json --expect-names title,target,settings_btn
+          if ($LASTEXITCODE -ne 0) { throw "UI JSON smoke test failed" }
+          & .\simulator\build\lvgl_sim.exe --width 480 --height 320 --ui examples/06-ui.json --output-png (Join-Path $out "smoke.png") --output-json (Join-Path $out "smoke.json")
+          if ($LASTEXITCODE -ne 0) { throw "lvgl_sim exited with $LASTEXITCODE" }
+
+      - name: Upload smoke screenshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-${{ matrix.os }}
+          path: ${{ runner.temp }}/smoke/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Build MCP server
+        working-directory: mcp-server
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+
+      # A postinstall-downloaded mcp-server/simulator would silently replace
+      # the simulator built above. Make sure that cannot happen.
+      - name: Assert the server uses the source-built simulator
+        shell: bash
+        run: |
+          if [ -e mcp-server/simulator ]; then
+            echo "::error::mcp-server/simulator exists; the e2e tests would not test this checkout"
+            exit 1
+          fi
+
+      - name: Unit + end-to-end tests
+        working-directory: mcp-server
+        env:
+          LVGL_E2E: "1"
+        run: npm test
+
+  # Linux only (keeps CI fast); the Release workflow builds and verifies the
+  # prebuilt artifacts on every platform.
+  prebuilt:
+    name: Prebuilt LVGL (Linux, gcc + clang)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+
+      # Builds simulator/prebuilt/linux-x64 with gcc, links the simulator
+      # against it, requires identical PNGs and checks the lv_conf.h fallback.
+      - name: Build + verify the prebuilt LVGL (gcc)
+        run: ./scripts/build-prebuilt.sh --build-dir "$RUNNER_TEMP/prebuilt-build" --verify
+
+      - name: Link the gcc-built LVGL from a clang build
+        run: |
+          set -euo pipefail
+          clang --version | head -n1
+          CC=clang CXX=clang++ cmake -S simulator -B "$RUNNER_TEMP/clang-prebuilt" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DLVGL_PREBUILT_DIR="$PWD/simulator/prebuilt/linux-x64" \
+            2>&1 | tee "$RUNNER_TEMP/clang-prebuilt.log"
+          grep -q "LVGL_PREBUILT: using" "$RUNNER_TEMP/clang-prebuilt.log"
+          cmake --build "$RUNNER_TEMP/clang-prebuilt" --parallel
+          "$RUNNER_TEMP/clang-prebuilt/lvgl_sim" --width 320 --height 240 \
+            --output-png "$RUNNER_TEMP/clang.png" --output-json "$RUNNER_TEMP/clang.json"
+          simulator/prebuilt/linux-x64/lvgl_sim --width 320 --height 240 \
+            --output-png "$RUNNER_TEMP/gcc.png" --output-json "$RUNNER_TEMP/gcc.json"
+          cmp "$RUNNER_TEMP/gcc.png" "$RUNNER_TEMP/clang.png"
+
+      - name: Prebuilt lvgl_sim renders a UI document without a toolchain
+        run: |
+          node scripts/smoke-test.mjs simulator/prebuilt/linux-x64/lvgl_sim 480 320 \
+            --ui examples/06-ui.json --expect-names title,target,settings_btn --no-toolchain
+
+  submodule-pin:
+    name: LVGL submodule pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check simulator/lib/lvgl is exactly ${{ env.LVGL_TAG }}
+        run: |
+          git submodule update --init --depth 1 simulator/lib/lvgl
+          git -C simulator/lib/lvgl fetch --depth 1 --no-tags origin "+refs/tags/${LVGL_TAG}:refs/tags/${LVGL_TAG}"
+          actual="$(git -C simulator/lib/lvgl describe --tags --exact-match HEAD 2>/dev/null || true)"
+          if [ "$actual" != "$LVGL_TAG" ]; then
+            echo "::error::simulator/lib/lvgl is at $(git -C simulator/lib/lvgl rev-parse HEAD) (${actual:-no tag}), expected ${LVGL_TAG}"
+            exit 1
+          fi
+          echo "Submodule is at $actual"
+
+      - name: Check .gitmodules branch
+        run: |
+          minor="${LVGL_TAG#v}"
+          minor="${minor%.*}"
+          branch="$(git config -f .gitmodules submodule.simulator/lib/lvgl.branch || true)"
+          if [ "$branch" != "release/v${minor}" ]; then
+            echo "::error file=.gitmodules::submodule branch is '${branch}', expected 'release/v${minor}'"
+            exit 1
+          fi
+
+      - name: Check README.md and CHANGELOG.md mention ${{ env.LVGL_TAG }}
+        run: |
+          status=0
+          for f in README.md CHANGELOG.md; do
+            if ! grep -qF "$LVGL_TAG" "$f"; then
+              echo "::error file=$f::$f does not mention $LVGL_TAG"
+              status=1
+            fi
+          done
+          exit "$status"
+
+  lint-workflows-and-scripts:
+    name: actionlint + shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: "1.7.12"
+      ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: shellcheck scripts/*.sh
+        run: |
+          shellcheck --version
+          shellcheck scripts/*.sh
+
+      - name: bash -n scripts/*.sh
+        run: for f in scripts/*.sh; do bash -n "$f"; done
+
+      - name: PowerShell syntax (scripts/*.ps1)
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in Get-ChildItem scripts -Filter *.ps1) {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            foreach ($e in $errors) { Write-Host "::error file=scripts/$($f.Name),line=$($e.Extent.StartLineNumber)::$($e.Message)"; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
+      - name: node --check on .mjs scripts
+        run: for f in scripts/*.mjs mcp-server/scripts/*.mjs mcp-server/bin/*.mjs; do node --check "$f"; done
+
+      - name: actionlint
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color

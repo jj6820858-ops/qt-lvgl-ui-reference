@@ -1,0 +1,50 @@
+# Local development entry point: wifi + token from secrets.yaml, board
+# picked here. End users adopting via the ESPHome builder import a file
+# from boards/ instead - see README.md.
+
+substitutions:
+  claude_token: !secret claude_token
+  # Codex provider (opt-in): uncomment together with the openai package
+  # below once the openai_* secrets exist (see secrets.example.yaml).
+  # openai_refresh_token: !secret openai_refresh_token
+  # openai_account_id: !secret openai_account_id
+  # Gemini provider (opt-in): uncomment together with the gemini package
+  # below once the gemini_* secrets exist (see secrets.example.yaml).
+  # gemini_refresh_token: !secret gemini_refresh_token
+  # gemini_client_secret: !secret gemini_client_secret
+  # Local dev: in-repo component sources instead of GitHub.
+  tokentide_components_source: "../components"
+  # Local dev: repo sprites instead of the GitHub raw URLs.
+  theme_sprite_base: "../assets/sprites"
+  saver_sprite_base: "../assets/sprites"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    password: !secret ap_password
+
+# Dev: full logs on the wire (the package default is INFO).
+logger:
+  level: DEBUG
+
+packages:
+  board: !include ../boards/m5stack-cores3.yaml
+  # openai: !include ../packages/provider-openai.yaml
+  # gemini: !include ../packages/provider-gemini.yaml
+  # lang: !include ../lang/it.yaml
+
+api:
+
+ota:
+  - platform: esphome
+
+captive_portal:
+
+# Dev QA: GET http://<ip>:8081/screenshot (see tools/screenshot.sh).
+# Dev-only component, deliberately not part of the published package.
+external_components:
+  - source: ../components
+    components: [tokentide_screenshot]
+
+tokentide_screenshot:

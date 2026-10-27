@@ -1,0 +1,118 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file tab5-imu.yaml
+# @role BMI270 (IMU embarquée) — accel/gyro/temp, tap-to-wake, et source
+#     d'inclinaison / de secousse des 8 consoles (liste unique :
+#     GameRegistry::kGames, tab5_registry.cpp — aucun jeu n'est nommé ici).
+# @architecture_constraint Bus I2C bsp_bus (GPIO31/32 @ 400 kHz), adresse 0x68.
+#     Aucun conflit avec le PI4IOE (0x43/0x44). Composant natif ESPHome (motion:).
+#     Les 3 axes d'accélération sont `internal: true` : à 10-30 Hz ils
+#     saturaient l'API HA pour rien (~50 msg/s). Rien ne remonte à HA : la
+#     position ne sert qu'aux jeux (tangage, roulis et température retirés le
+#     29/09/2026 à la demande d'Axel : la tablette ne change jamais de sens).
+# @ai_instruction Ne pas modifier l'adresse I2C ni le bus. Ne pas retirer
+#     `internal: true` des axes d'accélération. La cadence de poll est pilotée
+#     dynamiquement par l'interval en bas de fichier : aucune lecture écran allumé
+#     sans jeu, 100 ms écran éteint (tap-to-wake) ou jeu ouvert, 33 ms pour un
+#     jeu `imu_fast`. Ne pas la figer.
+# ============================================================================
+
+# --- Plateforme motion (BMI270) ---
+# L'ODR matériel (100 Hz accel) est indépendant de la cadence de poll ESPHome :
+# on lit toujours le dernier échantillon dispo, on change juste la fréquence de
+# lecture selon qu'on joue ou non.
+motion:
+  - platform: bmi270
+    id: tab5_imu
+    address: 0x68
+    i2c_id: bsp_bus
+    accelerometer_range: 4G
+    accelerometer_odr: 100HZ
+    gyroscope_range: 2000DPS
+    gyroscope_odr: 200HZ
+    update_interval: 100ms    # valeur de repos ; ajustée à chaud (voir interval:)
+
+sensor:
+  # --- Axes d'accélération : usage 100 % local (jeu + tap-to-wake) ----------
+  # `internal: true` => pas de publication HA. Les callbacks continuent de tourner.
+  - platform: motion
+    type: acceleration_x
+    id: imu_accel_x
+    internal: true
+
+  - platform: motion
+    type: acceleration_y
+    id: imu_accel_y
+    internal: true
+
+  - platform: motion
+    type: acceleration_z
+    id: imu_accel_z
+    internal: true
+    # Z est publié en dernier dans le cycle du composant : on s'en sert comme
+    # point de synchronisation pour pousser les 3 axes d'un coup (un seul appel
+    # par cycle au lieu de trois) puis traiter le tap-to-wake.
+    on_value:
+      then:
+        - lambda: |-
+            float ax = id(imu_accel_x).state;
+            float ay = id(imu_accel_y).state;
+            float az = x;
+            if (isnan(ax) || isnan(ay) || isnan(az)) return;
+
+            // 1) Alimentation des consoles (simple stockage, aucun calcul lourd
+            //    ici) : GameRegistry::kGames (tab5_registry.cpp) est la seule
+            //    liste. « Roi Noir » et « Dames » n'y lisent qu'une secousse
+            //    franche (demande d'indice, plateau 100 % tactile) ; « Neon
+            //    Apron » n'y lit que le nudge (la gravité de la table est
+            //    constante ; trois abus de suite = TILT), mapping des axes en
+            //    portrait démontré dans pinball_game.cpp.
+            GameRegistry::dispatch_imu(ax, ay, az);
+
+            // 2) Tap-to-wake : une tape franche sur la dalle (> 2,5 g, anti-rebond de
+            // 500 ms : imu_tape_franche(), tab5_registry.cpp) rallume l'écran.
+            if (!id(tab5_tap_to_wake).state) return;
+            if (imu_tape_franche(ax, ay, az, millis())) {
+                auto call = id(backlight).turn_on();
+                call.perform();
+            }
+
+  # Plus de tangage, roulis ni température envoyés à HA (29/09/2026) : la tablette
+  # ne change jamais de sens et la position ne sert qu'aux jeux. C'était ≈ 120
+  # lignes par heure dans la base HA, et la seule raison de lire l'IMU écran
+  # allumé hors jeu.
+
+# --- Switch : activer/désactiver le tap-to-wake ---
+switch:
+  - platform: template
+    name: "Tab5 Tap-to-Wake"
+    id: tab5_tap_to_wake
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    # Popup Réglages (tab5-reglages.yaml, « Rallumer l'écran d'une tape »).
+    on_state:
+      - script.execute: tab5_reglages_sync_ui
+
+# --- Cadence de poll adaptative -------------------------------------------
+# Le jeu a besoin d'une entrée réactive (~30 Hz) ; écran éteint, 10 Hz suffit
+# largement au tap-to-wake ; écran allumé sans jeu, l'IMU ne sert à rien : plus
+# aucune lecture (29/09/2026 ; 1 Hz depuis le lot 3 du 26/09, 10 Hz avant).
+# 24 octets lus sur bsp_bus à chaque lecture. `set_update_interval()` seul ne suffit pas :
+# PollingComponent enregistre son interval une fois pour toutes dans
+# call_setup(), il faut donc relancer le poller pour que la nouvelle valeur
+# prenne effet (stop_poller/start_poller sont publics et prévus pour ça).
+# On lit toujours le hub du jeu en premier, donc le passage en cadence rapide
+# a tout le temps de se faire avant la première salle.
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          // Cadence voulue (33 ms, 100 ms ou 0 = plus de lecture) et ses raisons :
+          // imu_cadence_a_changer(), tab5_registry.cpp ; -1 = inchangée.
+          const int32_t cadence = imu_cadence_a_changer(
+              !id(backlight).current_values.is_on() && id(tab5_tap_to_wake).state);
+          if (cadence < 0) return;
+          id(tab5_imu).stop_poller();
+          if (cadence == 0) return;
+          id(tab5_imu).set_update_interval(cadence);
+          id(tab5_imu).start_poller();

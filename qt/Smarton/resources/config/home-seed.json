@@ -1,0 +1,296 @@
+{
+  "_comment": [
+    "FACTORY DEFAULTS, matching the Figma frames so the built app can be",
+    "compared with the design side by side. Read once, on a database with no",
+    "stored model; after that the SQLite snapshot is the live model.",
+    "'availableDevices' are detected-but-unlinked units, for wizard frames",
+    "16-17. Image paths are relative to qrc:/qt/qml/SmarTon/Resources/."
+  ],
+  "space": {
+    "id": "space-1",
+    "name": "My Home",
+    "address": "Albishoara 80/3",
+    "image": "images/rooms/house-exterior.png"
+  },
+  "weather": {
+    "description": "Partly Cloudy",
+    "temperatureC": 23,
+    "humidityPercent": 67
+  },
+  "rooms": [
+    {
+      "id": "room-living",
+      "name": "Living Room",
+      "areaSqm": 20,
+      "image": "images/rooms/living-sofa.png",
+      "temperatureC": 25,
+      "humidityPercent": 67,
+      "energyKw": 20
+    },
+    {
+      "id": "room-bedroom",
+      "name": "Bedroom",
+      "areaSqm": 16,
+      "image": "images/rooms/bedroom-bed.png",
+      "temperatureC": 22,
+      "humidityPercent": 60,
+      "energyKw": 20
+    },
+    {
+      "id": "room-kitchen",
+      "name": "Kitchen",
+      "areaSqm": 12,
+      "image": "images/rooms/kitchen-hob.png",
+      "temperatureC": 24,
+      "humidityPercent": 55,
+      "energyKw": 20
+    },
+    {
+      "id": "room-bath",
+      "name": "Bathroom",
+      "areaSqm": 6,
+      "image": "images/rooms/bathroom-tub.png",
+      "temperatureC": 26,
+      "humidityPercent": 72,
+      "energyKw": 20
+    }
+  ],
+  "devices": [
+    {
+      "id": "dev-lamp-1",
+      "roomId": "room-living",
+      "name": "Smart Lamp",
+      "kind": "lamp",
+      "image": "images/devices/pendant-lamp-teal.png",
+      "on": true,
+      "levelPercent": 80
+    },
+    {
+      "id": "dev-diffuser",
+      "roomId": "room-living",
+      "name": "Aroma Diffuser",
+      "kind": "diffuser",
+      "image": "images/devices/sensor-hub.png",
+      "on": true,
+      "levelPercent": 45
+    },
+    {
+      "id": "dev-ac",
+      "roomId": "room-living",
+      "name": "Air Conditioner",
+      "kind": "conditioner",
+      "image": "images/devices/air-purifier.png",
+      "on": true,
+      "targetC": 24,
+      "mode": "cold",
+      "levelPercent": 50
+    },
+    {
+      "id": "dev-humid",
+      "roomId": "room-living",
+      "name": "Humidifier",
+      "kind": "humidifier",
+      "image": "images/devices/smart-speaker.png",
+      "on": true,
+      "levelPercent": 65
+    },
+    {
+      "id": "dev-speaker",
+      "roomId": "room-living",
+      "name": "Speaker",
+      "kind": "speaker",
+      "image": "images/devices/speaker.png",
+      "on": true,
+      "batteryPercent": 90,
+      "volumePercent": 70
+    },
+    {
+      "id": "dev-lamp-2",
+      "roomId": "room-living",
+      "name": "Smart Lamp",
+      "kind": "lamp",
+      "image": "images/devices/ceiling-lamp.png",
+      "on": true,
+      "levelPercent": 60
+    },
+    {
+      "id": "dev-lamp-3",
+      "roomId": "room-bedroom",
+      "name": "Smart Lamp",
+      "kind": "lamp",
+      "image": "images/devices/pendant-lamp.png",
+      "on": false,
+      "levelPercent": 40
+    },
+    {
+      "id": "dev-hub-1",
+      "roomId": "room-bedroom",
+      "name": "Sensor Hub",
+      "kind": "hub",
+      "image": "images/devices/sensor-hub.png",
+      "on": true
+    },
+    {
+      "id": "dev-ac-2",
+      "roomId": "room-kitchen",
+      "name": "Air Purifier",
+      "kind": "conditioner",
+      "image": "images/devices/air-purifier.png",
+      "on": false,
+      "targetC": 24,
+      "mode": "cold",
+      "levelPercent": 35
+    },
+    {
+      "id": "dev-lamp-4",
+      "roomId": "room-bath",
+      "name": "Ceiling Lamp",
+      "kind": "lamp",
+      "image": "images/devices/ceiling-lamp.png",
+      "on": false,
+      "levelPercent": 100
+    }
+  ],
+  "scenes": [
+    {
+      "id": "scene-coffee",
+      "roomId": "room-kitchen",
+      "name": "Morning coffee",
+      "days": "Everyday",
+      "timeRange": "08:15 AM - 09:00 AM",
+      "enabled": false
+    },
+    {
+      "id": "scene-movie",
+      "roomId": "room-living",
+      "name": "Movie Night",
+      "days": "Mon, Fri",
+      "timeRange": "08:00 PM - 10:00 PM",
+      "enabled": true
+    },
+    {
+      "id": "scene-sleeping",
+      "roomId": "room-bedroom",
+      "name": "Sleeping",
+      "days": "Everyday",
+      "timeRange": "12:00 PM - 08:00 AM",
+      "enabled": true
+    },
+    {
+      "id": "scene-birthday",
+      "roomId": "",
+      "name": "32th Birthday Jack",
+      "days": "July 30th",
+      "timeRange": "07:00 PM - 10:00 PM",
+      "enabled": false
+    }
+  ],
+  "members": [
+    {
+      "id": "mem-1",
+      "name": "Dina",
+      "email": "dinaconeva@gmail.com",
+      "online": true
+    },
+    {
+      "id": "mem-2",
+      "name": "Vasilisa",
+      "email": "vasilisaconeva@gmail.com",
+      "online": true
+    },
+    {
+      "id": "mem-3",
+      "name": "Andrei",
+      "email": "andrei@example.com",
+      "online": false
+    },
+    {
+      "id": "mem-4",
+      "name": "Mira",
+      "email": "mira@example.com",
+      "online": false
+    },
+    {
+      "id": "mem-5",
+      "name": "Sasha",
+      "email": "sasha@example.com",
+      "online": true
+    }
+  ],
+  "availableDevices": [
+    {
+      "id": "avail-diffuser",
+      "roomId": "",
+      "name": "Aroma Diffuser",
+      "kind": "diffuser",
+      "image": "images/devices/sensor-hub.png",
+      "on": false,
+      "levelPercent": 45
+    },
+    {
+      "id": "avail-ac",
+      "roomId": "",
+      "name": "Air Conditioner",
+      "kind": "conditioner",
+      "image": "images/devices/air-purifier.png",
+      "on": false,
+      "targetC": 24,
+      "mode": "cold",
+      "levelPercent": 50
+    },
+    {
+      "id": "avail-humid",
+      "roomId": "",
+      "name": "Humidifier",
+      "kind": "humidifier",
+      "image": "images/devices/smart-speaker.png",
+      "on": false,
+      "levelPercent": 65
+    },
+    {
+      "id": "avail-speaker",
+      "roomId": "",
+      "name": "Speaker",
+      "kind": "speaker",
+      "image": "images/devices/speaker.png",
+      "on": false,
+      "batteryPercent": 90,
+      "volumePercent": 70
+    },
+    {
+      "id": "avail-lamp-1",
+      "roomId": "",
+      "name": "Smart Lamp",
+      "kind": "lamp",
+      "image": "images/devices/pendant-lamp-teal.png",
+      "on": false,
+      "levelPercent": 80
+    },
+    {
+      "id": "avail-lamp-2",
+      "roomId": "",
+      "name": "Smart Lamp",
+      "kind": "lamp",
+      "image": "images/devices/ceiling-lamp.png",
+      "on": false,
+      "levelPercent": 60
+    },
+    {
+      "id": "avail-lamp-3",
+      "roomId": "",
+      "name": "Pendant Lamp",
+      "kind": "lamp",
+      "image": "images/devices/pendant-lamp.png",
+      "on": false,
+      "levelPercent": 40
+    },
+    {
+      "id": "avail-hub",
+      "roomId": "",
+      "name": "Sensor Hub",
+      "kind": "hub",
+      "image": "images/devices/sensor-hub.png",
+      "on": false
+    }
+  ]
+}

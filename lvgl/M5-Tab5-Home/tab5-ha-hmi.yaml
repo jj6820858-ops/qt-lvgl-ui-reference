@@ -1,0 +1,587 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file tab5-ha-hmi.yaml
+# @role Point d'entrée principal ESPHome.
+# @architecture_constraint Contient les substitutions, l'inclusion des packages, et le boot.
+# @ai_instruction Ne JAMAIS modifier la séquence on_boot sans l'autorisation expresse d'Axel.
+# ============================================================================
+# Entity IDs HA : fichier local gitignoré (comme secrets.yaml).
+# Setup : cp Tab5/user_entities.example.yaml Tab5/user_entities.yaml puis éditer.
+substitutions: !include Tab5/user_entities.yaml
+
+esphome:
+  # Nom de l'appareil (ADR-0063, plusieurs écrans) : un par écran quand plusieurs
+  # tournent ensemble (`tab5_nom: ecran-cuisine` dans Tab5/user_entities.yaml, ou
+  # `-s tab5_nom …`). Il donne le nom réseau (mDNS), le dossier de build et le préfixe
+  # des actions que HA appelle (`esphome.ecran_cuisine_tab5_maj_…`), publié par le
+  # capteur « Tab5 Préfixe des actions ». Défaut inchangé : une tablette déjà installée
+  # garde son nom, ses entités et ses actions. Le modèle de l'appareil (le `name` du bloc project, plus bas)
+  # ne change pas : c'est lui qui fait reconnaître la tablette par HA.
+  name: ${ tab5_nom | default('tab5-ha-hmi') }
+  friendly_name: ${ tab5_nom_affiche | default('M5Stack Tab5 Home Assistant HMI') }
+  # Identité du firmware (lot 6b, ADR-0020) : HA l'affiche dans la fiche de l'appareil,
+  # et le manifeste de mise à jour (lot 6c, ADR-0022) porte ce même `name`. La version
+  # suit le CHANGELOG ; « -dev » pour une compilation locale. Un firmware publié reçoit
+  # celle du tag de sa release (`-s tab5_version …`, .github/workflows/publication.yml),
+  # que l'entité de mise à jour compare au manifeste. Le défaut = dernière version publiée
+  # du CHANGELOG + « -dev » : à relever à chaque release (tests/test_version.py).
+  project:
+    name: axellum.tab5-ha-hmi
+    version: ${ tab5_version | default('3.9.0-dev') }
+  # [2026.7.0] Plancher DUR d'origine : st7123 officiel + audio zero-copy + VAD + PSRAM SDIO.
+  # [2026.8.1] Relevé le 26/08/2026. Le code compile encore tel quel en 2026.7.x — ce
+  # plancher n'est donc pas une dépendance d'API, c'est un choix : 2026.8 corrige trois
+  # choses que ce projet exerce tous les jours, et rien ici ne justifie de laisser
+  # quelqu'un compiler sans elles.
+  #   - api #18577 : la loop se bloque et déclenche le watchdog quand l'envoi de la liste
+  #     d'entités bloque. On expose 58 entités, et CONFIG_ESP_TASK_WDT_TIMEOUT_S est
+  #     justement monté à 15 s dans tab5-hardware.yaml à cause de ce genre de blocage.
+  #   - voice_assistant #17043 : lecture hachée quand le CPU est chargé — exactement le
+  #     cas LVGL + jeux + TTS streamé, celui que buffer_duration: 500ms amortit à peine.
+  #   - esp32 #17769 / #17770 : le handler de crash capture enfin MTVAL (l'adresse
+  #     fautive sur RISC-V) et signale un crash décodé contre un autre binaire.
+  #   (Redescendre à 2026.7.0 ne cassait rien de fonctionnel tant que ce plancher tenait.)
+  # [2026.9.0] Relevé le 16/09/2026 — cette fois c'est une dépendance d'API : le bloc
+  # `ota: encryption:` (chiffrement OTA avec la clé API, tab5-hardware.yaml) n'existe pas
+  # avant 2026.9.0, une version antérieure refuse la config. En prime, sans rien changer :
+  #   - ota #18580 / #19041 : effacement flash paresseux par blocs de 64 Kio (préparation
+  #     < 0,2 s au lieu de ~4 s) et délais 105 s / 160 s qui survivent aux acks perdus ;
+  #   - i2s_audio #19045 / #19027 / #19046 : plus de « Parent bus is busy » auto-infligé
+  #     en STATE_STARTING, plus de 2e flux muet quand la fréquence change (sonnerie RTTTL
+  #     puis TTS 24 kHz — notre bus I2S partagé micro/haut-parleur, ADR-0010) ;
+  #   - api #18802 / #18803 : la connexion est coupée au lieu de crasher quand l'allocation
+  #     d'un tampon échoue (payloads bulk).
+  # [lot 6b, 27/09/2026] Le bloc `ota: encryption:` est parti (ADR-0020), mais le
+  # plancher reste : `provisioning:` (fenêtre d'appairage), la clé API fournie par HA
+  # par une connexion chiffrée et `signed_ota_verification` sont vérifiés en 2026.9.0
+  # (le job CI build-min compile à ce plancher). Pas cherché si une version plus
+  # ancienne les connaît tous.
+  min_version: 2026.9.0
+  # Une macro de LV_DEFINES (que lv_conf.h, écrit par ESPHome, met sinon à 0) passe par
+  # ICI : ESPHome 2026.9.0 ne lit que platformio_options pour l'écarter de lv_conf.h
+  # (esphome: build_flags seulement depuis 2026.9.1, #19743). Clé dépréciée, retirée en
+  # 2026.12.0 : avant, plancher à 2026.9.1 et ligne déplacée dans build_flags ci-dessous
+  # (un #error de tab5_cameras.cpp arrête le build si elle se perd).
+  platformio_options:
+    build_flags:
+      # Images RGB565 réduites ou recolorées (17/10/2026, discussion #278) : caméras
+      # (cadre et vignettes plus petits que l'image de HA, vignette appuyée), pochettes
+      # du lecteur en COVER. lv_draw_sw_transform les convertit en RGB565A8 ; ESPHome
+      # ne l'active que pour une `image:` RGB565 transparente, et sans lui LVGL écrit
+      # « Color format 0x12 is not enabled » et dessine un tampon non initialisé.
+      - -DLV_DRAW_SW_SUPPORT_RGB565A8=1
+  # Réglages LVGL : ESPHome compile LVGL avec -DLV_KCONFIG_IGNORE, donc un
+  # CONFIG_LV_* du sdkconfig n'a aucun effet ; une macro absente de ses LV_DEFINES
+  # passe par ici.
+  build_flags:
+    # Boutons instantanés (demande d'Axel, 26/09/2026 ; réellement appliqué le
+    # 28/09/2026) : le thème LVGL par défaut animait chaque appui en 80 ms, et chaque
+    # relâchement en 80 ms APRÈS 70 ms de délai, ce qui se voyait pendant l'ouverture
+    # d'un popup (lv_theme_default.c, trans_delayed / trans_normal). À 0, LVGL ne crée
+    # plus ces transitions : boutons, curseurs, interrupteurs et barres de défilement
+    # basculent d'une image à l'autre. Les animations propres au projet
+    # (tab5_anim.cpp : swipe, rouleaux, alertes) ne dépendent pas de ce réglage.
+    - -DLV_THEME_DEFAULT_TRANSITION_TIME=0
+    # Taille de l'écran et rotation de repos de LVGL, celles de la carte (ADR-0061,
+    # Tab5/paquets/geometrie-<carte>.yaml) : kEcranL, kEcranH et kRotationRepos de
+    # Tab5/socle/tab5_geometrie.h. Sans ces drapeaux (tests sur PC), les valeurs du Tab5.
+    # TAB5_POLICE_PCT : l'échelle des grosses polices en pour cent (police_pct,
+    # tab5-ui-tokens.yaml), celle de la géométrie de l'horloge (lot 3 du portage).
+    - -DTAB5_ECRAN_L=${carte_ecran_l}
+    - -DTAB5_ECRAN_H=${carte_ecran_h}
+    - -DTAB5_ROTATION=${carte_rotation}
+    - -DTAB5_POLICE_PCT=${police_pct}
+    # Extinction de la dalle avec le rétroéclairage (Tab5/ecran/tab5_dalle.cpp, audit
+    # anti-casse du 16/10/2026) : commandes DCS que tient la dalle (0 voile seul, 1 + display
+    # off, 2 + sleep in) et dalle noire pendant une OTA, selon la carte ou la révision de dalle
+    # (substitutions carte_dalle_* de carte-waveshare-7b.yaml et des Tab5/paquets/ecran-*.yaml).
+    - -DTAB5_DALLE_EXTINCTION=${carte_dalle_extinction}
+    - -DTAB5_DALLE_NOIRE_OTA=${carte_dalle_noire_ota}
+  includes:
+    # Jetons sans dépendance (UIColor/UIAnim/UIIdle), inclus par tab5_custom.h et par
+    # les deux jeux qui en ont besoin (25/09/2026, audit lot 8a).
+    - Tab5/socle/tab5_tokens.h
+    # Catalogue des thèmes (THEMES[]), écrit par tools/gen_themes.py : inclus par
+    # tab5_theme.cpp et tab5_reglages.cpp seulement (audit du 07/10/2026, DO-3).
+    - Tab5/socle/tab5_themes_data.h
+    # Palette des icônes des tuiles de pièce (ADR-0023), écrite par tools/gen_tuiles_icones.py.
+    - Tab5/socle/tab5_tuiles_icones.h
+    # Langue de l'écran (lot 4, 27/09/2026) : tr() pur, compilé aussi sur PC par les
+    # tests du réveil, et ses tables générées par tools/gen_i18n.py depuis
+    # Tab5/lang/*.yaml. Avant tab5_core, qui s'en sert pour les dates.
+    - Tab5/socle/tab5_i18n_data.h
+    - Tab5/socle/tab5_i18n.h
+    - Tab5/socle/tab5_i18n.cpp
+    # Logique pure (dates, données calendrier) : compilée aussi sur PC par les tests
+    # du réveil (tools/test_alarm_clock.cpp, lot 8b).
+    - Tab5/socle/tab5_core.h
+    - Tab5/socle/tab5_core.cpp
+    # Lecture bornée des payloads de HA (champs, nombres) : pure, testée sur PC par
+    # tools/test_tab5_socle.cpp (audit du 07/10/2026, lot L5).
+    - Tab5/socle/tab5_champs.h
+    - Tab5/socle/tab5_champs.cpp
+    # Lecture des payloads de HA par service (prévisions, vigilance, alertes, pluie…) :
+    # pure, testée sur PC par tools/test_parse.cpp et fuzzée (lot F de l'audit du 30/09/2026).
+    - Tab5/socle/tab5_parse.h
+    - Tab5/socle/tab5_parse.cpp
+    # Géométrie partagée des popups construits en C++ (écran, carte modale, pièces) :
+    # en-tête seul, inclus par les .cpp qui s'en servent (lot L5).
+    - Tab5/socle/tab5_geometrie.h
+    # Découpe d'une zone autour d'une carte opaque (popup_voile_carte, tab5_anim.cpp,
+    # 17/10/2026) : en-tête seul et pur.
+    - Tab5/socle/tab5_decoupe.h
+    # Disposition des éléments d'une pièce sur les cinq places, tuiles coupées en deux ou en
+    # quatre (ADR-0066, 18/10/2026) : en-tête seul et pur.
+    - Tab5/socle/tab5_disposition.h
+    # Ce que les tuiles de pièce et la tuile - / + ont en commun (tailles, état hors
+    # ligne, code d'icône) : en-tête seul et pur (lot L5).
+    - Tab5/socle/tab5_modele_ha.h
+    - Tab5/ecran/tab5_custom.h
+    # Un en-tête par module (08/10/2026), inclus par tab5_custom.h dans l'ordre de leurs
+    # dépendances : listés ici parce qu'ESPHome ne copie dans son build que ces fichiers.
+    - Tab5/ecran/tab5_forecast.h
+    - Tab5/ecran/tab5_services.h
+    - Tab5/ecran/tab5_anim.h
+    - Tab5/ecran/tab5_text.h
+    - Tab5/ecran/tab5_central.h
+    - Tab5/ecran/tab5_cards.h
+    - Tab5/ecran/tab5_console.h
+    - Tab5/ecran/tab5_clim.h
+    - Tab5/ecran/tab5_assist.h
+    - Tab5/ecran/tab5_calendar.h
+    - Tab5/ecran/tab5_journal.h
+    - Tab5/ecran/tab5_zones.h
+    - Tab5/ecran/tab5_tuiles.h
+    - Tab5/ecran/tab5_rangee.h
+    - Tab5/ecran/tab5_reglables.h
+    - Tab5/ecran/tab5_roue.h
+    - Tab5/ecran/tab5_energie.h
+    - Tab5/ecran/tab5_reglages.h
+    - Tab5/ecran/tab5_historique.h
+    - Tab5/ecran/tab5_alertes.h
+    - Tab5/ecran/tab5_maison.h
+    - Tab5/ecran/tab5_piece_climat.h
+    - Tab5/ecran/tab5_meteo.h
+    - Tab5/ecran/tab5_zone_gauche.h
+    - Tab5/ecran/tab5_lecteur.h
+    - Tab5/ecran/tab5_musique.h
+    - Tab5/ecran/tab5_cameras.h
+    - Tab5/ecran/tab5_suivi.h
+    - Tab5/ecran/tab5_cameras_charge.h
+    - Tab5/ecran/tab5_froid.h
+    - Tab5/ecran/tab5_serveur_ia.h
+    - Tab5/ecran/tab5_telecommande.h
+    - Tab5/ecran/tab5_theme.h
+    - Tab5/ecran/tab5_barre_demarrage.h
+    - Tab5/ecran/tab5_custom.cpp
+    # Couche C++ scindée en unités (lot (e), 08/09/2026) : tab5_custom.h reste l'unique
+    # en-tête public, tab5_internal.h déclare les helpers partagés entre unités.
+    - Tab5/ecran/tab5_internal.h
+    - Tab5/ecran/tab5_text.cpp
+    - Tab5/ecran/tab5_forecast.cpp
+    - Tab5/ecran/tab5_central.cpp
+    - Tab5/ecran/tab5_services.cpp
+    - Tab5/ecran/tab5_assist.cpp
+    - Tab5/ecran/tab5_cards.cpp
+    # Clim (ADR-0026, ADR-0027) : sortie de tab5_cards.cpp le 08/10/2026 (lot L7).
+    - Tab5/ecran/tab5_clim.cpp
+    - Tab5/ecran/tab5_console.cpp
+    - Tab5/ecran/tab5_anim.cpp
+    - Tab5/ecran/tab5_calendar.cpp
+    # Journal des démarrages et des coupures (plantages, lien Wi-Fi / C6), 26/09/2026.
+    - Tab5/ecran/tab5_journal.cpp
+    # Zones optionnelles : ce qui disparaît quand l'entité manque dans HA (lot 5, 27/09/2026).
+    - Tab5/ecran/tab5_zones.cpp
+    # Pièces et tuiles génériques décrites par HA (ADR-0023, 28/09/2026) ; leurs popups et
+    # leur roue d'actions rapides, l'en-tête que les trois partagent (lot L7, 08/10/2026).
+    - Tab5/ecran/tab5_tuiles_priv.h
+    - Tab5/ecran/tab5_tuiles.cpp
+    - Tab5/ecran/tab5_tuiles_popups.cpp
+    - Tab5/ecran/tab5_tuiles_roue.cpp
+    # Cases des tuiles coupées en deux ou en quatre du mode HA (ADR-0066, 18/10/2026).
+    - Tab5/ecran/tab5_tuiles_cases.cpp
+    # Rangée sous l'horloge : plantes et lignes de capteurs qui se relaient (ADR-0031, 06/10/2026).
+    - Tab5/ecran/tab5_rangee.cpp
+    # Tuile − / + au choix : clim, appareils du blueprint, volume de la tablette (ADR-0033, 06/10/2026).
+    - Tab5/ecran/tab5_reglables.cpp
+    # Roue d'actions rapides à l'appui long d'une tuile lum, vol, cli (ADR-0036, 07/10/2026).
+    - Tab5/ecran/tab5_roue.cpp
+    # Roue de navigation à l'appui long de la carte centrale (ADR-0042, 09/10/2026).
+    - Tab5/ecran/tab5_roue_navigation.cpp
+    # Popup Énergie : instantané solaire et historique de production (ADR-0028, 04/10/2026).
+    - Tab5/ecran/tab5_energie.cpp
+    # Popup Température : historique des deux températures et prévision (ADR-0032, 06/10/2026).
+    - Tab5/ecran/tab5_historique.cpp
+    # Thèmes de l'écran : palette active et repeinture des modules (ADR-0029, lot 2).
+    - Tab5/ecran/tab5_theme.cpp
+    # Popup à pages (Réglages, Réveil) : noms en haut, geste, choix en accent (09/10/2026).
+    - Tab5/ecran/tab5_pages.cpp
+    # Popup Réglages de la tablette : peinture des choix (06/10/2026).
+    - Tab5/ecran/tab5_reglages.cpp
+    # Mode économie d'énergie (06/10/2026) : règles pures (compilées aussi sur PC par
+    # tools/test_alarm_clock.cpp) et état de la tablette.
+    - Tab5/socle/tab5_economie.h
+    - Tab5/socle/tab5_economie.cpp
+    # Batterie et chargeur (08/10/2026) : présence lue chargeur coupé, limite de charge,
+    # consommation, alerte de batterie faible. Règles pures (testées sur PC), état ici.
+    - Tab5/socle/tab5_batterie.h
+    - Tab5/ecran/tab5_batterie.cpp
+    # Chronologie du démarrage (10/10/2026) : étapes datées, publiées vers HA par
+    # « Tab5 Chronologie du démarrage » et « … (suite) ». En-tête pur (testé sur PC) ;
+    # l'horloge d'ESP-IDF et l'étape « ctor » dans le .cpp.
+    - Tab5/socle/tab5_demarrage.h
+    - Tab5/ecran/tab5_demarrage.cpp
+    # Barre de chargement du démarrage (16/10/2026) : dessinée sur la dalle de la fin de
+    # l'initialisation de l'écran à la première image de LVGL (on_boot). Dessin pur (testé
+    # sur PC) ; la dalle et la tâche dans le .cpp.
+    - Tab5/socle/tab5_barre.h
+    - Tab5/ecran/tab5_barre_demarrage.cpp
+    # Popup Alertes : historique des alertes (lot 4 du plan des alertes, 06/10/2026).
+    - Tab5/ecran/tab5_alertes.cpp
+    # Popup Maison : toute la maison, pièce par pièce (ADR-0037, 07/10/2026).
+    - Tab5/ecran/tab5_maison.cpp
+    # Climat de la pièce en mode HA : sa température, son humidité et sa clim sur la
+    # carte clim de l'accueil (ADR-0040, 09/10/2026).
+    - Tab5/ecran/tab5_piece_climat.cpp
+    # Popups à pages : glisser de page en page et noms des pages en haut (ADR-0046, 09/10/2026).
+    - Tab5/ecran/tab5_pages.cpp
+    # Popup Météo : la météo en graphiques, heures, dix jours et détails (ADR-0043, 09/10/2026).
+    - Tab5/ecran/tab5_meteo.cpp
+    # Zone à gauche de l'horloge au choix : le vocal ou les prévisions des heures qui
+    # viennent en graphique (ADR-0051, 10/10/2026).
+    - Tab5/ecran/tab5_zone_gauche.cpp
+    # Lecteur de musique : popup « Musique » et mini-barre de l'accueil (ADR-0050, 10/10/2026).
+    - Tab5/ecran/tab5_lecteur.cpp
+    # Musique de toute la maison : pages Pièces et Bibliothèque du popup Musique, par Music
+    # Assistant (ADR-0067, 18/10/2026).
+    - Tab5/ecran/tab5_musique.cpp
+    # Popup Caméras : l'image fixe des caméras de HA, une page par caméra (ADR-0049).
+    - Tab5/ecran/tab5_cameras.cpp
+    # Capteurs suivis : popup « Suivi » et carte de la zone à gauche de l'horloge (ADR-0054).
+    - Tab5/ecran/tab5_suivi.cpp
+    - Tab5/ecran/tab5_cameras_charge.cpp
+    # Froid : réfrigérateurs et congélateurs, popup et icône de l'horloge (ADR-0055).
+    - Tab5/ecran/tab5_froid.cpp
+    # Serveur IA : tableau de bord d'un serveur de LLM local (ADR-0059).
+    - Tab5/ecran/tab5_serveur_ia.cpp
+    # Télécommandes : une page par télécommande du blueprint (ADR-0056).
+    - Tab5/ecran/tab5_telecommande.cpp
+    # Registre unique des consoles (GameRegistry) et des fenêtres modales
+    # (ModalRegistry) — ADR-0013. Sa table des consoles vient du module des jeux
+    # (tab5-arcade.yaml, ADR-0065), vide sans lui (tab5-arcade-absente.yaml).
+    - Tab5/ecran/tab5_registry.h
+    - Tab5/ecran/tab5_registry.cpp
+    # Réveil matin + annonce des rendez-vous — moteur PUR (dates, calendrier,
+    # machine d'état), aucune dépendance HA, réseau, ESPHome ni LVGL : il lit
+    # `cal_jours_data[]` de tab5_core.h et se teste sur PC. Son rendu LVGL est à
+    # part (alarm_render.*, lot 8b). Garder cet ordre d'inclusion.
+    - Tab5/socle/alarm_clock.h
+    - Tab5/socle/alarm_clock.cpp
+    - Tab5/ecran/alarm_render.h
+    - Tab5/ecran/alarm_render.cpp
+
+  # Chronologie du démarrage (10/10/2026, accord d'Axel : des marques seulement,
+  # Tab5/socle/tab5_demarrage.h) : chaque `demarrage_marquer(...)` de cette séquence lit
+  # une horloge et l'écrit en mémoire, rien d'autre (publication après setup() seulement).
+  # Les entrées « marque seule » sont À LA FIN de la liste, pour ne rien déplacer ici.
+  on_boot:
+    - priority: 700
+      then:
+        - lambda: 'demarrage_marquer(EtapeDemarrage::AVANT1S);'
+        # [AI-WARNING-CRITICAL] INTERDICTION FORMELLE DE SUPPRIMER CE DELAI (Tab5 : 1000 ms, ADR-0005)
+        # [06/07/2026] FIX CONFIRME du bug "ecran noir apres reboot logiciel" : le GPIO expander I2C
+        # du Tab5 (PI4IOE5V6408) a besoin d'1 s avant l'init de l'écran DSI ; durée par carte, 0 sur la 7B
+        # (carte-*.yaml). CE DOIT RESTER UN LAMBDA C++ BLOQUANT, PAS UN `delay:` ESPHome.
+        - lambda: |-
+            delay(${carte_attente_ecran_ms});
+        - lambda: 'demarrage_marquer(EtapeDemarrage::APRES1S);'
+    - priority: 600
+      then:
+        - lambda: 'demarrage_marquer(EtapeDemarrage::P600);'
+        # lvgl.resume explicite (05/07/2026) : ajoute comme premiere piste pour
+        # le bug "ecran noir apres reboot logiciel" (le light backlight a
+        # restore_mode: RESTORE_DEFAULT_ON, qui ne declenche pas on_turn_on/
+        # lvgl.resume au boot car pas de vraie transition d'etat). TESTE SEUL
+        # -> N'A PAS SUFFI (ecran reste noir). La vraie cause/fix (confirme le
+        # 06/07/2026) est le delai bloquant a priority:700 ci-dessus — voir le
+        # gros commentaire dans logger: de tab5-hardware.yaml pour le detail.
+        # Cette ligne lvgl.resume est gardee car harmless, mais ne sert a rien
+        # a elle seule.
+        - lvgl.resume:
+        - light.turn_on: backlight
+        - delay: 1s
+        - media_player.volume_set:
+            id: speaker_player
+            volume: 1.0
+        # Allumer l'ampli APRES le media_player pour eviter le bruit I2S
+        - switch.turn_on: speaker_enable
+        # L'événement qui déclenche la poussée complète de HA, envoyé à HA lui-même dès
+        # qu'il écoute les actions : ha_evenement_envoyer() (tab5_journal.cpp) ne l'envoie
+        # qu'à un client « Home Assistant » abonné aux actions, et rend faux sans rien
+        # envoyer tant qu'il n'y en a pas ; wait_until la rappelle à chaque passage de
+        # boucle, l'événement part donc une fois. Avant (17/10/2026) : garde
+        # `api.connected: state_subscription_only`, vraie dès qu'UN client est abonné aux
+        # états — un outil aioesphomeapi passé avant HA la levait et l'événement était
+        # jeté, aux 10 redémarrages de la nuit du 16/10/2026 (écran sans météo ni agenda
+        # jusqu'aux poussées périodiques). Plus tôt, `api.connected` nu : perdu 2 boots sur
+        # 3 le 25/09/2026. on_client_connected (tab5-api-logic.yaml) ne tire pas au boot
+        # (boot_complete encore faux). Un événement perdu se verrait au journal :
+        # « HA injoignable au boot (timeout 30s) ».
+        - wait_until:
+            condition:
+              lambda: |-
+                if (!id(boot_evt_connecte)) id(boot_evt_connecte) = ha_evenement_envoyer("esphome.tab5_connected");
+                return id(boot_evt_connecte);
+            timeout: 30s
+        - if:
+            condition:
+              lambda: 'return !id(boot_evt_connecte);'
+            then:
+              - logger.log: "HA injoignable au boot (timeout 30s) - interface locale disponible quand meme"
+        - globals.set:
+            id: boot_complete
+            value: 'true'
+        - if:
+            condition:
+              - switch.is_on: tab5_wake_word_active
+            then:
+              - micro_wake_word.start:
+            else:
+              - micro_wake_word.stop:
+        # Synchronisation visuelle de l'icône + bordure des boutons du mode d'assistant vocal (Domotique vs Discussion)
+        - script.execute:
+            id: tab5_set_assist_mode
+            discussion: !lambda 'return id(conversation_mode);'
+        # Initialisation des pointeurs LVGL du contexte carte centrale (fixes apres boot).
+        - lambda: |-
+            g_central_ctx.planning_wrap = id(planning_wrapper);
+            g_central_ctx.rain_wrap = id(rain_wrapper);
+            g_central_ctx.alert_cont = id(alert_container);
+            g_central_ctx.info_wrap = id(info_wrapper);
+            g_central_ctx.ha_wrap[0] = id(ha_alert_wrapper_0);
+            g_central_ctx.ha_wrap[1] = id(ha_alert_wrapper_1);
+            g_central_ctx.ha_wrap[2] = id(ha_alert_wrapper_2);
+            g_central_ctx.ha_wrap[3] = id(ha_alert_wrapper_3);
+            // Slots meteo jour (D2 : plus de duplication dans chaque lambda).
+            g_day_slots[0] = {id(j0_day), id(j0_max), id(j0_min), id(j0_icon_layer1), id(j0_icon_layer2), id(btn_j0_action), id(icon_card_pc), nullptr, nullptr};
+            g_day_slots[1] = {id(j1_day), id(j1_max), id(j1_min), id(j1_icon_layer1), id(j1_icon_layer2), id(btn_j1_action), id(icon_card_shutter1), id(icon_card_shutter_arrow), id(btn_j1_dir)};
+            g_day_slots[2] = {id(j2_day), id(j2_max), id(j2_min), id(j2_icon_layer1), id(j2_icon_layer2), id(btn_j2_action), id(icon_card_lit_j2), id(icon_card_light_j2), nullptr};
+            g_day_slots[3] = {id(j3_day), id(j3_max), id(j3_min), id(j3_icon_layer1), id(j3_icon_layer2), id(btn_j3_action), id(icon_card_salon_j3), id(icon_card_light_j3), nullptr};
+            g_day_slots[4] = {id(j4_day), id(j4_max), id(j4_min), id(j4_icon_layer1), id(j4_icon_layer2), id(btn_j4_action), id(icon_card_led_j4), id(icon_card_light_j4), nullptr};
+            // Slots meteo heure.
+            g_hour_slots[0] = {id(h4_time), id(h4_temp), id(h4_prob), id(h4_icon_layer1), id(h4_icon_layer2)};
+            g_hour_slots[1] = {id(h3_time), id(h3_temp), id(h3_prob), id(h3_icon_layer1), id(h3_icon_layer2)};
+            g_hour_slots[2] = {id(h2_time), id(h2_temp), id(h2_prob), id(h2_icon_layer1), id(h2_icon_layer2)};
+            g_hour_slots[3] = {id(h1_time), id(h1_temp), id(h1_prob), id(h1_icon_layer1), id(h1_icon_layer2)};
+            g_hour_slots[4] = {id(h0_time), id(h0_temp), id(h0_prob), id(h0_icon_layer1), id(h0_icon_layer2)};
+        # Réveil : restaurer le plancher anti-re-sonnerie AVANT le premier calcul,
+        # sinon un redémarrage juste après un arrêt referait sonner l'alarme dans
+        # la fenêtre de grâce (ALARM_GRACE_S). tab5_alarm_refresh remplit ensuite
+        # `g_alarm_cfg` depuis les entités déjà restaurées et repeint la pastille.
+        - lambda: 'alarm_set_skip_floor(id(alarm_skip_before));'
+        - script.execute: tab5_alarm_refresh
+        - script.execute: tab5_central_rotator_auto
+        # Pré-fetch calendrier : charge le mois courant + M+1 en arrière-plan pour
+        # que le popup calendrier s'ouvre instantanément (stale-while-revalidate).
+        - delay: 3s
+        - script.execute: tab5_cal_prefetch_boot
+        # Après setup() : la marque publie (une fois).
+        - lambda: 'if (demarrage_marquer(EtapeDemarrage::FIN600)) id(tab5_chronologie_publier).execute();'
+    # Micro-interactions des boutons verre (transform_scale au pressed : ESPHome n'a
+    # pas de state_pressed dans style_definitions -> helper C++) et pose des pointeurs
+    # du rouleau d'horloge. 2 s après la fin du setup : LVGL a fait son premier
+    # layout, apply_pressed_scale_to_tree() lit la taille de chaque bouton (pivot).
+    # La géométrie de l'horloge, elle, est entièrement dans tab5-lvgl.yaml depuis le
+    # 01/10/2026 (plus de layout_clock_roller : ses cadres provisoires coupaient le
+    # bas des chiffres jusqu'ici) — l'heure est juste dès la première image.
+    # Était un `interval: 2s` à flag `static` dans tab5-styles.yaml (logique d'init
+    # dans le fichier de styles, audit du 06/09/2026 §4.1 point 8) : on_boot ne
+    # s'exécute qu'une fois, plus besoin de flag. Priorité -100 = après tous les
+    # setup(), juste avant la boucle ; le delay compte à partir de là.
+    - priority: -100
+      then:
+        - lambda: 'demarrage_marquer(EtapeDemarrage::FIN);'
+        # Barre de chargement : fermée avant la première image (la dalle revient à LVGL seul).
+        - lambda: 'barre_demarrage_fermer();'
+        # Langue de l'écran (lot 4, 27/09/2026 — ajout autorisé par Axel) : traduit
+        # les textes posés par le YAML, en fin de setup, AVANT la première image.
+        # Sans effet en français. La langue est déjà réglée : le select « Langue »
+        # (restore_value) a publié sa valeur pendant son propre setup.
+        - lambda: 'i18n_apply_boot({id(page_main)->obj});'
+        # Les pages du module des jeux (ADR-0065) : traduites par lui, rien sans lui.
+        - script.execute: tab5_jeux_traduire
+        - lambda: 'demarrage_marquer(EtapeDemarrage::I18N);'
+        # Zones optionnelles (lot 5, 27/09/2026 — ajout autorisé par Axel) : masque les
+        # zones absentes mémorisées, AVANT la première image (pas de clignotement).
+        - script.execute: tab5_zones_apply
+        - lambda: 'demarrage_marquer(EtapeDemarrage::ZONES);'
+        - delay: 2s
+        - lambda: |-
+            apply_pressed_scale_to_tree(lv_screen_active());
+            g_clock_roller.d[0] = {id(clock_roll_h10), {id(lbl_time_h10_a), id(lbl_time_h10_b)}, 0, 0};
+            g_clock_roller.d[1] = {id(clock_roll_h1),  {id(lbl_time_h1_a),  id(lbl_time_h1_b)},  0, 0};
+            g_clock_roller.d[2] = {id(clock_roll_m10), {id(lbl_time_m10_a), id(lbl_time_m10_b)}, 0, 0};
+            g_clock_roller.d[3] = {id(clock_roll_m1),  {id(lbl_time_m1_a),  id(lbl_time_m1_b)},  0, 0};
+            // Repeint l'heure tout de suite : sans ca l'horloge garderait le
+            // placeholder YAML jusqu'au prochain tick minute (on_time_sync a
+            // pu passer avant que les pointeurs du rouleau soient poses).
+            auto t_now = id(sntp_time).now();
+            if (t_now.is_valid()) {
+                update_clock_date_ui(id(lbl_date), t_now.hour, t_now.minute,
+                    t_now.day_of_week, t_now.day_of_month, t_now.month);
+            }
+        # Après setup() : la marque publie (une fois).
+        - lambda: 'if (demarrage_marquer(EtapeDemarrage::TARD)) id(tab5_chronologie_publier).execute();'
+    # ── Entrées « marque seule » de la chronologie (10/10/2026) ──
+    # ESPHome lance chaque entrée on_boot dans le setup() d'un composant de SA priorité ;
+    # les composants passent par priorité décroissante (ordre d'enregistrement à égalité).
+    # Ces entrées, à des priorités qu'aucune autre n'a, bornent donc les bandes de
+    # priorité : la différence entre deux marques est la durée des setup() d'entre elles.
+    # Contenu de chaque bande : docs/performance.md, « Chronologie du démarrage ».
+    - priority: 2000  # la plus haute : premier setup(), fin de la construction de main()
+      then:
+        - lambda: |-
+            demarrage_marquer(EtapeDemarrage::SETUP);
+            demarrage_noter_ordo(millis());
+    - priority: 801  # après le bus I²C, le LDO (1000) et les deux expandeurs (900)
+      then:
+        - lambda: 'demarrage_marquer(EtapeDemarrage::BUS);'
+    # Barre de chargement (16/10/2026, accord d'Axel : « je t'autorise a toucher on_boot pour
+    # ca ») : LVGL ne dessine qu'après setup(), la dalle est prête dès la bande 600. La barre
+    # (Tab5/ecran/tab5_barre_demarrage.cpp) s'ouvre à 500, avance à 399 et 249, se ferme au
+    # début de -100. Ajoutée APRÈS chaque marque : la chronologie reste comparable.
+    - priority: 500  # après la bande 600 : écran, tactile, codecs audio, capteurs
+      then:
+        - lambda: 'demarrage_marquer(EtapeDemarrage::DONNEES);'
+        - lambda: |-
+            if (barre_demarrage_ouvrir(id(tab5_display))) {
+              // Rétroéclairage tout de suite, à la valeur que la lumière écrira à sa
+              // première boucle (même calcul que `monochromatic` : courbe gamma, puis le
+              // plafond du mode économie dans backlight_plafonne) : pas de saut à l'image.
+              float b = 0.0f;
+              id(backlight).remote_values.as_brightness(&b);
+              if (b > 0.0f) id(backlight_plafonne).set_level(id(backlight).gamma_correct_lut(b));
+            }
+    - priority: 399  # après la bande 400 : haut-parleur, setup() de LVGL, lecteur
+      then:
+        - lambda: 'demarrage_marquer(EtapeDemarrage::LVGL);'
+        - lambda: 'barre_demarrage_etape(1);'
+    - priority: 249  # après les lambdas LVGL (395 et 380), le réseau (300), le Wi-Fi (250)
+      then:
+        - lambda: 'demarrage_marquer(EtapeDemarrage::WIFIINIT);'
+        - lambda: 'barre_demarrage_etape(2);'
+    - priority: 199  # après SNTP (220), l'API, l'OTA et le mode sans échec (200)
+      then:
+        - lambda: 'demarrage_marquer(EtapeDemarrage::RESEAU);'
+    - priority: 99  # après micro_wake_word et l'assistant vocal (100)
+      then:
+        - lambda: 'demarrage_marquer(EtapeDemarrage::ECOUTE);'
+
+# Plus de battement `interval: 5min` qui réémettait esphome.tab5_connected (retiré le
+# 25/09/2026, audit lot 3) : il relançait la chaîne complète côté HA sans raison, ou
+# finissait en « Already running » (×1 627 en 6 jours). L'événement part désormais au
+# boot (on_boot ci-dessus) et à chaque RECONNEXION de Home Assistant (api:
+# on_client_connected, tab5-api-logic.yaml) — les deux seuls cas où l'écran a besoin
+# d'un push complet ; le cycle /10 min côté HA couvre le reste.
+
+# Plus d'images! image: !include supprimé au profit des polices C++ vectorielles LVGL
+
+packages:
+  tab5_ui_tokens: !include Tab5/paquets/tab5-ui-tokens.yaml
+  # Carte (ADR-0061) : `tab5_carte:` dans Tab5/user_entities.yaml (ou `-s tab5_carte …`)
+  # = tab5 (défaut : M5Stack Tab5, son matériel tab5-hardware.yaml et la révision de sa
+  # dalle, `tab5_ecran:`, voir carte-tab5.yaml) ou waveshare-7b (Waveshare
+  # ESP32-P4-WIFI6-Touch-LCD-7B, 1024×600, prise en charge : l'écran de l'auteur depuis
+  # le 14/10/2026, sans les jeux par défaut). Chaque carte porte la taille de son écran
+  # (geometrie-<carte>.yaml). Même place dans la liste que les deux packages qu'elle
+  # regroupe : l'ordre de la configuration du Tab5 ne change pas.
+  tab5_carte: !include Tab5/paquets/carte-${ tab5_carte | default('tab5') | lower }.yaml
+  # Publication (lot 6c, ADR-0022) : `locale` (défaut, compilation sur son PC) n'ajoute
+  # rien ; `stable` / `beta`, donnés par la CI de publication (`-s tab5_publication …`),
+  # ajoutent l'entité de mise à jour qui lit le manifeste de la page de flashage.
+  tab5_publication: !include Tab5/paquets/publication-${ tab5_publication | default('locale') }.yaml
+  tab5_sensors_diagnostics: !include Tab5/paquets/tab5-sensors-diagnostics.yaml
+  tab5_sensors_domotique: !include Tab5/paquets/tab5-sensors-domotique.yaml
+  tab5_api_logic: !include Tab5/paquets/tab5-api-logic.yaml
+  tab5_styles: !include Tab5/paquets/tab5-styles.yaml
+  tab5_globals: !include Tab5/paquets/tab5-globals.yaml
+  tab5_scripts: !include Tab5/paquets/tab5-scripts.yaml
+  tab5_lvgl: !include Tab5/paquets/tab5-lvgl.yaml
+  # Un package par fonctionnalité (audit du 25/09/2026, lot 8c), APRÈS tab5_lvgl
+  # comme tab5_alarm : leurs scripts référencent des pages et des widgets LVGL.
+  # Jeux : un module (ADR-0065). `tab5_jeux:` dans Tab5/user_entities.yaml (ou
+  # `-s tab5_jeux …`) = oui ou non ; par défaut oui sur le Tab5, non sur une carte sans
+  # IMU (Waveshare 7B : la moitié des consoles se jouent en inclinant). Non =
+  # tab5-arcade-absente.yaml : ni code, ni pages, ni couleurs des jeux, l'Arcade n'est
+  # plus un écran. APRÈS tab5_lvgl : ses pages suivent page_main (l'index 0).
+  tab5_arcade: !include Tab5/paquets/tab5-arcade${ '' if (tab5_jeux | default('oui' if (tab5_carte | default('tab5') | lower) == 'tab5' else 'non') | lower) == 'oui' else '-absente' }.yaml
+  tab5_calendar: !include Tab5/paquets/tab5-calendar.yaml
+  tab5_assist: !include Tab5/paquets/tab5-assist.yaml
+  # IMU (BMI270) : le Tab5 seulement (tab5-imu.yaml). Une carte sans IMU prend
+  # tab5-imu-absente.yaml (« Tab5 Tap-to-Wake » sans capteur, que lit le popup Réglages) ;
+  # ses consoles n'ont ni inclinaison ni secousse (ADR-0061).
+  tab5_imu: !include Tab5/paquets/tab5-imu${ '' if (tab5_carte | default('tab5') | lower) == 'tab5' else '-absente' }.yaml
+  # Navigation (08/10/2026) : registre des fenetres, « Aller a l'ecran », « Ecran courant »,
+  # tab5_ecran_ouvrir. APRES tab5_lvgl : ses lambdas referencent des ids de widgets LVGL.
+  tab5_navigation: !include Tab5/paquets/tab5-navigation.yaml
+  # Entites exposees a HA pour regler l'ecran depuis un dashboard HA.
+  tab5_ha_controls: !include Tab5/paquets/tab5-ha-controls.yaml
+  # Reveil matin + annonce des rendez-vous. Comme ci-dessus : APRES tab5_lvgl
+  # (ses scripts referencent les ids de alarm_popup.yaml / alarm_ring_overlay.yaml).
+  tab5_alarm: !include Tab5/paquets/tab5-alarm.yaml
+  # Pièces et tuiles (ADR-0023) : APRES tab5_lvgl (widgets), script lancé par tab5_zones_apply.
+  tab5_tuiles: !include Tab5/paquets/tab5-tuiles.yaml
+  # Roue d'actions rapides (ADR-0036) : APRES tab5_lvgl (widgets), script lancé par tab5_tuiles_ui.
+  tab5_roue: !include Tab5/paquets/tab5-roue.yaml
+  # Rangée sous l'horloge (ADR-0031) : APRES tab5_lvgl (widgets), script lancé par tab5_zones_apply.
+  tab5_rangee: !include Tab5/paquets/tab5-rangee.yaml
+  # Tuile − / + (ADR-0033) : APRES tab5_lvgl (widgets), script lancé par tab5_zones_apply.
+  tab5_reglables: !include Tab5/paquets/tab5-reglables.yaml
+  # Popup Énergie (ADR-0028) : APRES tab5_lvgl (widgets), ouvert par une tuile ou par HA.
+  tab5_energie: !include Tab5/paquets/tab5-energie.yaml
+  # Popup Température (ADR-0032) : APRES tab5_lvgl (widgets), ouvert par un appui long.
+  tab5_historique: !include Tab5/paquets/tab5-historique.yaml
+  # Popup Alertes (lot 4 du plan des alertes) : APRES tab5_lvgl (widgets), ouvert par un
+  # appui long sur la carte centrale ou par HA.
+  tab5_alertes: !include Tab5/paquets/tab5-alertes.yaml
+  # Popup Maison (ADR-0037) : APRES tab5_lvgl (widgets), ouvert par HA ou par le titre de la pièce.
+  tab5_maison: !include Tab5/paquets/tab5-maison.yaml
+  # Popup Météo (ADR-0043) : APRES tab5_lvgl (widgets), ouvert par HA, un geste ou une tuile.
+  tab5_meteo: !include Tab5/paquets/tab5-meteo.yaml
+  # Lecteur de musique (ADR-0050) : APRES tab5_lvgl (widgets) et tab5_assist (client HTTP
+  # des images), ouvert par une tuile med, la mini-barre, un geste ou HA.
+  tab5_lecteur: !include Tab5/paquets/tab5-lecteur.yaml
+  # Musique de toute la maison (ADR-0067) : APRES tab5_lvgl (widgets) et tab5_assist (client
+  # HTTP des pochettes), poussée par HA, ouverte avec le popup Musique.
+  tab5_musique: !include Tab5/paquets/tab5-musique.yaml
+  # Popup Caméras (ADR-0049) : APRES tab5_lvgl (widgets), ouvert par HA ou par un geste.
+  tab5_cameras: !include Tab5/paquets/tab5-cameras.yaml
+  # Capteurs suivis (ADR-0054) : APRES tab5_lvgl (widgets), poussés par HA, ouverts par la
+  # carte de la zone à gauche de l'horloge, un geste ou HA.
+  tab5_suivi: !include Tab5/paquets/tab5-suivi.yaml
+  # Froid (ADR-0055) : APRES tab5_lvgl (widgets), poussé par HA, ouvert par l'icône de
+  # l'horloge, un geste, la roue de navigation ou HA.
+  tab5_froid: !include Tab5/paquets/tab5-froid.yaml
+  # Serveur IA (ADR-0059) : APRES tab5_lvgl (widgets), poussé par HA, ouvert par un geste,
+  # la roue de navigation ou HA.
+  tab5_serveur_ia: !include Tab5/paquets/tab5-serveur-ia.yaml
+  # Télécommandes (ADR-0056) : APRES tab5_lvgl (widgets), script lancé par tab5_tuiles_ui.
+  tab5_telecommande: !include Tab5/paquets/tab5-telecommande.yaml
+  # Zones optionnelles (lot 5) : APRES tab5_lvgl (widgets). Ses substitutions sont les
+  # valeurs par défaut des entity_… : une clé de Tab5/user_entities.yaml l'emporte.
+  tab5_zones: !include Tab5/paquets/tab5-zones.yaml
+  # Popup Réglages (06/10/2026) : APRES tab5_lvgl (widgets), ouvert par l'engrenage ou par HA.
+  tab5_reglages: !include Tab5/paquets/tab5-reglages.yaml
+  # Mode économie d'énergie (06/10/2026) : plafond du rétroéclairage, animations, cadence
+  # de LVGL. Ses entrées viennent du matériel (INA226, toucher), qui lance son script.
+  tab5_economie: !include Tab5/paquets/tab5-economie.yaml
+  # Thèmes (ADR-0029) : EN DERNIER, sa repeinture lit les widgets, les capteurs et les
+  # scripts des packages ci-dessus.
+  tab5_themes: !include Tab5/paquets/tab5-themes.yaml
+
+# Portail captif, conservé à dessein (audit du 06/09/2026, §4.1 point 16) : il
+# n'est actif que quand l'AP de secours l'est (`wifi: ap:` dans
+# Tab5/paquets/tab5-sensors-diagnostics.yaml), c'est-à-dire après l'échec de la connexion
+# Wi-Fi — la seule voie de récupération sans câble USB. Coût en fonctionnement
+# normal : le code du serveur web dans le binaire et ses objets en RAM.
+captive_portal:

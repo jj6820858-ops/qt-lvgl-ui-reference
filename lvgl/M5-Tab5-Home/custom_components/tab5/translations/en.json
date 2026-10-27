@@ -1,0 +1,297 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Tab5 — Home Assistant files",
+        "description": "This integration installs the Home Assistant files of the M5Stack Tab5 project (packages, templates, blueprint) and replaces them at each update made through HACS. The old files are kept in `tab5_sauvegardes/`. Your own packages, templates and blueprints are never touched.\n\nNeeded once in `configuration.yaml`, if it is not there yet:\n\n```yaml\nhomeassistant:\n  packages: !include_dir_named packages\n```",
+        "data": {
+          "mettre_a_jour_tablette": "Then update the tablet"
+        },
+        "data_description": {
+          "mettre_a_jour_tablette": "Once the files are in place, install the firmware of the same version as soon as the tablet's « Firmware » entity offers it."
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "The Tab5 integration is already added."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tab5 — Home Assistant files",
+        "data": {
+          "mettre_a_jour_tablette": "Then update the tablet",
+          "reinstaller": "Install the files of this version again now",
+          "assistant": "Start the setup assistant"
+        },
+        "data_description": {
+          "mettre_a_jour_tablette": "Once the files are in place, install the firmware of the same version as soon as the tablet's « Firmware » entity offers it.",
+          "reinstaller": "For a Tab5 file deleted or edited by mistake. The current ones are saved first.",
+          "assistant": "Prepares the screen slots automation from your Home Assistant rooms, then the home settings and the « Tab5 · … » lists. Nothing is written or set without your confirmation; an existing automation only changes if you ask."
+        }
+      },
+      "pieces": {
+        "title": "Assistant · rooms",
+        "description": "The assistant prepares the screen slots automation (blueprint « Tab5 — emplacements de l'écran · screen slots ») from your Home Assistant areas. {nombre} area(s) have devices the tablet can show; the best equipped are already picked, {max} at most. Nothing is written before the summary.",
+        "data": {
+          "pieces": "Rooms of the tablet"
+        },
+        "data_description": {
+          "pieces": "Ten at most, in the order of the bottom row's pages: the first on the home page, the next ones a swipe away."
+        }
+      },
+      "piece": {
+        "title": "Assistant · room {numero} of {total}: {zone}",
+        "description": "Filled in from the Home Assistant area « {zone} »: its lights, covers, switches, fans and media players ({max} at most), its temperature and humidity sensors and its climate. Change anything you like.",
+        "data": {
+          "nom": "Name shown",
+          "tuiles": "Tiles",
+          "temperature": "Room temperature",
+          "humidite": "Room humidity",
+          "clim": "Room climate"
+        },
+        "data_description": {
+          "nom": "Empty: the area its devices share.",
+          "tuiles": "Twenty at most, left to right. Beyond five, tiles are cut in two, then in four.",
+          "temperature": "Optional. Shown on the home page while this room is on screen.",
+          "humidite": "Optional, with the temperature.",
+          "clim": "Optional, with the temperature: the home page's − / + buttons adjust it."
+        }
+      },
+      "maison": {
+        "title": "Assistant · home",
+        "description": "What does not depend on a room. A field is only filled in when your Home Assistant has a single possible answer (one TV, one air conditioner, one weather…) or when the existing automation already has it; otherwise it stays empty and the tablet does without. Change anything you like.",
+        "data": {
+          "tv": "TV",
+          "tv_telecommande": "TV remote",
+          "telecommandes_autres": "Other remotes",
+          "telephone": "Phone battery",
+          "salon_temperature": "Room temperature (top of the home screen)",
+          "salon_humidite": "Room humidity",
+          "serre_temperature": "Second temperature (greenhouse, outdoors…)",
+          "serre_exterieure": "The second temperature is outdoors",
+          "clim": "Climate",
+          "pot_1": "Pot 1",
+          "pot_2": "Pot 2",
+          "pot_3": "Pot 3",
+          "pot_4": "Pot 4",
+          "pot_5": "Pot 5",
+          "meteo_previsions": "Forecast weather",
+          "tablette": "Tablet name in ESPHome"
+        },
+        "data_description": {
+          "tv": "The « TV » button of the screen.",
+          "tv_telecommande": "The remote keys on the screen.",
+          "telecommandes_autres": "Apple TV, Freebox Player…: three at most, one page each in the remote popup.",
+          "telephone": "An icon at the top left, coloured by the battery.",
+          "salon_temperature": "Suggested: the first room's.",
+          "serre_temperature": "Suggested: the only temperature whose name says « outdoor ».",
+          "clim": "The − / setpoint / + buttons of the home screen.",
+          "pot_1": "Soil moisture sensors: suggested when there are five or fewer.",
+          "meteo_previsions": "The days and hours pages.",
+          "tablette": "Read from the ESPHome integration; empty: « tab5_ha_hmi »."
+        }
+      },
+      "agendas": {
+        "title": "Assistant · calendars and people",
+        "description": "The « Tab5 · … » lists (Settings → Devices & services → Entities). A choice already made stays. A list still on « Not set » (none) gets a suggestion when a single entity fits (a calendar whose name says « work » or « appointment », the only presence or occupancy sensor, the preferred pipeline). Nothing is set before the summary; you can put anything back to « None ».",
+        "data": {
+          "agenda_travail": "Work calendar",
+          "agenda_rdv": "Appointments calendar",
+          "agenda_anniversaires": "Birthdays calendar",
+          "agenda_feries": "Public holidays calendar",
+          "agenda_vacances": "School holidays calendar",
+          "telephone_suivi": "Tracked phone",
+          "presence": "Presence sensor",
+          "pipeline": "Chat pipeline"
+        },
+        "data_description": {
+          "agenda_anniversaires": "Birthdays, holidays and phone: the list already guesses by itself when there is a single candidate.",
+          "telephone_suivi": "Turns the screen on when back, off when gone.",
+          "presence": "Turns the screen on on detection, off after 15 min without presence.",
+          "pipeline": "The « Chat » mode of the screen; « None » hides its buttons."
+        }
+      },
+      "recapitulatif": {
+        "title": "Assistant · summary",
+        "description": "{resume}\n\n{action}",
+        "data": {
+          "mettre_a_jour": "Replace the rooms and home inputs of the existing automation"
+        },
+        "data_description": {
+          "mettre_a_jour": "A home field left empty keeps its value; its other settings (energy, gestures…) stay as they are. The « Tab5 · … » lists are set with or without this box."
+        }
+      }
+    },
+    "abort": {
+      "aucune_piece": "No Home Assistant area has a device the tablet can show: the assistant has nothing to offer and changes nothing. Assign your devices to areas in Home Assistant, then start it again (Settings → Devices & services → Tab5 → Configure, box « Start the setup assistant »), or fill in the blueprint's automation by hand."
+    },
+    "error": {
+      "aucune_piece_choisie": "Pick at least one room.",
+      "trop_de_pieces": "Ten rooms at most.",
+      "trop_de_tuiles": "Twenty tiles at most."
+    }
+  },
+  "issues": {
+    "fichiers_absents": {
+      "title": "Tab5: no Home Assistant files in the integration",
+      "description": "The Tab5 integration {version} carries no files: it was copied from the repository instead of being installed from a release. Install it through HACS (custom repository), which downloads `tab5_hacs.zip` from the release."
+    },
+    "configuration_invalide": {
+      "title": "Tab5: the files {version} were not installed",
+      "description": "The new Tab5 files could not be put in place (the configuration check found an error with them, or writing them failed), so the previous files were put back and nothing changed. The reason is in the log (Settings → System → Logs, « tab5 »). After a configuration error, these files are not tried again at each restart: once the cause is fixed, use Settings → Devices & services → Tab5 → Configure, « Install the files of this version again now ». If the cause is not in your own files, please report it: {signaler}"
+    },
+    "packages_absents": {
+      "title": "Tab5: Home Assistant does not load the packages",
+      "description": "The Tab5 files are in `config/packages/`, but Home Assistant does not read that folder. Add these two lines to `configuration.yaml` (the `homeassistant:` line only once), check the configuration, then restart:\n\n```yaml\nhomeassistant:\n  packages: !include_dir_named packages\n```"
+    },
+    "redemarrage_requis": {
+      "title": "Tab5: restart Home Assistant to finish",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Restart Home Assistant",
+            "description": "The Tab5 files {version} are in place, but some of them only take effect after a restart. Submit to restart Home Assistant now."
+          }
+        },
+        "error": {
+          "configuration_invalide": "The configuration has an error: fix it first (Developer tools → YAML → Check configuration)."
+        }
+      }
+    },
+    "fichiers_remplaces": {
+      "title": "Tab5: files already there were replaced",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Tab5 files already there were replaced",
+            "description": "These Tab5 files were already in `config/` (copied by hand, most likely) and differed from those of the release: {fichiers}. They were replaced anyway, and the old ones are kept in {sauvegarde}. If you had changed one of them on purpose, copy your change back from there.\n\nSubmit to close this message."
+          }
+        }
+      }
+    },
+    "firmware_echec": {
+      "title": "Tab5: the tablet did not update to {version}",
+      "description": "The Tab5 files {version} are in place, but the tablet still runs another version after {essais} tries of its update. Install it by hand: Settings → Updates (or the tablet's « Firmware » entity) → Install, with the tablet on and connected. The reason of each try is in the log (Settings → System → Logs, « tab5 »). This message goes away once the tablet runs {version}."
+    },
+    "configurer_pieces": {
+      "title": "Tab5: set up the tablet from your rooms",
+      "fix_flow": {
+        "step": {
+          "pieces": {
+            "title": "Assistant · rooms",
+            "description": "The assistant prepares the screen slots automation (blueprint « Tab5 — emplacements de l'écran · screen slots ») from your Home Assistant areas. {nombre} area(s) have devices the tablet can show; the best equipped are already picked, {max} at most. Nothing is written before the summary.",
+            "data": {
+              "pieces": "Rooms of the tablet"
+            },
+            "data_description": {
+              "pieces": "Ten at most, in the order of the bottom row's pages: the first on the home page, the next ones a swipe away."
+            }
+          },
+          "piece": {
+            "title": "Assistant · room {numero} of {total}: {zone}",
+            "description": "Filled in from the Home Assistant area « {zone} »: its lights, covers, switches, fans and media players ({max} at most), its temperature and humidity sensors and its climate. Change anything you like.",
+            "data": {
+              "nom": "Name shown",
+              "tuiles": "Tiles",
+              "temperature": "Room temperature",
+              "humidite": "Room humidity",
+              "clim": "Room climate"
+            },
+            "data_description": {
+              "nom": "Empty: the area its devices share.",
+              "tuiles": "Twenty at most, left to right. Beyond five, tiles are cut in two, then in four.",
+              "temperature": "Optional. Shown on the home page while this room is on screen.",
+              "humidite": "Optional, with the temperature.",
+              "clim": "Optional, with the temperature: the home page's − / + buttons adjust it."
+            }
+          },
+          "maison": {
+            "title": "Assistant · home",
+            "description": "What does not depend on a room. A field is only filled in when your Home Assistant has a single possible answer (one TV, one air conditioner, one weather…) or when the existing automation already has it; otherwise it stays empty and the tablet does without. Change anything you like.",
+            "data": {
+              "tv": "TV",
+              "tv_telecommande": "TV remote",
+              "telecommandes_autres": "Other remotes",
+              "telephone": "Phone battery",
+              "salon_temperature": "Room temperature (top of the home screen)",
+              "salon_humidite": "Room humidity",
+              "serre_temperature": "Second temperature (greenhouse, outdoors…)",
+              "serre_exterieure": "The second temperature is outdoors",
+              "clim": "Climate",
+              "pot_1": "Pot 1",
+              "pot_2": "Pot 2",
+              "pot_3": "Pot 3",
+              "pot_4": "Pot 4",
+              "pot_5": "Pot 5",
+              "meteo_previsions": "Forecast weather",
+              "tablette": "Tablet name in ESPHome"
+            },
+            "data_description": {
+              "tv": "The « TV » button of the screen.",
+              "tv_telecommande": "The remote keys on the screen.",
+              "telecommandes_autres": "Apple TV, Freebox Player…: three at most, one page each in the remote popup.",
+              "telephone": "An icon at the top left, coloured by the battery.",
+              "salon_temperature": "Suggested: the first room's.",
+              "serre_temperature": "Suggested: the only temperature whose name says « outdoor ».",
+              "clim": "The − / setpoint / + buttons of the home screen.",
+              "pot_1": "Soil moisture sensors: suggested when there are five or fewer.",
+              "meteo_previsions": "The days and hours pages.",
+              "tablette": "Read from the ESPHome integration; empty: « tab5_ha_hmi »."
+            }
+          },
+          "agendas": {
+            "title": "Assistant · calendars and people",
+            "description": "The « Tab5 · … » lists (Settings → Devices & services → Entities). A choice already made stays. A list still on « Not set » (none) gets a suggestion when a single entity fits (a calendar whose name says « work » or « appointment », the only presence or occupancy sensor, the preferred pipeline). Nothing is set before the summary; you can put anything back to « None ».",
+            "data": {
+              "agenda_travail": "Work calendar",
+              "agenda_rdv": "Appointments calendar",
+              "agenda_anniversaires": "Birthdays calendar",
+              "agenda_feries": "Public holidays calendar",
+              "agenda_vacances": "School holidays calendar",
+              "telephone_suivi": "Tracked phone",
+              "presence": "Presence sensor",
+              "pipeline": "Chat pipeline"
+            },
+            "data_description": {
+              "agenda_anniversaires": "Birthdays, holidays and phone: the list already guesses by itself when there is a single candidate.",
+              "telephone_suivi": "Turns the screen on when back, off when gone.",
+              "presence": "Turns the screen on on detection, off after 15 min without presence.",
+              "pipeline": "The « Chat » mode of the screen; « None » hides its buttons."
+            }
+          },
+          "recapitulatif": {
+            "title": "Assistant · summary",
+            "description": "{resume}\n\n{action}",
+            "data": {
+              "mettre_a_jour": "Replace the rooms and home inputs of the existing automation"
+            },
+            "data_description": {
+              "mettre_a_jour": "A home field left empty keeps its value; its other settings (energy, gestures…) stay as they are. The « Tab5 · … » lists are set with or without this box."
+            }
+          }
+        },
+        "abort": {
+          "aucune_piece": "No Home Assistant area has a device the tablet can show: the assistant has nothing to offer and changes nothing. Assign your devices to areas in Home Assistant, then start it again (Settings → Devices & services → Tab5 → Configure, box « Start the setup assistant »), or fill in the blueprint's automation by hand."
+        },
+        "error": {
+          "aucune_piece_choisie": "Pick at least one room.",
+          "trop_de_pieces": "Ten rooms at most.",
+          "trop_de_tuiles": "Twenty tiles at most."
+        }
+      }
+    },
+    "migrer_entites": {
+      "title": "Tab5: switch the entities to their English names",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Migrate the Tab5 entities",
+            "description": "The tablet's entities now have English names in Home Assistant, and {nombre} entities still carry their old French name or ID. Submit to rename them: they keep their history, and the tablet keeps its settings. Your own dashboards and automations that use their old entity IDs need updating."
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,43 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file switches_card.yaml
+# @role Calque du mode HA (bouton « HA », ADR-0023) : 5 cartes = les 5 tuiles de la pièce
+#       de la page courante. Depuis le 06/10/2026 (discussion #278 : « buttons can be like
+#       ha dashboard buttons »), chaque carte ressemble à la carte « tile » d'un tableau de
+#       bord Home Assistant, en version verticale : l'icône (palette, 70 px) dans une
+#       pastille ronde de la couleur de son état (couleur à 20 %, icône pleine), le nom
+#       dessous, l'état sous le nom. Pastille, icône, nom (coupé avec « … ») et ligne
+#       d'état sont posés par tab5_tuiles.cpp (peindre_carte) ; les cartes vides sont
+#       masquées et les autres centrées. Tap et appui long sur la pastille : tuile_appui(),
+#       qui envoie la commande du type de la tuile ou ouvre son popup (ou, en mode
+#       héritage, ce que faisait la 3.x). Toucher du nom : sens d'un volet.
+#       Alterne avec forecast_daily.yaml/forecast_hourly.yaml : tuiles_mode_ha().
+# @architecture_constraint Une carte = switch_card.yaml (+ vars), depuis le 08/10/2026
+#                          (audit, YML-3 : le corps était écrit cinq fois) ; nom
+#                          (`switch_card_title_tab.yaml`) et état (`switch_card_state_tab.yaml`)
+#                          y sont inclus. `sw_card_N` / `sw_pastille_N` sont lus par
+#                          tab5-tuiles.yaml ; `icon_swN` garde le motif `icon_sw?` de la
+#                          règle 7 (palette des tuiles). Le bouton invisible ne couvre que la
+#                          pastille (130 × 130, comme avant) : un geste parti ailleurs sur la
+#                          carte reste un swipe.
+# @ai_instruction Icônes, titres, états, couleurs et positions sont écrits par le C++ —
+#                 les textes, glyphes et couleurs d'ici ne sont que ceux d'avant la
+#                 première image. La pastille et le nom ne prennent pas l'appui du bouton.
+# ============================================================================
+obj:
+  id: layer_switches
+  x: 0
+  y: ${acc_tuiles_y}
+  width: ${carte_ecran_l}
+  height: ${acc_tuiles_h}
+  styles: style_transparent
+  scrollbar_mode: "OFF"
+  hidden: true
+
+  widgets:
+    # Tuiles 0 à 4 : glyphe, nom et état d'avant la première image (repeints par le C++).
+    - !include { file: switch_card.yaml, vars: { n: "0", x: "${acc_tuile_x0}", icone: "\U000F0379", title: "PC Bureau", state_text: "Éteint" } }
+    - !include { file: switch_card.yaml, vars: { n: "1", x: "${acc_tuile_x1}", icone: "\U000F111E", title: "Volet", state_text: "Fermé" } }
+    - !include { file: switch_card.yaml, vars: { n: "2", x: "${acc_tuile_x2}", icone: "\U000F02E3", title: "Chambre", state_text: "Éteint" } }
+    - !include { file: switch_card.yaml, vars: { n: "3", x: "${acc_tuile_x3}", icone: "\U000F04B9", title: "Salon", state_text: "Éteint" } }
+    - !include { file: switch_card.yaml, vars: { n: "4", x: "${acc_tuile_x4}", icone: "\U000F1051", title: "LEDs", state_text: "Éteint" } }

@@ -1,0 +1,40 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file pot_sensors.yaml
+# @role Package PARAMÉTRÉ (`!include` + `vars`, règle 5 du README) : les 4
+#       capteurs de détail d'UN pot (conductivité EC, éclairement, température,
+#       batterie du capteur BLE). Inclus 5 fois par tab5-sensors-domotique.yaml
+#       via un `packages:` imbriqué (var `n` = 1..5) : ESPHome concatène les
+#       listes `sensor:` des packages, alors qu'un `- !include` posé dans une
+#       liste y imbrique la liste incluse (vérifié sur 2026.8.1).
+# @emplacements Depuis le lot 6a (ADR-0019) : des `template` internes, sans
+#       entity_id. Le blueprint « Tab5 — emplacements » pousse leurs valeurs
+#       (clés pot_${n}_ec, _lux, _temp, _bat) par tab5_maj_emplacements ; il les
+#       trouve lui-même sur l'appareil du capteur d'humidité choisi pour le pot.
+# @ai_instruction Un 6ᵉ pot = une ligne `pot_sensors_6` dans
+#       tab5-sensors-domotique.yaml, une carte pot_detail_card dans pots_popup.yaml,
+#       ses clés dans tab5_maj_emplacements et le blueprint, et les tableaux figés à
+#       5 du C++ (tab5_custom.h). Ne rien afficher ici : chaque on_value pousse
+#       texte+couleur via update_pot_metric_ui (tab5_custom.cpp), règle 2.
+# ============================================================================
+sensor:
+  - platform: template
+    id: pot${n}_ec
+    update_interval: never
+    on_value:
+      - lambda: 'update_pot_metric_ui(id(lbl_pot_d${n}_ec), x, PotMetric::CONDUCTIVITY);'
+  - platform: template
+    id: pot${n}_lux
+    update_interval: never
+    on_value:
+      - lambda: 'update_pot_metric_ui(id(lbl_pot_d${n}_lux), x, PotMetric::ILLUMINANCE);'
+  - platform: template
+    id: pot${n}_temp
+    update_interval: never
+    on_value:
+      - lambda: 'update_pot_metric_ui(id(lbl_pot_d${n}_temp), x, PotMetric::TEMPERATURE);'
+  - platform: template
+    id: pot${n}_bat
+    update_interval: never
+    on_value:
+      - lambda: 'update_pot_metric_ui(id(lbl_pot_d${n}_bat), x, PotMetric::BATTERY);'

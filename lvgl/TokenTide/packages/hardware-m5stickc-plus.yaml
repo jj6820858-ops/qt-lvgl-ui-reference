@@ -1,0 +1,147 @@
+# M5StickC Plus hardware: AXP192 PMU, ST7789v2 135x240 LCD, two buttons.
+# Pin sources: devices.esphome.io m5stack-m5stickc-plus page (display/SPI/
+# buttons) + M5Stack's official axp192 ESPHome component (rails; on the
+# StickC family LDO2 feeds the backlight, LDO3 the panel logic).
+
+# Rail bring-up lives with the hardware so every board variant gets it:
+# a fixed-voltage AXP192 output is not switched on automatically, and
+# without LDO3 the panel logic stays dark no matter what the backlight
+# does.
+esphome:
+  on_boot:
+    - priority: 700
+      then:
+        - output.turn_on: lcd_logic_power
+
+# No PSRAM: mbedTLS holds its record buffers only while data is in flight
+# and frees the CA and config data once the handshake is done, which about
+# halves the heap of an HTTPS session. Each poll opens a fresh client, so
+# nothing handshakes again on the freed config.
+esp32:
+  framework:
+    sdkconfig_options:
+      CONFIG_MBEDTLS_DYNAMIC_BUFFER: "y"
+      CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA: "y"
+      CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT: "y"
+
+i2c:
+  - id: bsp_bus
+    sda: GPIO21
+    scl: GPIO22
+
+spi:
+  - id: spi_bus
+    clk_pin: GPIO13
+    mosi_pin: GPIO15
+
+external_components:
+  - source: github://m5stack/esphome-yaml/components
+    components: [axp192]
+    refresh: 1d
+
+axp192:
+  id: axp192_pmu
+  i2c_id: bsp_bus
+
+output:
+  # Backlight rail - dimmable.
+  - platform: axp192
+    type: range
+    channel: DLDO2
+    id: lcd_backlight_output
+    min_voltage: 2500
+    max_voltage: 3000
+  # Panel logic rail - fixed on.
+  - platform: axp192
+    channel: DLDO3
+    id: lcd_logic_power
+    voltage: 3000
+  # Passive buzzer (G2) - PWM-driven, backs the shared chime package.
+  - platform: ledc
+    id: buzzer_output
+    pin: GPIO2
+  # Internal red LED (G10, active low) - backs the shared led package.
+  - platform: ledc
+    id: led_output
+    pin: GPIO10
+    inverted: true
+
+rtttl:
+  id: chime_rtttl
+  output: buzzer_output
+
+script:
+  # Chime hardware contract: nothing to power up on this board.
+  - id: sound_begin
+    mode: single
+    then:
+      - lambda: return;
+
+light:
+  - platform: monochromatic
+    id: lcd_backlight
+    name: "LCD Backlight"
+    output: lcd_backlight_output
+    restore_mode: RESTORE_DEFAULT_ON
+    default_transition_length: 250ms
+
+sensor:
+  - platform: axp192
+    id: axp192_sensor
+    battery_level:
+      name: "Battery Level"
+      id: battery_level
+    battery_charging:
+      name: "Battery Charging"
+      id: battery_charging
+
+binary_sensor:
+  # Front button (BtnA, the big M5 one): short press is wake/presence
+  # only, a hold cycles the theme. Routed through the same gesture
+  # substitutions as the touch pages, so opting into the saver package
+  # rebinds it too.
+  - platform: gpio
+    id: btn_a
+    pin:
+      number: GPIO37
+      inverted: true
+    on_multi_click:
+      # 10ms gap between the ranges: both bounds are inclusive, so truly
+      # contiguous ranges would double-fire on an exact-boundary press.
+      - timing:
+          - ON for at most 790ms
+          - OFF for at least 0.1s
+        then:
+          - script.execute: ${theme_tap_script}
+      - timing:
+          - ON for at least 800ms
+        then:
+          - script.execute: ${theme_long_press_script}
+  # Right-side button (BtnB): force a refresh.
+  - platform: gpio
+    id: btn_b
+    internal: true
+    pin:
+      number: GPIO39
+      inverted: true
+    on_press:
+      - script.execute: note_activity
+      - script.execute: poll_usage
+
+display:
+  # mipi_spi (not the legacy st7789v): its MADCTL hardware rotation is what
+  # LVGL drives natively - the legacy driver plus LVGL software rotation
+  # produced a wrapped/striped frame on this panel. T-DISPLAY preset = the
+  # same ST7789 135x240 glass as the StickC Plus.
+  - platform: mipi_spi
+    id: main_lcd
+    model: T-DISPLAY
+    cs_pin: GPIO5
+    dc_pin: GPIO23
+    reset_pin: GPIO18
+    # 40MHz write clock - what M5GFX uses for this ST7789v2; the driver
+    # default is far lower and makes every flush visibly slow.
+    data_rate: 40MHz
+    # Rotation lives in the LVGL block (LVGL forbids display-level rotation).
+    update_interval: never
+    auto_clear_enabled: false

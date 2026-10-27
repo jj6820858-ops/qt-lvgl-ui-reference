@@ -1,0 +1,296 @@
+{#-
+  La tablette Tab5 vue de Home Assistant (audit du 07/10/2026, HA-7). Ces trois tests
+  étaient recopiés dans les packages et le blueprint (« tablette connectée » ×7, garde
+  d'origine ×6) ; ils n'existent plus qu'ici. Importés par :
+    {%- from 'tab5_tablette.jinja' import tab5_connectee, tab5_origine, tab5_api -%}
+
+  La tablette est reconnue au MODÈLE de son appareil, `tab5-ha-hmi` (bloc `project:` du
+  firmware), jamais à son nom : il dépend du nom donné à l'appareil dans HA.
+  Ses entités se cherchent par la fin de leur entity_id SUIVIE d'un suffixe facultatif
+  « (_[0-9]+)? » : HA ajoute « _2 » à un entity_id déjà pris par un autre appareil (un
+  second écran, ADR-0063, ou un écran qui en remplace un resté dans HA). Le 17/10/2026,
+  la Waveshare 7B de l'auteur avait 19 entités en « _2 » (…_display_backlight_2,
+  …_tab5_uptime_2, …_wake_word_active_2) : l'écran ne suivait plus la présence.
+  Toute nouvelle recherche fait de même (tests/test_entites_suffixees.py).
+
+  tab5_connectee()
+      'oui' si le capteur « HA API Status » d'une tablette est `on` (liaison API
+      établie), '' sinon : tablette pas encore ajoutée à HA, ou hors ligne. Garde des
+      poussées : sans elle, une action de la tablette lève « Action … not found » ou
+      « Not connected » (test « HA neuf », 28/09/2026).
+  tab5_origine(trigger)
+      Garde d'origine (audit sécurité du 30/09/2026, tests/test_garde_origine.py) : un
+      événement `esphome.tab5_*` ne compte que s'il vient d'une tablette. Les événements
+      `esphome.*` n'exigent aucune option côté HA (ADR-0025) : n'importe quel autre
+      appareil ESPHome de la maison peut les émettre. 'oui' pour un tel événement dont le
+      device_id est un appareil de modèle tab5-ha-hmi ; '' pour un autre appareil, sans
+      device_id (tiré à la main) ou dont le device_id est une entité. Tout autre
+      déclencheur (état, heure, démarrage, rechargement, autre événement) : 'oui'.
+      `| string` : device_attr() refuse autre chose qu'un texte (device_id vaut None
+      pour un appareil pas encore enregistré).
+  tab5_api(appareil='')
+      entity_id du capteur « HA API Status » d'une tablette : la dernière connectée s'il y
+      en a une, sinon la première trouvée ; '' sans tablette. Ses autres entités se
+      trouvent par device_entities(device_id(…)) (packages/tab5_reglages.yaml).
+      `appareil` (device_id) : celui de cette tablette seulement. Plusieurs écrans : une
+      garde qui regarde LA tablette qui a émis un événement le donne (25/10/2026 : la 7B
+      redémarrée, la garde lisait l'autre tablette, connectée depuis 25 min, et sa
+      poussée complète n'est jamais partie : alertes et planning vides).
+  tab5_prefixe(device_id), tab5_destinataires(appareil)
+      Plusieurs écrans (ADR-0063) : le préfixe des actions d'une tablette (son capteur
+      « Préfixe des actions »), et la liste des préfixes à qui envoyer, séparés par des
+      virgules : la tablette `appareil` si c'en est une, sinon chaque tablette connectée.
+      Chaque poussée boucle dessus :
+        {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+        {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+  tab5_cibles(appareil), tab5_entite(appareil, role), tab5_nom(appareil)
+      Registre des écrans (ADR-0071, 25/10/2026) : ce qui lit les entités d'UN écran
+      (allumer à la présence, thème et nuit, micro, santé, briefing) boucle sur les
+      écrans au lieu de suivre `sensor.tab5_tablette`, qui n'en voit qu'un.
+      tab5_cibles : les device_id à servir, séparés par des virgules, comme
+      tab5_destinataires (la tablette `appareil` si c'en est une, sinon chaque tablette
+      connectée). tab5_entite : l'entity_id d'un rôle (ecran, reveil_en_cours, raison,
+      demarrage, micro, satellite, rdv_avant, langue, theme_nuit, nuit_ecran, api,
+      pipeline) de cet appareil, '' s'il n'en a pas — les motifs n'existent qu'ici.
+      tab5_nom : son nom dans HA. tab5_pret(appareil) : 'oui' quand cet écran (sans
+      appareil : un écran) est connecté ; tab5_appareil_connexion(trigger) : l'écran
+      dont la connexion a déclenché, '' sinon. Une boucle :
+        {%- from 'tab5_tablette.jinja' import tab5_cibles -%}
+        {{ tab5_cibles(appareil | default('')).split(',') | select | list }}
+  tab5_ecrans(), tab5_reglage(appareil, cle), tab5_reglage_propre(appareil, cle),
+  tab5_ecran_a_regler(), tab5_lecteurs_tous(), tab5_lecteur_montre(appareil)
+      Réglages par écran (ADR-0072, 25/10/2026) : capteur de présence, extinction de nuit
+      et lecteurs de musique se règlent écran par écran ; un écran sans réglage propre
+      garde celui de la maison (les listes « Tab5 · presence sensor », « Tab5 · night
+      screen off », « Tab5 · music players »). tab5_reglage rend la valeur qui vaut pour
+      l'écran, tab5_reglage_propre la sienne seule ('' : celle de la maison).
+
+  Une macro rend toujours du texte : 'oui' ou '' comme couvre() de tab5_calendar.jinja.
+  Une condition compare donc : `{{ tab5_connectee() == 'oui' }}` (un « oui » nu ne vaut
+  pas vrai pour HA, qui n'accepte que « true »).
+
+  Déploiement : ce fichier va dans config/custom_templates/ de Home Assistant, puis
+  homeassistant.reload_custom_templates (ou un redémarrage) — AVANT de recharger les
+  packages et le blueprint qui l'importent : sinon leurs conditions échouent à la ligne
+  d'import (erreur de rendu, la poussée s'arrête). L'archive et l'intégration HACS le
+  posent avec les packages ; l'intégration recharge les modèles en premier (ADR-0035).
+-#}
+{%- macro tab5_api(appareil='') -%}
+  {%- set ns = namespace(api='') -%}
+  {%- for e in integration_entities('esphome') | select('match', 'binary_sensor[.].*_ha_api_status(_[0-9]+)?$') -%}
+    {%- if device_attr(e, 'model') == 'tab5-ha-hmi' and (appareil == '' or device_id(e) == appareil)
+          and (ns.api == '' or is_state(e, 'on')) -%}
+      {%- set ns.api = e -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{- ns.api -}}
+{%- endmacro -%}
+{%- macro tab5_connectee() -%}
+  {{- 'oui' if integration_entities('esphome') | select('match', 'binary_sensor[.].*_ha_api_status(_[0-9]+)?$')
+       | select('is_state', 'on') | map('device_attr', 'model') | select('eq', 'tab5-ha-hmi')
+       | list | count > 0 else '' -}}
+{%- endmacro -%}
+{%- macro tab5_origine(trigger) -%}
+  {%- if trigger.platform == 'event' and (trigger.event.event_type | default('', true) | string).startswith('esphome.tab5_') -%}
+    {%- set d = trigger.event.data.device_id | default('', true) | string -%}
+    {{- 'oui' if '.' not in d and device_attr(d, 'model') == 'tab5-ha-hmi' else '' -}}
+  {%- else -%}
+    {{- 'oui' -}}
+  {%- endif -%}
+{%- endmacro -%}
+{%- macro tab5_prefixe(d) -%}
+  {#- Préfixe des actions de l'appareil d (ADR-0063) : l'état de son capteur « Tab5
+      Préfixe des actions » ; « tab5_ha_hmi », le nom par défaut, pour un firmware qui ne
+      l'a pas (avant plusieurs écrans : il porte toujours ce nom) et tant que ce capteur
+      n'a pas de valeur lisible. Juste après un démarrage, la tablette se connecte (et
+      demande sa poussée complète) avant d'avoir publié son préfixe : le capteur vaut
+      alors « unknown » ou « unavailable », qui passent le filtre des noms (16/10/2026,
+      poussée envoyée à esphome.unknown_… et perdue). -#}
+  {%- set lisibles = device_entities(d | string) | select('match', 'sensor[.].*_(prefixe_des_actions|action_prefix)(_[0-9]+)?$')
+        | map('states') | reject('in', ['unknown', 'unavailable', 'none']) | select('match', '^[a-z0-9_]+$') | list -%}
+  {{- lisibles | first | default('tab5_ha_hmi', true) -}}
+{%- endmacro -%}
+{%- macro tab5_cibles(appareil) -%}
+  {#- device_id à servir, séparés par des virgules (lire avec `.split(',') | select | list`) :
+      la tablette `appareil` (device_id de l'événement qui demande une réponse) si c'en est
+      une, même hors ligne ; sinon chaque tablette connectée. '' : aucune. -#}
+  {%- set d = appareil | default('', true) | string -%}
+  {%- if d and '.' not in d and device_attr(d, 'model') == 'tab5-ha-hmi' -%}
+    {{- d -}}
+  {%- else -%}
+    {%- set ns = namespace(l=[]) -%}
+    {%- for e in integration_entities('esphome') | select('match', 'binary_sensor[.].*_ha_api_status(_[0-9]+)?$') | select('is_state', 'on') -%}
+      {%- if device_attr(e, 'model') == 'tab5-ha-hmi' and device_id(e) and device_id(e) not in ns.l -%}
+        {%- set ns.l = ns.l + [device_id(e)] -%}
+      {%- endif -%}
+    {%- endfor -%}
+    {{- ns.l | join(',') -}}
+  {%- endif -%}
+{%- endmacro -%}
+{%- macro tab5_destinataires(appareil) -%}
+  {#- Préfixes à qui envoyer, séparés par des virgules (ADR-0063, plusieurs écrans ; lire
+      avec `.split(',') | select | list`, du Jinja pur, sans filtre propre à HA) : ceux de
+      tab5_cibles (la tablette `appareil` (device_id de l'événement qui demande une
+      réponse : un mois du calendrier, une vue d'un popup) si c'en est une ; sinon chaque
+      tablette connectée, même affichage partout), sans doublon. '' : aucune. -#}
+  {%- set ns = namespace(l=[]) -%}
+  {%- for d in tab5_cibles(appareil).split(',') | select -%}
+    {%- set p = tab5_prefixe(d) -%}
+    {%- if p and p not in ns.l -%}
+      {%- set ns.l = ns.l + [p] -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{- ns.l | join(',') -}}
+{%- endmacro -%}
+{%- macro tab5_entite(appareil, role) -%}
+  {#- entity_id du rôle `role` de l'appareil `appareil` ('' sinon). Noms français (avant
+      la 3.9) et anglais (ADR-0070), suffixe « _2 » d'un second écran. Le pipeline est le
+      select dont les options commencent par « preferred » (AssistPipelineSelect) ; deux
+      depuis HA 2025.10, le premier par ordre d'entity_id, comme tab5_evenements.yaml. -#}
+  {%- set fins = {
+        'api': 'binary_sensor[.].*_ha_api_status',
+        'ecran': 'light[.].*_display_backlight',
+        'reveil_en_cours': 'binary_sensor[.].*_(reveil_en_cours|alarm_ringing)',
+        'raison': 'sensor[.].*_(raison_du_redemarrage|restart_reason)',
+        'demarrage': 'sensor[.].*_uptime',
+        'micro': 'switch[.].*_wake_word_active',
+        'satellite': 'assist_satellite[.].*',
+        'rdv_avant': 'number[.].*_(rendez_vous_annoncer_avant|appointments_announce_before)',
+        'langue': 'select[.].*_(langue|language)',
+        'theme_nuit': 'switch[.].*_(nuit_theme_auto|night_auto_theme)',
+        'nuit_ecran': 'switch[.].*_(nuit_ecran_eteint|night_screen_off)',
+      } -%}
+  {%- set d = appareil | default('', true) | string -%}
+  {%- set entites = device_entities(d) if d and '.' not in d else [] -%}
+  {%- if role == 'pipeline' -%}
+    {%- set ns = namespace(l=[]) -%}
+    {%- for e in entites | select('match', 'select[.]') -%}
+      {%- if 'preferred' in (state_attr(e, 'options') or []) -%}
+        {%- set ns.l = ns.l + [e] -%}
+      {%- endif -%}
+    {%- endfor -%}
+    {{- (ns.l | sort | first) if ns.l else '' -}}
+  {%- elif role in fins -%}
+    {{- entites | select('match', fins[role] ~ '(_[0-9]+)?$') | first | default('') -}}
+  {%- endif -%}
+{%- endmacro -%}
+{%- macro tab5_nom(appareil) -%}
+  {%- set d = appareil | default('', true) | string -%}
+  {{- (device_attr(d, 'name_by_user') or device_attr(d, 'name') or 'Tab5') if d and '.' not in d else 'Tab5' -}}
+{%- endmacro -%}
+{%- macro tab5_pret(appareil='') -%}
+  {#- 'oui' quand on peut envoyer à `appareil` : son « HA API Status » est `on`. Sans
+      appareil (ou pas une tablette) : une tablette connectée, comme tab5_connectee().
+      Plusieurs écrans (25/10/2026) : à la connexion de la 7B, l'attente « une tablette
+      connectée » passait aussitôt grâce au Tab5, la liste des destinataires était
+      calculée 0,15 s avant que la 7B soit `on` et sa poussée complète partait au Tab5
+      seul. Une poussée déclenchée par esphome.tab5_connected attend donc CET écran :
+        {%- from 'tab5_tablette.jinja' import tab5_pret -%}
+        {{ tab5_pret(appareil) == 'oui' }} -#}
+  {%- set d = appareil | default('', true) | string -%}
+  {%- if d and '.' not in d and device_attr(d, 'model') == 'tab5-ha-hmi' -%}
+    {{- 'oui' if is_state(tab5_entite(d, 'api'), 'on') else '' -}}
+  {%- else -%}
+    {{- tab5_connectee() -}}
+  {%- endif -%}
+{%- endmacro -%}
+{%- macro tab5_appareil_connexion(trigger) -%}
+  {#- device_id de la tablette dont l'esphome.tab5_connected a déclenché, '' pour tout
+      autre déclencheur : la poussée de connexion ne sert que cet écran. -#}
+  {%- if trigger.platform == 'event' and (trigger.event.event_type | default('', true) | string) == 'esphome.tab5_connected' -%}
+    {{- trigger.event.data.device_id | default('', true) | string -}}
+  {%- endif -%}
+{%- endmacro -%}
+{%- macro tab5_ecrans() -%}
+  {#- device_id de chaque écran connu (connecté ou non), séparés par des virgules, dans
+      l'ordre de « Tab5 · screens » (sensor.tab5_ecrans). -#}
+  {{- (state_attr('sensor.tab5_ecrans', 'ecrans') or []) | map(attribute='appareil') | select | join(',') -}}
+{%- endmacro -%}
+{%- macro tab5_reglage_propre(appareil, cle) -%}
+  {#- Réglages par écran (ADR-0072, 25/10/2026) : la valeur propre à cet écran, gardée par
+      sensor.tab5_reglages_ecrans (packages/tab5_reglages.yaml) ; '' = celle de la maison.
+      cle : presence (entity_id ou « Not set »), nuit (« HH:MM-HH:MM » ou « Not set »),
+      lecteurs (entity_id séparés par des virgules, ou « Not set »). -#}
+  {%- set d = appareil | default('', true) | string -%}
+  {%- set r = state_attr('sensor.tab5_reglages_ecrans', 'reglages') -%}
+  {%- set e = r[d] if d and r is mapping and d in r and r[d] is mapping else {} -%}
+  {{- (e[cle] | string) if cle in e else '' -}}
+{%- endmacro -%}
+{%- macro tab5_reglage(appareil, cle) -%}
+  {#- Le réglage qui vaut pour cet écran : le sien, sinon celui de la maison (sans
+      appareil : celui de la maison). presence : entity_id ou « Not set » ; nuit : plage ou
+      « Not set » ; lecteurs : entity_id séparés par des virgules ('' : aucun). -#}
+  {%- set v = tab5_reglage_propre(appareil, cle) -%}
+  {%- if cle == 'presence' -%}
+    {{- v if v != '' else states('select.tab5_capteur_de_presence') -}}
+  {%- elif cle == 'nuit' -%}
+    {{- v if v != '' else states('select.tab5_extinction_de_nuit') -}}
+  {%- elif cle == 'lecteurs' -%}
+    {%- set brut = v if v != '' else states('input_text.tab5_choix_lecteurs') -%}
+    {{- brut.split(',') | map('trim') | select('match', 'media_player[.]') | unique | list | join(',') -}}
+  {%- endif -%}
+{%- endmacro -%}
+{%- macro tab5_presences(etat) -%}
+  {#- device_id des écrans dont le capteur de présence (le leur, sinon celui de la maison)
+      vaut `etat` : 'on' quelqu'un, 'off' personne ; un capteur indisponible n'est ni l'un
+      ni l'autre (il n'éteint rien). -#}
+  {%- set ns = namespace(l=[]) -%}
+  {%- for d in tab5_ecrans().split(',') | select -%}
+    {%- set e = tab5_reglage(d, 'presence') -%}
+    {%- if e.startswith('binary_sensor.') and is_state(e, etat) -%}
+      {%- set ns.l = ns.l + [d] -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{- ns.l | join(',') -}}
+{%- endmacro -%}
+{%- macro tab5_nuits(h) -%}
+  {#- device_id des écrans dont la plage d'extinction de nuit (la leur, sinon celle de la
+      maison) contient l'heure h, « HH:MM » locale : plage à cheval sur minuit comprise,
+      début = fin : jamais, « Not set » : jamais. h vient de l'appelant (now()) : c'est
+      lui qui fait recalculer le modèle chaque minute. -#}
+  {%- set ns = namespace(l=[]) -%}
+  {%- for d in tab5_ecrans().split(',') | select -%}
+    {%- set p = tab5_reglage(d, 'nuit').split('-') -%}
+    {%- if p | count == 2 and ((p[0] <= h < p[1]) if p[0] < p[1] else (h >= p[0] or h < p[1]) if p[0] > p[1] else false) -%}
+      {%- set ns.l = ns.l + [d] -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{- ns.l | join(',') -}}
+{%- endmacro -%}
+{%- macro tab5_ecran_libelle(appareil) -%}
+  {#- Option de « Tab5 · screen to set » : « nom · préfixe » (le préfixe est propre à
+      chaque écran, ADR-0063 : deux écrans du même nom restent distincts). -#}
+  {{- tab5_nom(appareil) ~ ' · ' ~ tab5_prefixe(appareil) -}}
+{%- endmacro -%}
+{%- macro tab5_ecran_a_regler() -%}
+  {#- L'écran que montrent les listes « Tab5 · this screen · … » : celui choisi dans
+      « Tab5 · screen to set », sinon le premier écran connu ; '' sans écran. -#}
+  {%- set l = tab5_ecrans().split(',') | select | list -%}
+  {%- set m = states('input_text.tab5_choix_ecran_a_regler') -%}
+  {{- m if m in l else (l | first | default('')) -}}
+{%- endmacro -%}
+{%- macro tab5_lecteurs_tous() -%}
+  {#- Tous les lecteurs choisis, de la maison et de chaque écran, sans doublon. -#}
+  {%- set ns = namespace(l=tab5_reglage('', 'lecteurs').split(',') | select | list) -%}
+  {%- for d in tab5_ecrans().split(',') | select -%}
+    {%- set ns.l = ns.l + (tab5_reglage(d, 'lecteurs').split(',') | select | reject('in', ns.l) | list) -%}
+  {%- endfor -%}
+  {{- ns.l | join(',') -}}
+{%- endmacro -%}
+{%- macro tab5_lecteur_montre(appareil='') -%}
+  {#- Le lecteur que montre le popup Musique de cet écran (ADR-0050) : le lecteur choisi
+      (input_text.tab5_lecteur_actif : pastille, tuile, lecteur qui se met à jouer) s'il
+      est dans la liste de cet écran ou dans aucune (une tuile) ; sinon le premier de sa
+      liste qui joue, sinon le premier de sa liste ; « Aucun » sans liste. Sans appareil :
+      celui de la maison (le lecteur choisi, quel qu'il soit), comme avant le 25/10/2026. -#}
+  {%- set d = appareil | default('', true) | string -%}
+  {%- set liste = tab5_reglage(d, 'lecteurs').split(',') | select | list -%}
+  {%- set m = states('input_text.tab5_lecteur_actif') -%}
+  {%- set jouent = liste | select('is_state', 'playing') | list -%}
+  {%- if m.startswith('media_player.') and expand(m) | count > 0
+        and (d == '' or m in liste or m not in tab5_lecteurs_tous().split(',')) -%}{{ m }}
+  {%- elif jouent -%}{{ jouent | first }}
+  {%- elif liste -%}{{ liste | first }}
+  {%- else -%}Aucun
+  {%- endif -%}
+{%- endmacro -%}

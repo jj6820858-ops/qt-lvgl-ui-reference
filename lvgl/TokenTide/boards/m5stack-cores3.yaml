@@ -1,0 +1,62 @@
+# tokentide on the M5Stack CoreS3 (also the Stack-chan head unit).
+# Remote-importable board entry: SoC config + CoreS3 hardware + the rich
+# 320x240 touch UI, on top of the shared usage engine.
+# No !secret here - secrets resolve in the importing user's config;
+# everything user-specific arrives via substitutions (see README).
+
+substitutions:
+  name: tokentide
+  friendly_name: TokenTide
+  # Long-lived Claude Code OAuth token (`claude setup-token`). Leave empty
+  # for a device without Claude.
+  claude_token: ""
+  # Seconds between usage polls. Each poll is one ~1-token probe request;
+  # the UI footer shows the resulting requests/day so the cost is visible.
+  poll_interval: "120"
+  # Short tap on theme pages is wake-only; set to "toggle_saver" when
+  # opting into packages/saver.yaml.
+  theme_tap_script: "note_activity"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.4.0
+  on_boot:
+    - priority: 600
+      then:
+        - light.turn_on:
+            id: lcd_backlight
+            brightness: 80%
+
+esp32:
+  variant: esp32s3
+  flash_size: 16MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"
+
+psram:
+  mode: quad
+  speed: 80MHz
+
+packages:
+  common: !include ../packages/common.yaml
+  hardware: !include ../packages/hardware-cores3.yaml
+  poller: !include ../packages/usage-poller.yaml
+  versioncheck: !include ../packages/version-check.yaml
+  idle: !include ../packages/idle.yaml
+  ui: !include ../packages/ui-320x240-touch.yaml
+  themes: !include ../packages/themes.yaml
+  theme_graveyard: !include ../packages/theme-graveyard.yaml
+  theme_solar: !include ../packages/theme-solar.yaml
+  theme_horses: !include ../packages/theme-horses.yaml
+  theme_metro: !include ../packages/theme-metro.yaml
+  chime: !include ../packages/chime.yaml

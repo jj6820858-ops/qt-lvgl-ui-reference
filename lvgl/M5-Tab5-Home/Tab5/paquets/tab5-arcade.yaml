@@ -1,0 +1,445 @@
+# [AI-CONTEXT]
+# @file tab5-arcade.yaml
+# @role Le MODULE des jeux (ADR-0065) : tout ce que les 8 consoles ajoutent au firmware,
+#       et rien ailleurs — leurs fichiers C++ (`esphome: includes:`, dont la table des
+#       consoles jeux_registre.cpp), leurs couleurs et la police d'échecs, leurs 9 pages
+#       LVGL (le sélecteur `page_arcade` et une par console), l'ouverture de chacune
+#       (injection des pointeurs LVGL et des polices, seuls accessibles par `id()`) et du
+#       sélecteur, la traduction de leurs pages.
+# @architecture_constraint Choisi par tab5-ha-hmi.yaml d'après `tab5_jeux` (oui par
+#       défaut sur le Tab5, non sur une carte sans IMU) ; sinon tab5-arcade-absente.yaml,
+#       qui donne au socle les mêmes PRISES vides : les scripts `tab5_arcade_open` et
+#       `tab5_jeux_traduire`, et une table de consoles vide (jeux_absents.cpp). Le socle
+#       ne nomme aucun jeu : il passe par GameRegistry (tab5_registry.h : any_open(),
+#       close_all(), disponibles()…) et ces deux scripts. Chargé APRÈS tab5_lvgl : ESPHome
+#       met les listes des packages bout à bout dans l'ordre de déclaration (pages après
+#       page_main, l'index 0), puis celles du fichier principal (nos `includes:` avant les
+#       siens : chaque en-tête de jeu inclut ce dont il a besoin). La liste des consoles
+#       vit dans `GameRegistry::kGames` (jeux_registre.cpp, ADR-0013), jamais ici.
+# @ai_instruction Une 9ᵉ console : voir docs/arcade.md, « Règles à respecter pour
+#       ajouter une 9ᵉ console » — ses fichiers, sa page, ses couleurs et son script
+#       `tab5_<jeu>_open` vont dans ce fichier ; sa page aussi dans `tab5_jeux_traduire`.
+#       Le firmware doit compiler avec et sans ce module (CI : build, la Tab5 ; build-carte-7b,
+#       la 7B sans jeux).
+
+esphome:
+  includes:
+    # Helpers partagés par les 8 consoles (mk_rect/mk_label, show/set_bg/…, xorshift32,
+    # NvsSlot<T>) — lot (f), ADR-0014. Header-only.
+    - Tab5/jeux/game_common.h
+    # Jeu « Fil d'Or » (overlay plein écran) — sous-module isolé du HMI.
+    - Tab5/jeux/marble_game.h
+    - Tab5/jeux/marble_game.cpp
+    # Jeu « Arcanoïde » (casse-briques rétro) — sous-module isolé du HMI.
+    - Tab5/jeux/arkanoid_game.h
+    - Tab5/jeux/arkanoid_game.cpp
+    # Jeu « Coureur d'Or » (Lode Runner) — sous-module isolé du HMI.
+    - Tab5/jeux/lode_game.h
+    - Tab5/jeux/lode_game.cpp
+    # Jeu « Roi Noir » (échiquier FIDE + IA embarquée) — sous-module isolé du HMI.
+    # chess_ai.* = moteur pur (aucun LVGL) ; chess_game.* = UI et machine à états.
+    - Tab5/jeux/chess_ai.h
+    - Tab5/jeux/chess_ai.cpp
+    - Tab5/jeux/chess_game.h
+    - Tab5/jeux/chess_game.cpp
+    # Jeu « Go Tab » — sous-module isolé (moteur + IA + UI).
+    - Tab5/jeux/go_engine.h
+    - Tab5/jeux/go_engine.cpp
+    - Tab5/jeux/go_ai.h
+    - Tab5/jeux/go_ai.cpp
+    - Tab5/jeux/go_game.h
+    - Tab5/jeux/go_game.cpp
+    # Jeu « Trial Poursuite » (Trivial Pursuit rétro-salon) — sous-module isolé.
+    # trivia_questions.h est inclus par trivia_game.cpp : il DOIT figurer ici,
+    # sinon ESPHome ne le copie pas dans le dossier de build et la compilation
+    # échoue sur un « No such file or directory ».
+    - Tab5/jeux/trivia_game.h
+    - Tab5/jeux/trivia_questions.h
+    - Tab5/jeux/trivia_game.cpp
+    # Jeu « Dames » (dames internationales / anglaises) — sous-module isolé.
+    # draughts_engine.* = moteur pur (aucun LVGL, testé sur PC) ; draughts_ai.* = IA ;
+    # draughts_game.* = UI et machine à états.
+    - Tab5/jeux/draughts_engine.h
+    - Tab5/jeux/draughts_engine.cpp
+    - Tab5/jeux/draughts_ai.h
+    - Tab5/jeux/draughts_ai.cpp
+    - Tab5/jeux/draughts_game.h
+    - Tab5/jeux/draughts_game.cpp
+    # Jeu « Neon Apron » (flipper PORTRAIT) — sous-module isolé du HMI.
+    # Seule console qui bascule l'écran : elle passe LVGL en 720×1280 le temps
+    # d'une partie puis restaure `rotation: 270`. Voir le bloc [AI-CONTEXT]
+    # ORIENTATION en tête de pinball_game.cpp avant d'y toucher.
+    - Tab5/jeux/pinball_game.h
+    - Tab5/jeux/pinball_game.cpp
+    # La table des consoles (GameRegistry::kGames) : la seule liste des jeux.
+    - Tab5/jeux/jeux_registre.cpp
+
+# Couleurs des JEUX et du sélecteur arcade : ils restent sombres, avec leurs palettes
+# locales (ADR-0014, ADR-0029). Un `color:` ESPHome est figé à la compilation (ESPHome
+# écrit lv_color_make(r, g, b) dans main.cpp), un thème ne pourrait pas le changer :
+# l'interface n'en a aucune (tools/check_tab5_code_rules.py, règle 8).
+color:
+  # --- Jeu « Fil d'Or » (marble_game) : miroir des tokens Marble::Pal::* ---
+  # Seuls les 3 fonds des conteneurs vivent ici ; toutes les autres couleurs du
+  # jeu sont posees en C++ (marble_game.cpp) et n'ont donc pas de token YAML.
+  - id: color_marble_void
+    hex: "080C14"          # fond hors terrain (miroir Marble::Pal::VOID)
+  - id: color_marble_floor
+    hex: "111A28"          # sol jouable (miroir Marble::Pal::FLOOR)
+  - id: color_marble_hud
+    hex: "0C1220"          # bandeau HUD (miroir Marble::Pal::HUD_BG)
+  # --- Jeu « Arcanoïde » (arkanoid_game) : miroir des tokens Arkanoid::Pal::* ---
+  # Seuls les 3 fonds des conteneurs vivent ici ; toutes les autres couleurs du
+  # jeu sont posées en C++ (arkanoid_game.cpp) et n'ont donc pas de token YAML.
+  - id: color_arkanoid_void
+    hex: "0A0A0F"          # fond hors terrain (miroir Arkanoid::Pal::VOID)
+  - id: color_arkanoid_floor
+    hex: "111118"          # sol jouable (miroir Arkanoid::Pal::FLOOR)
+  - id: color_arkanoid_hud
+    hex: "0D0D14"          # bandeau HUD (miroir Arkanoid::Pal::HUD_BG)
+  # --- Jeu « Trial Poursuite » (trivia_game) ---------------------------------
+  # trivia_game.yaml référençait ces 3 tokens sans qu'ils existent : la
+  # compilation ESPHome échouait sur « Couldn't find ID 'color_trivia_void' ».
+  # Contrairement aux 3 jeux ci-dessus, trivia_game.cpp ne pose PAS les fonds de
+  # ses conteneurs en C++ — ils doivent donc bien vivre ici.
+  # Teintes accordées à la carte Trivia du sélecteur arcade (accent
+  # color_arcade_trivia_accent, plus bas).
+  - id: color_trivia_void
+    hex: "100A16"          # fond hors plateau
+  - id: color_trivia_floor
+    hex: "1A1028"          # plateau de jeu
+  - id: color_trivia_hud
+    hex: "150E22"          # bandeau HUD
+  # --- Jeu « Neon Apron » (pinball_game) : miroir des tokens Pinball::Pal::* ---
+  # Comme Marble et Arcanoïde : seuls les fonds des 4 conteneurs vivent ici, tout
+  # le reste de la palette est posé en C++ (pinball_game.cpp).
+  - id: color_pinball_void
+    hex: "05070E"          # fond hors table (miroir Pinball::Pal::VOID)
+  - id: color_pinball_felt
+    hex: "121C2E"          # haut du sol (miroir Pinball::Pal::FELT_HI)
+  - id: color_pinball_hud
+    hex: "080C16"          # fronton / DMD (miroir Pinball::Pal::HUD_BG)
+  # --- Sélecteur arcade (ui_components/game_selector.yaml) --------------------
+  # Chaque carte = un fond (`_card`) + un accent (`_accent`, bordure et icône).
+  # Les fonds des cartes Fil d'Or, Arcanoïde et Trial Poursuite réutilisent le
+  # sol du jeu (color_marble_floor / color_arkanoid_floor / color_trivia_floor)
+  # et les titres le texte de la palette sombre (PALETTE_SOMBRE.TEXT_SOFT, posé
+  # sur le label : le sélecteur reste sombre) ; tout le reste vit ici — plus aucun hex en dur dans
+  # le sélecteur (audit du 06/09/2026, §4.1 point 11).
+  - id: color_arcade_bg
+    hex: "080810"          # fond de la page arcade
+  - id: color_arcade_title
+    hex: "FFDD22"          # icône + titre « ARCADE »
+  - id: color_arcade_subtitle
+    hex: "8595AD"          # sous-titre et descriptions des cartes (même gris que le rôle CONSOLE_LABEL de la palette sombre)
+  - id: color_arcade_footer
+    hex: "4A5568"          # pied de page
+  - id: color_arcade_close_bg
+    hex: "222233"          # croix de fermeture : fond
+  - id: color_arcade_close_border
+    hex: "445566"          # croix de fermeture : bordure
+  - id: color_arcade_close_icon
+    hex: "AABBCC"          # croix de fermeture : glyphe
+  - id: color_arcade_marble_accent
+    hex: "E8B44A"
+  - id: color_arcade_arkanoid_accent
+    hex: "44DDDD"
+  - id: color_arcade_pinball_card
+    hex: "0D1420"
+  - id: color_arcade_pinball_accent
+    hex: "35E6FF"
+  - id: color_arcade_lode_card
+    hex: "0A0A12"
+  - id: color_arcade_lode_accent
+    hex: "FFC61A"
+  - id: color_arcade_go_card
+    hex: "1A150E"
+  - id: color_arcade_go_accent
+    hex: "C4A574"
+  - id: color_arcade_trivia_accent
+    hex: "FF9800"
+  - id: color_arcade_draughts_card
+    hex: "241810"
+  - id: color_arcade_draughts_accent
+    hex: "D4B896"
+  - id: color_arcade_chess_card
+    hex: "121A16"
+  - id: color_arcade_chess_accent
+    hex: "8FBF6A"
+
+font:
+  # --- Jeu « Roi Noir » : pièces d'échecs -----------------------------------
+  # ChessPieces.ttf est un SOUS-ENSEMBLE (12 glyphes, 16 Ko) taillé dans DejaVu
+  # Sans, exactement comme IconeMeteo.ttf : on n'embarque que ce qu'on affiche.
+  # U+2654–2659 = pièces « blanches » (contour creux), U+265A–265F = « noires »
+  # (silhouette pleine). chess_game.cpp superpose les deux pour dessiner une
+  # pièce blanche (corps ivoire + contour sombre) — d'où les 12 glyphes et pas 6.
+  # size 80 : encre 72×60 px dans une case de 84 (calibré, aucun débordement).
+  # bpp 4 obligatoire : en bpp 1 les contours fins (couronne, crinière) crénellent.
+  - file: "Tab5/fonts/ChessPieces.ttf"
+    id: chess_pieces_80
+    size: 80
+    bpp: 4
+    # Échappements plutôt que glyphes littéraux : même convention que les polices
+    # MDI ci-dessus, et aucune dépendance à l'encodage de l'éditeur.
+    glyphs: "\u2654\u2655\u2656\u2657\u2658\u2659\u265A\u265B\u265C\u265D\u265E\u265F"
+
+lvgl:
+  pages:
+    # ═══════════════════════════════════════════════════════════════
+    # PAGES GAMING — chacune est un écran LVGL autonome (skip: true
+    # empêche le swipe gesture de naviguer vers/depuis ces pages).
+    # Navigation : lvgl.page.show (YAML) ou lv_screen_load (C++).
+    # ═══════════════════════════════════════════════════════════════
+
+    # ─── Sélecteur arcade (grille 8 consoles) ───
+    - id: page_arcade
+      skip: true
+      scrollbar_mode: "OFF"
+      widgets:
+        - !include ../ui_components/game_selector.yaml
+
+    # ─── Fil d'Or (marble) ───
+    - id: page_marble
+      skip: true
+      scrollbar_mode: "OFF"
+      widgets:
+        - !include ../ui_components/marble_game.yaml
+
+    # ─── Arcanoïde (arkanoid) ───
+    - id: page_arkanoid
+      skip: true
+      scrollbar_mode: "OFF"
+      widgets:
+        - !include ../ui_components/arkanoid_game.yaml
+
+    # ─── Neon Apron (pinball — PORTRAIT 720×1280) ───
+    - id: page_pinball
+      skip: true
+      scrollbar_mode: "OFF"
+      widgets:
+        - !include ../ui_components/pinball_game.yaml
+
+    # ─── Coureur d'Or (lode) ───
+    - id: page_lode
+      skip: true
+      scrollbar_mode: "OFF"
+      widgets:
+        - !include ../ui_components/lode_game.yaml
+
+    # ─── Go Tab ───
+    - id: page_go
+      skip: true
+      scrollbar_mode: "OFF"
+      widgets:
+        - !include ../ui_components/go_game.yaml
+
+    # ─── Trial Poursuite (trivia) ───
+    - id: page_trivia
+      skip: true
+      scrollbar_mode: "OFF"
+      widgets:
+        - !include ../ui_components/trivia_game.yaml
+
+    # ─── Roi Noir (chess) ───
+    - id: page_chess
+      skip: true
+      scrollbar_mode: "OFF"
+      widgets:
+        - !include ../ui_components/chess_game.yaml
+
+    # ─── Dames Tab (draughts) ───
+    - id: page_draughts
+      skip: true
+      scrollbar_mode: "OFF"
+      widgets:
+        - !include ../ui_components/draughts_game.yaml
+
+
+script:
+  # Ouvre le jeu « Fil d'Or » (page LVGL dédiée, marble_game.cpp).
+  # Script unique appelé par le sélecteur arcade : la construction de Marble::UI
+  # ne vit qu'à un seul endroit. `id(...)` n'étant utilisable que dans une lambda,
+  # les pointeurs LVGL et les polices sont injectés ici plutôt que dans le C++.
+  - id: tab5_marble_open
+    mode: single
+    then:
+      - lambda: |-
+          Marble::UI ui;
+          ui.root    = id(marble_root);
+          ui.field   = id(marble_field);
+          ui.hud     = id(marble_hud);
+          ui.panel   = id(marble_panel);
+          ui.lvgl    = id(tab5_lvgl);
+          ui.home_idx = id(page_arcade)->index;  // plus d'index en dur (audit 25/09, lot 5)
+          ui.f_small = id(roboto_22);
+          ui.f_mid   = id(roboto_32_b);
+          ui.f_big   = id(roboto_45_b);
+          Marble::open(ui);
+
+  # Ouvre le jeu « Arcanoïde » (casse-briques rétro, arkanoid_game.cpp).
+  # Même pattern que Marble : script unique, pointeurs LVGL injectés en lambda.
+  - id: tab5_arkanoid_open
+    mode: single
+    then:
+      - lambda: |-
+          Arkanoid::UI ui;
+          ui.root    = id(arkanoid_root);
+          ui.field   = id(arkanoid_field);
+          ui.hud     = id(arkanoid_hud);
+          ui.panel   = id(arkanoid_panel);
+          ui.lvgl    = id(tab5_lvgl);
+          ui.home_idx = id(page_arcade)->index;  // plus d'index en dur (audit 25/09, lot 5)
+          ui.f_small = id(roboto_22);
+          ui.f_mid   = id(roboto_32_b);
+          ui.f_big   = id(roboto_45_b);
+          Arkanoid::open(ui);
+
+  # Ouvre le jeu « Coureur d'Or » (Lode Runner, lode_game.cpp).
+  # Même pattern : script unique, pointeurs LVGL injectés en lambda.
+  - id: tab5_lode_open
+    mode: single
+    then:
+      - lambda: |-
+          Lode::UI ui;
+          ui.root    = id(lode_root);
+          ui.field   = id(lode_field);
+          ui.hud     = id(lode_hud);
+          ui.panel   = id(lode_panel);
+          ui.pad     = id(lode_pad);
+          ui.lvgl    = id(tab5_lvgl);
+          ui.home_idx = id(page_arcade)->index;  // plus d'index en dur (audit 25/09, lot 5)
+          ui.f_small = id(roboto_22);
+          ui.f_mid   = id(roboto_32_b);
+          ui.f_big   = id(roboto_45_b);
+          auto t = id(sntp_time).now();
+          if (t.is_valid()) ui.epoch = t.timestamp;
+          Lode::open(ui);
+
+  # Ouvre le jeu « Go Tab » (Go 9×9 / 13×13 / 19×19).
+  # f_mono sert à la liste des coups du panneau latéral : en police
+  # proportionnelle, « A1 » et « T19 » ne s'alignent pas et la colonne danse.
+  - id: tab5_go_open
+    mode: single
+    then:
+      - lambda: |-
+          Go::UI ui;
+          ui.root    = id(go_root);
+          ui.field   = id(go_field);
+          ui.hud     = id(go_hud);
+          ui.panel   = id(go_panel);
+          ui.lvgl    = id(tab5_lvgl);
+          ui.home_idx = id(page_arcade)->index;  // plus d'index en dur (audit 25/09, lot 5)
+          ui.f_small = id(roboto_22);
+          ui.f_mid   = id(roboto_32_b);
+          ui.f_big   = id(roboto_45_b);
+          ui.f_mono  = id(roboto_22);
+          Go::open(ui);
+
+  # Ouvre le jeu « Trial Poursuite » (Trivial Pursuit rétro-salon, trivia_game.cpp).
+  # Même pattern : script unique, pointeurs LVGL injectés en lambda.
+  - id: tab5_trivia_open
+    mode: single
+    then:
+      - lambda: |-
+          Trivia::UI ui;
+          ui.root    = id(trivia_root);
+          ui.hud     = id(trivia_hud);
+          ui.board   = id(trivia_board);
+          ui.panel   = id(trivia_panel);
+          ui.lvgl    = id(tab5_lvgl);
+          ui.home_idx = id(page_arcade)->index;  // plus d'index en dur (audit 25/09, lot 5)
+          ui.f_small = id(roboto_22);
+          ui.f_mid   = id(roboto_32_b);
+          ui.f_big   = id(roboto_45_b);
+          Trivia::open(ui);
+
+  # Ouvre le jeu « Roi Noir » (échiquier FIDE + IA embarquée, chess_game.cpp).
+  # Même pattern que Marble : script unique, pointeurs LVGL injectés en lambda.
+  # Le 5e calque (menus) est créé en C++, il n'y a donc rien à injecter pour lui.
+  - id: tab5_chess_open
+    mode: single
+    then:
+      - lambda: |-
+          Chess::UI ui;
+          ui.root    = id(chess_root);
+          ui.hud     = id(chess_hud);
+          ui.board   = id(chess_board);
+          ui.panel   = id(chess_panel);
+          ui.lvgl    = id(tab5_lvgl);
+          ui.home_idx = id(page_arcade)->index;  // plus d'index en dur (audit 25/09, lot 5)
+          ui.f_small = id(roboto_22);
+          ui.f_mid   = id(roboto_32_b);
+          ui.f_big   = id(roboto_45_b);
+          // Figurines d'échecs : police dédiée (Tab5/fonts/ChessPieces.ttf, 12 glyphes).
+          ui.f_piece = id(chess_pieces_80);
+          Chess::open(ui);
+
+  # Ouvre le jeu « Dames » (draughts_game.cpp).
+  # Même pattern que Marble : script unique, pointeurs LVGL injectés en lambda.
+  - id: tab5_draughts_open
+    mode: single
+    then:
+      - lambda: |-
+          Draughts::UI ui;
+          ui.root    = id(draughts_root);
+          ui.field   = id(draughts_field);
+          ui.hud     = id(draughts_hud);
+          ui.panel   = id(draughts_panel);
+          ui.lvgl    = id(tab5_lvgl);
+          ui.home_idx = id(page_arcade)->index;  // plus d'index en dur (audit 25/09, lot 5)
+          ui.f_small = id(roboto_22);
+          ui.f_mid   = id(roboto_32_b);
+          ui.f_big   = id(roboto_45_b);
+          Draughts::open(ui);
+
+  # Ouvre le flipper « Neon Apron » (pinball_game.cpp).
+  # Même pattern que Marble, avec DEUX injections en plus :
+  #   - f_score / f_led : le fronton imite un afficheur de borne. roboto_55_b ne
+  #     contient QUE les chiffres et l'espace (cf. tab5-styles.yaml) — parfait
+  #     pour le score, inutilisable pour du texte ; roboto_22 sert aux libellés
+  #     (« BILLE 2 / 3 », « RECORD 1 250 000 » — en roboto_mono_24 jusqu'à
+  #     l'essai D8 du 26/09/2026, qui a retiré les polices monospace).
+  #   - ui.lvgl : pointeur sur le LvglComponent. C'est LUI qui permet à
+  #     Pinball::open() de basculer l'écran en portrait 720×1280 et à
+  #     Pinball::close() de restaurer le paysage 270°. Sans lui, le jeu
+  #     s'ouvrirait couché sur le côté. Voir [AI-CONTEXT] ORIENTATION dans
+  #     pinball_game.cpp.
+  - id: tab5_pinball_open
+    mode: single
+    then:
+      - lambda: |-
+          Pinball::UI ui;
+          ui.root    = id(pinball_root);
+          ui.field   = id(pinball_field);
+          ui.hud     = id(pinball_hud);
+          ui.panel   = id(pinball_panel);
+          ui.lvgl    = id(tab5_lvgl);
+          ui.home_idx = id(page_arcade)->index;  // plus d'index en dur (audit 25/09, lot 5)
+          ui.f_small = id(roboto_22);
+          ui.f_mid   = id(roboto_32_b);
+          ui.f_big   = id(roboto_45_b);
+          ui.f_score = id(roboto_55_b);
+          ui.f_led   = id(roboto_22);
+          Pinball::open(ui);
+
+  # Ouvre le sélecteur arcade (page_arcade). Point d'entrée unique depuis le
+  # dashboard : le geste « arcade » (tap du bouton manette en « auto ») et « Jeux » de la
+  # roue de navigation, par tab5_ecran_ouvrir (le tap sur la température serre jusqu'au
+  # 10/10/2026, ADR-0051). Ferme d'abord tout jeu en cours.
+  - id: tab5_arcade_open
+    mode: single
+    then:
+      - script.execute: tab5_games_close_all
+      - lvgl.page.show: page_arcade
+
+  # PRISE du socle (ADR-0065) : l'on_boot -100 de tab5-ha-hmi.yaml (et de
+  # tab5-rendu-host.yaml) la lance juste après avoir traduit page_main, avant la première
+  # image. Les pages du module ; tab5-arcade-absente.yaml en a une vide.
+  - id: tab5_jeux_traduire
+    mode: single
+    then:
+      - lambda: |-
+          i18n_apply_boot({id(page_arcade)->obj, id(page_marble)->obj, id(page_arkanoid)->obj,
+                           id(page_pinball)->obj, id(page_lode)->obj, id(page_go)->obj,
+                           id(page_trivia)->obj, id(page_chess)->obj, id(page_draughts)->obj});

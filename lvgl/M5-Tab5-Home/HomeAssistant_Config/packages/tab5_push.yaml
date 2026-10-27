@@ -1,0 +1,1124 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file packages/tab5_push.yaml
+# @role Tout ce que Home Assistant fait POUR le Tab5 hors packages dédiés : les
+#       automatisations qui poussent les données vers l'écran (push-only, cf.
+#       Tab5/README.md) et les scripts de poussée `tab5_push_*`. Les appareils de la
+#       maison (lumières, clim, PC, TV,
+#       plantes…) et la réponse des zones sont dans le blueprint « Tab5 —
+#       emplacements » depuis le lot 6a (ADR-0019). La météo
+#       « pluie dans l'heure » et « vigilances » arrive par les capteurs normalisés de
+#       packages/tab5_meteo_sources.yaml (lot 4c-2), quel que soit le fournisseur.
+# @langue Depuis le lot 4c (27/09/2026), HA n'envoie plus de phrases françaises au
+#       Tab5 : des codes (pluie « @niveau,début », bandeau « @ha|… », alertes
+#       « @maj: » / « @indispo: ») que la tablette compose dans SA langue. Déployer ce
+#       package APRÈS le firmware du lot 4c : un firmware plus ancien afficherait les
+#       codes tels quels.
+# @source_unique Depuis le 26/09/2026 (lot 3 de l'audit « ouverture »), ce fichier
+#       est ce qui tourne sur le HA de l'auteur : tel quel depuis le 28/09/2026
+#       (ADR-0024, plus de placeholder ; tools/render_ha_config.py n'est plus qu'une
+#       copie). Il remplace les trois fichiers d'exemples à fusionner à la main
+#       (automations_examples.yaml.example, scripts_examples.yaml,
+#       template_sensors_examples.yaml) et les copies privées dont ils étaient tirés.
+#       Ne plus modifier ces automatisations dans l'interface HA : elles y sont en
+#       lecture seule ; modifier ce fichier, déployer.
+# @install `homeassistant: packages: !include_dir_named packages` dans
+#       configuration.yaml, puis ce fichier dans config/packages/. Rien à renseigner
+#       (ADR-0024) : l'agenda de travail, le téléphone et le capteur de présence se
+#       choisissent dans HA (listes « Tab5 · … », packages/tab5_reglages.yaml), la
+#       source des prévisions aussi (« Tab5 · forecast source »), et les
+#       entités de chaque écran sont trouvées par le modèle de l'appareil
+#       (tab5_cibles / tab5_entite, custom_templates/tab5_tablette.jinja, ADR-0071),
+#       quel que soit son nom.
+#       Modèles importés : custom_templates/tab5_calendar.jinja (jour travaillé des
+#       prévisions jours, depuis le 07/10/2026) et tab5_alertes.jinja (historique des
+#       alertes), à déployer et recharger AVANT ce package, sinon ces payloads ne se
+#       rendent pas. Depuis le 08/10/2026 (audit du 07/10, HA-7), aussi
+#       tab5_tablette.jinja (« tablette connectée », garde d'origine) : sans lui, les
+#       gardes échouent à l'import et rien ne part.
+# @architecture_constraint Chaque `action: esphome.tab5_ha_hmi_tab5_maj_*` correspond à
+#       un service `api: services:` déclaré dans Tab5/paquets/tab5-api-logic.yaml, et ses clés
+#       `data:` à ses `variables:`, ni plus ni moins. Ne JAMAIS renommer un service ou
+#       une variable ici sans le pendant firmware (et vice-versa) : HA refuse l'appel
+#       (« Action … not found », argument manquant ou en trop), l'erreur n'est que
+#       dans son journal, et le script s'arrête là (continue_on_error ne la rattrape
+#       pas) : les poussées suivantes ne partent pas. tests/test_contrat.py compare.
+# @payload_contract Les payloads bulk (jours/heures/pluie 1h/alerte météo) sont des
+#       chaînes délimitées par `;`/`|` — le format doit matcher EXACTEMENT ce que
+#       parse_and_update_*_bulk() (Tab5/ecran/tab5_*.cpp) attend en nombre de champs.
+#       HA retire les espaces en tête et en fin du rendu d'un template (vérifié le
+#       26/09/2026) : les retours à la ligne entre les `{% set %}` ne partent pas.
+# @ai_instruction Pas de `delay:` entre les envois (retirés le 01/10/2026). Les six
+#       pauses d'une seconde dataient de juillet, quand une poussée faisait une
+#       vingtaine d'appels en boucle ; leur raison (« ne pas saturer le socket TCP avec
+#       le flux audio ») n'a jamais été mesurée. Avec 8 envois groupés, elles ne
+#       faisaient que retarder l'écran : complet 6 s après tab5_connected au
+#       redémarrage du 01/10 (19:51), alors que le blueprint envoyait déjà 6 appels en
+#       60 ms en parallèle. L'ordre des envois, lui, est garanti par la séquence.
+#       Le découpage en blocs reste : le firmware rejette un payload de plus de 2048 o
+#       (tab5_forecast.cpp).
+# @ai_warning `now()` ne doit JAMAIS être passé brut à un service HA (`{{ now() }}`) —
+#       toujours via `.strftime(...)` explicite. Un datetime brut (microsecondes
+#       incluses) peut casser silencieusement toute la suite de l'automation.
+# @ai_instruction `continue_on_error: true` + les gardes `is defined else []` sur
+#       `daily_var`/`hourly_var_tab5` évitent qu'un échec ponctuel de `calendar.get_events`
+#       ou `weather.get_forecasts` (API externe temporairement indisponible) ne bloque
+#       tout le reste de la poussée écran.
+# ============================================================================
+
+# Plus de garde-fou `input_boolean.is_primary_active` depuis la 3.8 (audit du
+# 07/10/2026, décision d'Axel). Vestige de l'ancienne bascule entre deux instances HA
+# (ADR-0008), il conditionnait toutes les poussées : resté à `off`, il figeait l'écran
+# sans aucune erreur (docs/troubleshooting.md). Avec lui sont partis l'automatisation
+# `force_primary_active_on_boot`, le déclencheur `resync` de la poussée complète et la
+# garde (a) de tab5_health.yaml. Ne pas le remettre : tests/test_sans_secret.py.
+
+automation:
+  - alias: "Tab5 — full screen push"
+    # queued, plus single (audit du 07/10/2026, HA-1) : un passage dure plusieurs
+    # secondes (calendar.get_events, weather.get_forecasts, attente de la liaison
+    # jusqu'à 10 s). En single, un esphome.tab5_connected arrivé pendant ce temps était
+    # abandonné (« Already running »), alors que la météo actuelle, les probabilités et
+    # le volet ne partent QU'à la (re)connexion : ils restaient ceux d'avant la coupure.
+    # En file, il repart juste après. max 3 : la reconnexion, le passage des 10 min et
+    # un changement d'agenda tiennent ; au-delà, rien de neuf à pousser (chaque passage
+    # relit l'état courant), abandon sans avertissement.
+    mode: queued
+    max: 3
+    max_exceeded: silent
+    id: tab5_ha_hmi_updater
+    description: >-
+      Poussée complète du Tab5. Prévisions jours/heures et pluie à chaque passage ;
+      météo actuelle, probabilités et volet seulement à la (re)connexion et au
+      démarrage de HA (ils ont leurs automatisations au changement, plus bas ; la clim
+      est dans le blueprint « Tab5 — emplacements »).
+    triggers:
+      # PAS de déclencheur `state:` sur l'entité weather.* ici (retiré le 26/08/2026) :
+      # `weather.*` et `sensor.*_next_rain` viennent du même coordinateur
+      # Météo-France et se déclenchent à ~0,8 s d'intervalle — le second tombait
+      # toujours pendant l'exécution du premier et était abandonné
+      # (« Already running » ×249 en 5 jours). La carte météo a son automatisation au
+      # changement (`tab5_ha_hmi_meteo_push`, plus bas), la clim et le volet aussi.
+      # Plus de déclencheur sur sensor.tab5_pluie_dans_l_heure (audit du 07/10/2026,
+      # PERF-3) : un changement du code de pluie relançait toute la chaîne (calendrier
+      # 15 j, prévisions, ~8 envois) pour les seules 9 barres. La poussée légère
+      # (tab5_ha_hmi_alerts_push, plus bas), qui l'écoutait déjà, pousse maintenant le
+      # code ET les barres ; ici, les barres partent encore à chaque passage (10 min,
+      # (re)connexion, démarrage de HA). Piège à retenir : un trigger `state:` nu se
+      # déclenche AUSSI sur les changements d'attributs (`to: ~` = état seulement,
+      # 25/09/2026 : sans lui, chaque rafraîchissement Météo-France relançait tout).
+      # Toutes les 10 min : prévisions (l'heure et le jour avancent), pluie, alertes HA
+      # (les capteurs « problem » et le compte d'indisponibles n'ont pas d'autre déclencheur).
+      - trigger: time_pattern
+        minutes: "/10"
+      # Émis par le firmware à chaque (re)connexion du client API HA (on_client_connected).
+      - trigger: event
+        event_type: esphome.tab5_connected
+        id: tab5_connected
+      # Démarrage de HA : la tablette, restée allumée, se reconnecte souvent AVANT que
+      # les automatisations soient actives, et son tab5_connected est perdu (HA 2026.9.4
+      # le 28/09/2026 : événement vers 21:11:14, automatisations actives à 21:11:16).
+      # Prévisions et pluie repartaient au passage des 10 min, mais la météo actuelle,
+      # les probabilités et le volet restaient ceux d'avant la coupure jusqu'à leur
+      # prochain changement. Ce déclencheur part au moment où les automatisations
+      # deviennent actives et suit le chemin de la reconnexion. Tablette pas encore
+      # reconnectée : la garde « tablette connectée » arrête, et son tab5_connected,
+      # émis plus tard, sera entendu.
+      - trigger: homeassistant
+        event: start
+        id: demarrage_ha
+      # Agenda de travail choisi (« Tab5 · work calendar ») : un événement commence,
+      # finit, ou le suivant change. Miroir sensor.tab5_agendas (tab5_reglages.yaml) :
+      # un déclencheur `state:` ne prend pas d'entity_id calculé.
+      - trigger: state
+        entity_id: sensor.tab5_agendas
+        attribute: travail
+      # Autre source des prévisions choisie (« Tab5 · forecast source »), ou repli
+      # sur une autre source pendant que la choisie est indisponible, et retour : les
+      # tuiles jours et heures suivent tout de suite, pas au passage des 10 min.
+      - trigger: state
+        entity_id: sensor.tab5_meteo
+        attribute: entite_effective
+      # NB : les déclencheurs "légers" (code et barres de pluie, vigilance météo,
+      # alertes à lire) sont gérés par l'automation dédiée `tab5_ha_hmi_alerts_push`
+      # ci-dessous — ils ne relancent PAS la chaîne prévisions/calendrier complète.
+
+    conditions:
+      # Garde d'origine (audit sécurité du 30/09/2026) : tab5_connected ne compte que
+      # s'il vient d'une tablette, reconnue au modèle de son appareil comme dans
+      # tab5_evenements.yaml ; un autre appareil ESPHome ne relance pas la chaîne. Les
+      # autres déclencheurs passent. tests/test_garde_origine.py.
+      - alias: "tab5_connected : seulement depuis une tablette (modele tab5-ha-hmi)"
+        condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_origine -%}
+          {{ tab5_origine(trigger) == 'oui' }}
+      # Seul un vrai (re)démarrage de la liaison compte : liaison `on` depuis moins de
+      # 3 min. Le firmware n'émet l'événement qu'à la connexion depuis le 25/09/2026 ;
+      # la garde reste contre un événement réémis. Le capteur « HA API Status » est
+      # cherché par le modèle de l'appareil (tab5-ha-hmi, bloc `project:` du firmware),
+      # pas par son nom : une condition d'état sur une entité absente (tablette
+      # renommée) bloquait toute la poussée complète (test « HA neuf », 28/09/2026).
+      # Elle ne regarde que tab5_connected : au démarrage de HA (demarrage_ha), la
+      # liaison peut être `on` depuis plus longtemps, la poussée part quand même.
+      # Le capteur est celui de la tablette qui a émis l'événement (device_id) : avec
+      # deux écrans, celui de l'autre, connecté depuis longtemps, bloquait la poussée de
+      # celui qui venait de redémarrer (25/10/2026, tests/test_garde_origine.py).
+      - alias: "tab5_connected : seulement si la liaison API vient de (re)demarrer (garde contre un evenement reemis)"
+        condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_api -%}
+          {%- set api = tab5_api(trigger.event.data.device_id | default('', true) | string)
+                if trigger.id == 'tab5_connected' else '' -%}
+          {%- set depuis = states[api].last_changed if api and is_state(api, 'on') else none -%}
+          {{ trigger.id != 'tab5_connected' or depuis is none
+             or (now() - depuis).total_seconds() < 180 }}
+
+    actions:
+      # ====== 0. RECONNEXION : attendre que la liaison API soit prête ======
+      # Le firmware émet `esphome.tab5_connected` dès qu'un client API se connecte,
+      # parfois avant que l'intégration HA ait fini d'authentifier sa connexion :
+      # les premiers appels partaient alors en « Authenticated connection not ready
+      # yet » à chaque reboot (704 occurrences dans les logs HA entre le 02 et le
+      # 08/09/2026). `wait_template` passe immédiatement si l'entité est déjà `on`.
+      # Plusieurs écrans (25/10/2026) : sur tab5_connected, la liaison de L'ÉCRAN qui se
+      # connecte (`appareil`), et les envois ne vont qu'à lui ; avant, l'attente passait
+      # dès qu'un autre écran était connecté et la 7B redémarrée n'était pas servie.
+      # Les scripts appelés reçoivent `appareil` ; vide (autres déclencheurs) : chaque
+      # écran connecté, comme avant.
+      - variables:
+          appareil: >-
+            {%- from 'tab5_tablette.jinja' import tab5_appareil_connexion -%}
+            {{ tab5_appareil_connexion(trigger) }}
+      - if:
+          - condition: trigger
+            id: tab5_connected
+        then:
+          - wait_template: &tab5_connectee >-
+              {%- from 'tab5_tablette.jinja' import tab5_pret -%}
+              {{ tab5_pret(appareil | default('')) == 'oui' }}
+            timeout: "00:00:10"
+            continue_on_timeout: true
+      # Tablette absente (pas encore ajoutée dans HA, packages installés d'abord comme
+      # le dit le guide) ou hors ligne : on s'arrête ici, sans erreur. Sans cette
+      # garde, chaque démarrage de HA écrivait une dizaine d'ERREURS « Action …
+      # not found » (test « HA neuf », 28/09/2026).
+      - condition: template
+        value_template: *tab5_connectee
+
+      # ====== 1, 7, 7b. VIGILANCE + BANDEAU INFO + ALERTES HA ======
+      # Script partagé avec la poussée légère (section `script:`) : une seule copie
+      # du Jinja, un seul relevé des MAJ / capteurs « problem » par passage. Le filtre
+      # d'acquittement et le compte d'indisponibles viennent de packages/tab5_alerts.yaml.
+      - action: script.tab5_push_alertes
+        continue_on_error: true
+        data:
+          vigilance_seule: false
+          appareil: "{{ appareil }}"
+
+      # ====== 3-4. METEO ACTUELLE + PROBABILITES : seulement à la (re)connexion ======
+      # (ou au démarrage de HA). Au changement : tab5_ha_hmi_meteo_push. Avant le
+      # 26/09/2026, ces deux envois partaient toutes les 10 min et le firmware les
+      # repeignait à chaque fois.
+      - if:
+          - condition: trigger
+            id: [tab5_connected, demarrage_ha]
+        then:
+          - action: script.tab5_push_meteo
+            continue_on_error: true
+            data:
+              appareil: "{{ appareil }}"
+
+      # ====== 4b. METEO PLUIE 1H (9 barres en UN appel : 0,5,10,15,20,25 puis 35,45,55) ======
+      # Script partagé avec la poussée légère, qui l'appelle au changement du code ou
+      # des barres de pluie (section `script:`).
+      - action: script.tab5_push_pluie
+        continue_on_error: true
+        data:
+          appareil: "{{ appareil }}"
+
+      # ====== 5. PREVISIONS JOURS (BULK - 1 seul appel au lieu de 15) ======
+      # Source des prévisions (lot 4c-3) : l'entité weather.* choisie dans HA, lue sur
+      # sensor.tab5_meteo (packages/tab5_meteo_sources.yaml), avec ce qu'elle sait
+      # fournir. type_jours = daily, sinon twice_daily (NWS), sinon hourly
+      # (OpenWeatherMap gratuit) : les deux derniers sont regroupés par date plus bas.
+      # Jamais un type non géré : HA lèverait une erreur à chaque passage (rattrapée
+      # par continue_on_error, mais écrite dans le journal). Variables AU NIVEAU de la
+      # séquence : une variable posée dans un if/then n'en sortirait pas.
+      # Agenda de travail : celui de la liste « Tab5 · work calendar », vide s'il
+      # n'est pas choisi ou n'existe plus (tous les jours en repos, planning vide).
+      # Chaque appel est sous un `if` : une cible vide lève une erreur que
+      # continue_on_error ne rattrape pas (script.py de HA : NoEntitySpecifiedError).
+      # La réponse d'un appel dans un `if` reste lisible après : une variable nouvelle
+      # est créée au niveau de la séquence (ScriptRunVariables._assign, HA 2026.9).
+      # meteo : l'entité EFFECTIVE (la choisie, ou son repli tant qu'elle est
+      # indisponible, custom_templates/tab5_meteo.jinja). meteo_en_panne : une source
+      # existe mais aucune ne répond ; les prévisions ne partent pas (la tablette garde
+      # les dernières) au lieu de jours vides. Sans aucune entité météo, comme avant.
+      - variables:
+          meteo: "{{ state_attr('sensor.tab5_meteo', 'entite_effective') or '' }}"
+          meteo_en_panne: >-
+            {{ (state_attr('sensor.tab5_meteo', 'entite_effective') or '') == ''
+               and (state_attr('sensor.tab5_meteo', 'entite') or '') != '' }}
+          type_jours: "{{ state_attr('sensor.tab5_meteo', 'type_jours') or '' }}"
+          heures_ok: "{{ state_attr('sensor.tab5_meteo', 'heures_ok') | default(false, true) }}"
+          agenda: >-
+            {%- set a = states('select.tab5_agenda_de_travail') -%}
+            {{ a if a.startswith('calendar.') and expand(a) | count > 0 else '' }}
+          # Mots des événements de travail (« Tab5 · work event keyword »,
+          # tab5_reglages.yaml), en minuscules ; liste vide = tout l'agenda de travail.
+          mots_travail: >-
+            {%- set m = states('input_text.tab5_mot_travail') -%}
+            {{ [] if m in ['unknown', 'unavailable'] else m.split(',') | map('trim') | map('lower') | reject('eq', '') | list }}
+      - if:
+          - condition: template
+            value_template: "{{ agenda != '' }}"
+        then:
+          - action: calendar.get_events
+            continue_on_error: true
+            data:
+              start_date_time: "{{ now().strftime('%Y-%m-%d 00:00:00') }}"
+              end_date_time: "{{ (now() + timedelta(days=15)).strftime('%Y-%m-%d 23:59:59') }}"
+            target:
+              entity_id: "{{ agenda }}"
+            response_variable: agenda_events
+      - if:
+          - condition: template
+            value_template: "{{ meteo != '' }}"
+        then:
+          - action: weather.get_forecasts
+            continue_on_error: true
+            data:
+              type: "{{ type_jours or 'daily' }}"
+            target:
+              entity_id: "{{ meteo }}"
+            response_variable: daily_var
+      - if:
+          - condition: template
+            value_template: "{{ not meteo_en_panne }}"
+        then:
+          - repeat:
+              for_each: >-
+                {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+                {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+              sequence:
+                - variables:
+                    tablette: "{{ repeat.item }}"
+                - action: "esphome.{{ tablette }}_tab5_maj_previsions_jours_bulk"
+                  continue_on_error: true
+                  data:
+                    payload: >
+                      {% from 'tab5_calendar.jinja' import couvre, ev_start, ev_end, ev_summary %}
+                      {% set brut = daily_var.get(meteo, {}).get('forecast', []) if daily_var is defined else [] %}
+                      {% if type_jours in ['twice_daily', 'hourly'] %}
+                        {# Regroupement par date locale (lot 4c-3) : max des températures, min des
+                           minimales (ou des températures, la nuit NWS n'a que `temperature`),
+                           condition de la période de jour (is_daytime, NWS), sinon d'un créneau de 12 h à 18 h,
+                           sinon du premier du jour.
+                           On s'arrête au premier jour sans données : la suite reste « passée ». #}
+                        {% set agg = namespace(l=[], fini=false) %}
+                        {% for j in range(15) %}
+                          {% set d = (now() + timedelta(days=j)).strftime('%Y-%m-%d') %}
+                          {% set jn = namespace(tmax=none, tmin=none, cond=none, cond_pm=none, cond_jour=none) %}
+                          {% for e in brut %}
+                            {% set dt = e.get('datetime') | as_datetime %}
+                            {% if dt is not none and (dt | as_local).strftime('%Y-%m-%d') == d %}
+                              {% set tt = e.get('temperature') %}
+                              {% set tl = e.get('templow') if e.get('templow') is not none else tt %}
+                              {% if tt is not none and (jn.tmax is none or tt > jn.tmax) %}{% set jn.tmax = tt %}{% endif %}
+                              {% if tl is not none and (jn.tmin is none or tl < jn.tmin) %}{% set jn.tmin = tl %}{% endif %}
+                              {% if jn.cond is none %}{% set jn.cond = e.get('condition') %}{% endif %}
+                              {% if jn.cond_pm is none and 12 <= (dt | as_local).hour < 18 %}{% set jn.cond_pm = e.get('condition') %}{% endif %}
+                              {% if jn.cond_jour is none and e.get('is_daytime') == true %}{% set jn.cond_jour = e.get('condition') %}{% endif %}
+                            {% endif %}
+                          {% endfor %}
+                          {% if jn.tmax is none %}{% set agg.fini = true %}{% endif %}
+                          {% if not agg.fini %}
+                            {% set agg.l = agg.l + [{'condition': jn.cond_jour or jn.cond_pm or jn.cond, 'temperature': jn.tmax, 'templow': jn.tmin}] %}
+                          {% endif %}
+                        {% endfor %}
+                        {% set fcasts = agg.l %}
+                      {% else %}
+                        {% set fcasts = brut %}
+                      {% endif %}
+                      {% set days_names = ["Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"] %}
+                      {% set ns = namespace(result="") %}
+                      {% for i in range(15) %}
+                        {% set target_dt = now() + timedelta(days=i) %}
+                        {% set target_date = target_dt.strftime('%Y-%m-%d') %}
+                        {# Jour seul, SANS date : la page d'accueil (aujourd'hui + 4 jours) l'affiche
+                           tel quel ; les deux pages suivantes (jours 5 à 14) calculent elles-mêmes
+                           « Lun 05 » via SNTP (tab5_forecast.cpp, format_short_day_label). #}
+                        {% if i == 0 %}
+                          {% set nom_jour = "Auj" %}
+                        {% else %}
+                          {% set nom_jour = days_names[target_dt.strftime('%w') | int] %}
+                        {% endif %}
+                        {# .get() et jamais fcasts[i].cle : Météo-France omet des clés en fin de
+                           plage (templow absent du 15e jour le 18/09/2026) et un accès direct lève
+                           UndefinedError AVANT le | float(0) — payload jamais rendu, action sautée
+                           en silence par continue_on_error, icônes figées. #}
+                        {% set condition = fcasts[i].get('condition') | default('unknown', true) if i < fcasts|length else 'unknown' %}
+                        {% set tmin = fcasts[i].get('templow') | float(0) if i < fcasts|length else 0 %}
+                        {% set tmax = fcasts[i].get('temperature') | float(0) if i < fcasts|length else 0 %}
+                        {% set est_passe = 'false' if i < fcasts|length else 'true' %}
+                        {% set est_dimanche = target_dt.strftime('%w') == '0' %}
+                        {# Jour travaillé : la macro couvre() du calendrier (custom_templates/
+                           tab5_calendar.jinja, audit du 07/10/2026, HA-3), la même que le popup
+                           calendrier : jour du début pour un événement horodaté, [début, fin[ pour une
+                           journée entière (le jour de fin est exclu, comme le rend HA). Avant, un
+                           test de sous-chaîne sur le début OU la fin comptait aussi le lendemain
+                           d'une journée entière et le jour de fin d'un horodaté, et oubliait les
+                           jours du milieu d'un événement de plusieurs jours. Heures : inchangées,
+                           celles du dernier événement de travail qui COMMENCE ce jour-là. #}
+                        {% set ns_travail = namespace(found=false, heures="") %}
+                        {% if agenda_events is defined and agenda in agenda_events %}
+                          {% for event in agenda_events[agenda].events %}
+                            {% set debut_ev = ev_start(event) %}
+                            {% set ev_msg = ev_summary(event) %}
+                            {% if couvre(event, target_date) and (mots_travail | count == 0 or mots_travail | select('in', ev_msg | lower) | list | count > 0) %}
+                              {% set ns_travail.found = true %}
+                              {% if debut_ev[:10] == target_date %}
+                                {% set start_dt = debut_ev | as_datetime %}
+                                {% set end_dt = ev_end(event) | as_datetime %}
+                                {% set ns_travail.heures = start_dt.strftime('%H:%M') ~ "-" ~ end_dt.strftime('%H:%M') %}
+                              {% endif %}
+                            {% endif %}
+                          {% endfor %}
+                        {% endif %}
+                        {% set est_repos = not ns_travail.found %}
+                        {% set ns.result = ns.result ~ i ~ "|" ~ nom_jour ~ "|" ~ condition ~ "|" ~ tmin ~ "|" ~ tmax ~ "|" ~ ("1" if est_repos else "0") ~ "|" ~ ("1" if est_dimanche else "0") ~ "|" ~ ("1" if est_passe == 'true' else "0") ~ "|" ~ ns_travail.heures ~ ";" %}
+                      {% endfor %}
+                      {{ ns.result }}
+      # ====== 6 + X. VOLET : seulement à la (re)connexion (ou au démarrage de HA) ======
+      # Au changement : tab5_volet_updater (volet_serre_tracking.yaml). La clim et
+      # les appareils de la maison sont poussés par le blueprint « Tab5 —
+      # emplacements » depuis le lot 6a (ADR-0019).
+      - if:
+          - condition: trigger
+            id: [tab5_connected, demarrage_ha]
+        then:
+          - action: script.tab5_push_volet
+            continue_on_error: true
+            data:
+              appareil: "{{ appareil }}"
+
+      # ====== Y. PLANNING HORAIRE ======
+      # SUPPRIMÉ : bandeau dérivé sur le Tab depuis le bulk jours
+      # (build_planning_lines_from_jours). Service tab5_maj_planning conservé en compat.
+
+      # ====== 8. PREVISIONS HORAIRES (BULK - 2 chunks de 5 via repeat) ======
+      # Sans prévisions horaires (Buienradar…), on demande un type géré et on ignore
+      # la réponse (heures_ok faux) : tuiles vides, aucune erreur dans le journal.
+      - if:
+          - condition: template
+            value_template: "{{ meteo != '' }}"
+        then:
+          - action: weather.get_forecasts
+            continue_on_error: true
+            data:
+              type: "{{ 'hourly' if heures_ok else (type_jours or 'daily') }}"
+            target:
+              entity_id: "{{ meteo }}"
+            response_variable: hourly_var_tab5
+      # 3 chunks de 5 créneaux (0-4, 5-9, 10-14) — l'ancienne triple copie du même bloc
+      # ne différait que par les bornes range() (#3). base = (repeat.index-1)*5.
+      # Les tuiles n'affichent que 0-9 (deux pages horaires) ; le bloc 10-14, retiré le
+      # 25/09/2026 faute d'écran, revient le 09/10/2026 : le popup Météo (ADR-0043)
+      # montre les 15 heures. Un firmware plus ancien l'accepte sans l'afficher.
+      - if:
+          - condition: template
+            value_template: "{{ not meteo_en_panne }}"
+        then:
+          - repeat:
+              for_each: >-
+                {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+                {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+              sequence:
+                - variables:
+                    tablette: "{{ repeat.item }}"
+                - repeat:
+                    count: 3
+                    sequence:
+                      - action: "esphome.{{ tablette }}_tab5_maj_previsions_heures_bulk"
+                        continue_on_error: true
+                        data:
+                          payload: >
+                            {% set base = (repeat.index - 1) * 5 %}
+                            {% set fcasts = hourly_var_tab5.get(meteo, {}).get('forecast', []) if hourly_var_tab5 is defined and heures_ok else [] %}
+                            {# Icônes de nuit (discussion #278, 03/10/2026) : Met.no range « beau » et
+                               « peu nuageux » de nuit sous partlycloudy (met/const.py de HA), les
+                               états de HA n'ont pas de « peu nuageux de nuit » : la tuile de 2 h
+                               montrait un soleil. Un créneau de nuit reçoit la variante que la
+                               tablette sait déjà dessiner (kMeteoIcons, tab5_forecast.cpp).
+                               Jour ou nuit, par créneau : is_daytime s'il est fourni ; sinon sun.sun,
+                               d'après le dernier événement avant le début du créneau (lever = jour,
+                               coucher = nuit), les prochains lever et coucher reportés de 24 h en
+                               24 h (quelques minutes d'écart par jour) — vrai après minuit et le
+                               lendemain. Lever ou coucher à plus de 26 h (nuit ou jour polaire) :
+                               l'état de sun.sun vaut pour tous les créneaux. Sans sun.sun : condition
+                               brute. Calcul indépendant : tests/test_meteo_icones_nuit.py. #}
+                            {% set variante_nuit = {'partlycloudy': 'partlycloudy-night', 'sunny': 'clear-night', 'Clear': 'clear-night'} %}
+                            {% set soleil = states('sun.sun') %}
+                            {% set lever = as_timestamp(state_attr('sun.sun', 'next_rising'), none) %}
+                            {% set coucher = as_timestamp(state_attr('sun.sun', 'next_setting'), none) %}
+                            {% set instant = as_timestamp(now()) %}
+                            {% set cycle_ok = lever is not none and coucher is not none and lever - instant < 93600 and coucher - instant < 93600 %}
+                            {% set ns = namespace(result="") %}
+                            {% for i in range(base, base + 5) %}
+                              {% if i < fcasts|length %}
+                                {# as_local : Météo-France date ses créneaux en UTC ; sans conversion,
+                                   la tuile affichait l'heure UTC (2 h de retard l'été, vu le
+                                   27/09/2026 : « 09:00 » pour le créneau de 11:00). #}
+                                {% set dt = fcasts[i].datetime | as_datetime %}
+                                {% set heure_texte = (dt | as_local).strftime('%H:00') if dt else '00:00' %}
+                                {# .get() : au-delà de ~48 h Météo-France n'envoie plus
+                                   `precipitation` (constaté le 25/09/2026) — cf. prévisions jours. #}
+                                {% set condition = fcasts[i].get('condition') | default('unknown', true) %}
+                                {% set temp = fcasts[i].get('temperature') | float(0) %}
+                                {% set pluvio = fcasts[i].get('precipitation') | float(0) %}
+                                {% set de_jour = fcasts[i].get('is_daytime') %}
+                                {% if de_jour is not boolean %}
+                                  {% set debut = as_timestamp(fcasts[i].get('datetime'), none) %}
+                                  {% if debut is none or soleil not in ['above_horizon', 'below_horizon'] %}
+                                    {% set de_jour = none %}
+                                  {% elif cycle_ok %}
+                                    {% set de_jour = (debut - lever) % 86400 < (debut - coucher) % 86400 %}
+                                  {% else %}
+                                    {% set de_jour = soleil == 'above_horizon' %}
+                                  {% endif %}
+                                {% endif %}
+                                {% if de_jour == false %}
+                                  {% set condition = variante_nuit.get(condition, condition) %}
+                                {% endif %}
+                              {% else %}
+                                {% set heure_texte = '00:00' %}
+                                {% set condition = 'unknown' %}
+                                {% set temp = 0 %}
+                                {% set pluvio = 0 %}
+                              {% endif %}
+                              {% set ns.result = ns.result ~ i ~ "|" ~ heure_texte ~ "|" ~ condition ~ "|" ~ temp ~ "|" ~ pluvio ~ ";" %}
+                            {% endfor %}
+                            {{ ns.result }}
+
+
+  # ============================================================================
+  # PUSH ALERTES / SANTÉ HA (chemin court, faible latence).
+  # Une alerte lue ou nouvelle, une vigilance ou la pluie ne relancent PAS la chaîne
+  # prévisions/calendrier de `tab5_ha_hmi_updater` : ce chemin ne pousse QUE les
+  # sections 1 (alerte MF), 7 (bandeau info) et 7b (rotateur d'alertes HA), via le
+  # même script que la poussée complète — aucun delay, aucun appel API. Un changement
+  # du code ou des barres de pluie fait la section 1 (`vigilance_seule`) PUIS les
+  # barres (section 4b, script.tab5_push_pluie), depuis le 07/10/2026 (PERF-3) : la
+  # poussée complète ne se déclenche plus sur la pluie. Depuis le lot 4c, le décompte
+  # « dans N mn » se fait sur la tablette : plus de poussée à chaque minute.
+  # mode: queued pour ne pas perdre un dismiss derrière le tick minute.
+  # ============================================================================
+  - id: tab5_ha_hmi_alerts_push
+    alias: "Tab5 — light push (alerts, weather warnings, rain)"
+    mode: queued
+    max: 5
+    triggers:
+      # État nu : un seul déclenchement par mise à jour du capteur ; la condition plus
+      # bas ne laisse passer que celles qui changent le code (état) ou les barres
+      # (attribut). Avant le 07/10/2026 (HA-16), toute mise à jour d'attribut repartait.
+      - trigger: state
+        entity_id: sensor.tab5_pluie_dans_l_heure
+        id: pluie
+      - trigger: state
+        entity_id: sensor.tab5_vigilance
+      # Alertes à lire (packages/tab5_alerts.yaml) : nouvelle, changée, lue, terminée.
+      - trigger: state
+        entity_id: sensor.tab5_alertes
+        attribute: affichees
+    conditions:
+      - alias: "Pluie : seulement si le code ou les barres changent"
+        condition: template
+        value_template: >-
+          {%- if trigger.id == 'pluie' and trigger.from_state is not none and trigger.to_state is not none -%}
+            {{ trigger.from_state.state != trigger.to_state.state
+               or trigger.from_state.attributes.get('barres') != trigger.to_state.attributes.get('barres') }}
+          {%- else -%}
+            {{ true }}
+          {%- endif -%}
+    actions:
+      - action: script.tab5_push_alertes
+        data:
+          vigilance_seule: "{{ trigger.id == 'pluie' }}"
+      - if:
+          - condition: trigger
+            id: pluie
+        then:
+          - action: script.tab5_push_pluie
+
+  # Historique des alertes (lot 4) : il change (alerte nouvelle, lue, terminée) pendant
+  # que le popup « Alertes » d'une tablette est ouvert (« Écran courant », mis à jour
+  # toutes les 5 s) : on le repousse. Popup fermé : rien, il est demandé à l'ouverture.
+  # « Alerts » depuis le firmware du 24/10/2026 (états en anglais, ADR-0070), « Alertes »
+  # avant : les deux, pour un firmware d'avant comme d'après.
+  - id: tab5_ha_hmi_alertes_historique_push
+    alias: "Tab5 — alerts history (popup open)"
+    mode: queued
+    max: 3
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: sensor.tab5_alertes
+        attribute: historique
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ integration_entities('esphome') | select('match', 'sensor[.].*_(ecran_courant|current_screen)(_[0-9]+)?$')
+             | select('is_state', ['Alerts', 'Alertes']) | map('device_attr', 'model') | select('eq', 'tab5-ha-hmi')
+             | list | count > 0 }}
+    actions:
+      - action: script.tab5_push_alertes_historique
+
+  # ============================================================================
+  # PUSH METEO ACTUELLE — au changement (26/09/2026)
+  # ----------------------------------------------------------------------------
+  # Condition, température, humidité (weather) et probabilités UV / gel / neige.
+  # queued max 2 : si une probabilité change pendant un passage, le dernier état
+  # part quand même ; le reste est ignoré sans avertissement (max_exceeded: silent).
+  # ============================================================================
+  - id: tab5_ha_hmi_meteo_push
+    alias: "Tab5 — current weather (on change)"
+    mode: queued
+    max: 2
+    max_exceeded: silent
+    triggers:
+      # Capteur normalisé (lot 4c-3) : condition en état, température, humidité et
+      # probabilités en attributs, depuis la source choisie. État nu (sans `to:`) :
+      # UN déclenchement par mise à jour, quel que soit l'attribut qui a changé (des
+      # déclencheurs par attribut en donnaient un par attribut — 3 passages en 6 ms
+      # relevés le 26/09/2026).
+      - trigger: state
+        entity_id: sensor.tab5_meteo
+    actions:
+      - action: script.tab5_push_meteo
+
+  - id: tab5_screen_presence_wifi
+    alias: "Tab5 — screen by presence and phone"
+    # Allume l'écran à la détection d'une présence (ou au retour du téléphone) s'il
+    # est éteint ; l'éteint après 15 min sans présence dans la pièce (ou au départ du
+    # téléphone) s'il est allumé et que le réveil ne sonne pas. Écran éteint, le
+    # firmware met LVGL en pause ; un toucher ou une tape sur la dalle le rallume.
+    # Remis en place le 26/09/2026 : la version de production avait perdu les
+    # déclencheurs du capteur, et n'éteignait plus qu'au départ du téléphone.
+    # Capteur et téléphone choisis dans HA (« Tab5 · presence sensor »,
+    # « Tab5 · phone ») et lus sur leurs miroirs (tab5_reglages.yaml) : sans choix,
+    # les miroirs restent indisponibles et rien ne se déclenche. Chaque écran connecté
+    # (tab5_cibles, ADR-0071), avec son propre « réveil en cours » : avant le 25/10/2026,
+    # seul celui de sensor.tab5_tablette suivait la présence. Le téléphone est celui de la
+    # maison ; le capteur de présence, celui de chaque écran (ADR-0072 : le sien, sinon
+    # celui de la maison), lu sur « Tab5 · screens: presence » (tab5_reglages.yaml) : un
+    # écran que quelqu'un vient de rejoindre s'allume ; un écran que tout le monde vient de
+    # quitter attend 15 min sans présence (script.tab5_ecran_absence), puis s'éteint.
+    description: "Allume l'écran à la détection d'une présence ou au retour du téléphone ; l'éteint après 15 min sans présence ou au départ du téléphone, sauf réveil en cours"
+    mode: queued
+    max: 5
+    triggers:
+      - trigger: state
+        entity_id: sensor.tab5_presences_ecrans
+        attribute: presents
+        id: "presence"
+      - trigger: state
+        entity_id: sensor.tab5_presences_ecrans
+        attribute: absents
+        id: "absence"
+      - trigger: state
+        entity_id: sensor.tab5_telephone_suivi
+        to: 'home'
+        id: "allumer"
+      - trigger: state
+        entity_id: sensor.tab5_telephone_suivi
+        to: 'not_home'
+        id: "eteindre"
+    variables:
+      # Écrans entrés dans l'attribut qui a déclenché (présence : allumer ; absence :
+      # attendre 15 min) ; le téléphone sert chaque écran connecté.
+      entres: >-
+        {%- if trigger.id in ['presence', 'absence'] -%}
+          {%- set a = 'presents' if trigger.id == 'presence' else 'absents' -%}
+          {%- set avant = (trigger.from_state.attributes[a] if trigger.from_state is not none and a in trigger.from_state.attributes else []) or [] -%}
+          {%- set apres = (trigger.to_state.attributes[a] if trigger.to_state is not none and a in trigger.to_state.attributes else []) or [] -%}
+          {{ apres | reject('in', avant) | list }}
+        {%- else -%}
+          {{ [] }}
+        {%- endif -%}
+      appareils: >-
+        {%- from 'tab5_tablette.jinja' import tab5_cibles -%}
+        {%- set connectes = tab5_cibles('').split(',') | select | list -%}
+        {{ connectes if trigger.id in ['allumer', 'eteindre'] else (entres | select('in', connectes) | list) }}
+    conditions:
+      - condition: template
+        value_template: "{{ appareils | count > 0 }}"
+    actions:
+      # Capteur radar : il repasse off quelques secondes à chaque sortie de la pièce, d'où
+      # les 15 min (script parallèle, un passage par écran ; il s'arrête au retour).
+      - if: "{{ trigger.id == 'absence' }}"
+        then:
+          - repeat:
+              for_each: "{{ appareils }}"
+              sequence:
+                - action: script.turn_on
+                  target:
+                    entity_id: script.tab5_ecran_absence
+                  data:
+                    variables:
+                      appareil: "{{ repeat.item }}"
+          - stop: "15 min d'attente lancées"
+      - repeat:
+          for_each: "{{ appareils }}"
+          sequence:
+            - variables:
+                ecran: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(repeat.item, 'ecran') }}"
+                reveil: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(repeat.item, 'reveil_en_cours') }}"
+            - choose:
+                - conditions:
+                    - condition: trigger
+                      id: ["allumer", "presence"]
+                    - condition: template
+                      value_template: "{{ ecran != '' and is_state(ecran, 'off') }}"
+                  sequence:
+                    - action: light.turn_on
+                      continue_on_error: true
+                      target:
+                        entity_id: "{{ ecran }}"
+                - conditions:
+                    - condition: trigger
+                      id: "eteindre"
+                    - condition: template
+                      value_template: "{{ ecran != '' and is_state(ecran, 'on') }}"
+                    # Ne jamais éteindre un réveil qui sonne (le firmware rallume l'écran
+                    # à la sonnerie) : le réveil de CET écran.
+                    - condition: template
+                      value_template: "{{ not is_state(reveil, 'on') }}"
+                  sequence:
+                    - action: light.turn_off
+                      continue_on_error: true
+                      target:
+                        entity_id: "{{ ecran }}"
+
+
+  - id: tab5_theme_jour_nuit
+    alias: "Tab5 — day/night theme"
+    # Mode « Auto » du thème de l'écran (ADR-0029) : la tablette passe en clair le jour,
+    # en sombre la nuit, d'après son interrupteur « Nuit (thème auto) », que cette
+    # automatisation tient à jour sur sun.sun : au lever et au coucher, à chaque
+    # connexion de la tablette (une tablette qu'on ajoute se connecte aussi) et au
+    # démarrage de HA. Sans effet hors du mode Auto (select « Clair ou sombre » de la
+    # tablette), et sans sun.sun : rien ne part. Plus de déclencheur sur l'attribut
+    # theme_nuit de sensor.tab5_tablette (17/10/2026) : il partait pendant l'ajout de
+    # l'appareil, quand la liaison bascule encore (nouvelle clé), et l'appel finissait en
+    # « Not connected » malgré la garde (test « Installation dans un HA neuf », HA 2026.9.4).
+    description: "Allume l'interrupteur « Nuit (thème auto) » de la tablette quand le soleil est couché, l'éteint quand il est levé"
+    mode: queued
+    max: 3
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: sun.sun
+        to: ["above_horizon", "below_horizon"]
+      - trigger: event
+        event_type: esphome.tab5_connected
+        id: tab5_connected
+      - trigger: homeassistant
+        event: start
+    conditions:
+      # Garde d'origine (comme la poussée complète) : tab5_connected ne
+      # compte que venant d'une tablette. tests/test_garde_origine.py.
+      - alias: "tab5_connected : seulement depuis une tablette (modele tab5-ha-hmi)"
+        condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_origine -%}
+          {{ tab5_origine(trigger) == 'oui' }}
+      - condition: template
+        value_template: "{{ states('sun.sun') in ['above_horizon', 'below_horizon'] }}"
+    actions:
+      # Chaque écran (ADR-0071) : sur tab5_connected, celui qui vient de se connecter ;
+      # sinon chaque écran connecté (tab5_cibles). Comme « Tab5 — night screen off » : sa
+      # liaison et son interrupteur peuvent arriver un peu après l'événement ; on les attend
+      # 10 s, sinon on passe sans erreur (la connexion suivante relancera ce passage). Une
+      # liaison qui tombe pendant l'appel n'arrête rien.
+      - repeat:
+          for_each: &cibles_connexion >-
+            {%- from 'tab5_tablette.jinja' import tab5_cibles -%}
+            {{ tab5_cibles(trigger.event.data.device_id | default('', true) if trigger.id == 'tab5_connected' else '').split(',') | select | list }}
+          sequence:
+            - wait_template: &theme_pret >-
+                {%- from 'tab5_tablette.jinja' import tab5_entite -%}
+                {{ is_state(tab5_entite(repeat.item, 'api'), 'on') and tab5_entite(repeat.item, 'theme_nuit') != '' }}
+              timeout: "00:00:10"
+              continue_on_timeout: true
+            - if:
+                - condition: template
+                  value_template: *theme_pret
+              then:
+                - action: "switch.turn_{{ 'on' if is_state('sun.sun', 'below_horizon') else 'off' }}"
+                  continue_on_error: true
+                  target:
+                    entity_id: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(repeat.item, 'theme_nuit') }}"
+
+  - id: tab5_extinction_nuit
+    alias: "Tab5 — night screen off"
+    # Extinction de nuit de l'écran (16/10/2026, audit anti-casse) : tient l'interrupteur
+    # « Tab5 Nuit (écran éteint) » de la tablette d'après la plage choisie dans « Tab5 · night screen off » (tab5_reglages.yaml, lue sur son miroir « Tab5 · night screen off now ») : allumé dans la plage, éteint hors de la plage, au changement de plage, à
+    # chaque connexion de la tablette (l'interrupteur repart éteint à son démarrage ; une
+    # tablette qu'on ajoute se connecte aussi) et au démarrage de HA. Pas de déclencheur sur
+    # l'attribut de sensor.tab5_tablette, contrairement au thème : il part pendant l'ajout de
+    # l'appareil, quand la liaison bascule encore (« Not connected », test « Installation
+    # dans un HA neuf » du 16/10/2026). La tablette fait le reste : écran éteint après 1 min sans toucher
+    # pendant la nuit, rallumé à la fin s'il a été éteint par la nuit. « Not set » : le
+    # miroir est indisponible, l'interrupteur est éteint (même en pleine nuit).
+    description: "Allume l'interrupteur « Tab5 Nuit (écran éteint) » de la tablette pendant la plage de « Tab5 · night screen off », l'éteint à la fin"
+    mode: queued
+    max: 3
+    max_exceeded: silent
+    # Plage de chaque écran (ADR-0072, 25/10/2026) : la sienne, sinon celle de la maison,
+    # lue sur « Tab5 · screens: night now » (tab5_reglages.yaml), qui liste les écrans
+    # dans leur plage.
+    triggers:
+      # Tout changement de la liste (un écran entre dans sa plage ou en sort, « Not set »
+      # choisi en pleine nuit).
+      - trigger: state
+        entity_id: sensor.tab5_nuits_ecrans
+        attribute: nuit
+      - trigger: event
+        event_type: esphome.tab5_connected
+        id: tab5_connected
+      - trigger: homeassistant
+        event: start
+    conditions:
+      # Garde d'origine (comme la poussée complète) : tab5_connected ne
+      # compte que venant d'une tablette. tests/test_garde_origine.py.
+      - alias: "tab5_connected : seulement depuis une tablette (modele tab5-ha-hmi)"
+        condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_origine -%}
+          {{ tab5_origine(trigger) == 'oui' }}
+    actions:
+      # Chaque écran (ADR-0071), comme le thème : sur tab5_connected, celui qui vient de se
+      # connecter, sinon chaque écran connecté. Sa liaison et son interrupteur peuvent
+      # arriver un peu après l'événement : on les attend 10 s ; sinon on passe sans erreur,
+      # la connexion suivante relancera ce passage. Une liaison qui tombe pendant l'appel
+      # n'arrête rien : la prochaine connexion renvoie l'état.
+      - repeat:
+          for_each: *cibles_connexion
+          sequence:
+            - wait_template: &nuit_prete >-
+                {%- from 'tab5_tablette.jinja' import tab5_entite -%}
+                {{ is_state(tab5_entite(repeat.item, 'api'), 'on') and tab5_entite(repeat.item, 'nuit_ecran') != '' }}
+              timeout: "00:00:10"
+              continue_on_timeout: true
+            - if:
+                - condition: template
+                  value_template: *nuit_prete
+              then:
+                - action: "switch.turn_{{ 'on' if repeat.item in (state_attr('sensor.tab5_nuits_ecrans', 'nuit') or []) else 'off' }}"
+                  continue_on_error: true
+                  target:
+                    entity_id: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(repeat.item, 'nuit_ecran') }}"
+
+script:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Scripts de POUSSÉE vers le Tab5 (26/09/2026) — appelés par les automatisations
+  # (section `automation:` de ce package), pas par le Tab5. Chaque bloc n'existe
+  # qu'ici au lieu d'être recopié dans la poussée complète ET dans son automatisation
+  # « au changement ». mode: queued — chaque passage relit l'état courant, le dernier
+  # gagne. tab5_push_alertes lit sensor.tab5_alertes (packages/tab5_alerts.yaml) :
+  # les alertes à lire, déjà triées.
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  # Personne devant un écran (ADR-0072) : lancé par « Tab5 — screen by presence and
+  # phone » quand son capteur de présence passe à off. 15 min sans retour de présence
+  # (l'écran quitte `absents` de sensor.tab5_presences_ecrans : quelqu'un, ou capteur
+  # indisponible), puis l'écran s'éteint s'il est allumé et que son réveil ne sonne pas.
+  # Mode parallel : un passage par écran ; un écran qui repart d'absent relance un
+  # passage, le précédent s'arrête au retour.
+  tab5_ecran_absence:
+    alias: "Tab5 — screen off after 15 min without presence"
+    mode: parallel
+    max: 10
+    fields:
+      appareil:
+        description: "device_id de l'écran"
+    sequence:
+      - wait_template: "{{ appareil not in (state_attr('sensor.tab5_presences_ecrans', 'absents') or []) }}"
+        timeout: "00:15:00"
+        continue_on_timeout: true
+      - condition: template
+        value_template: "{{ not wait.completed }}"
+      - variables:
+          ecran: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'ecran') }}"
+          reveil: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'reveil_en_cours') }}"
+      - condition: template
+        value_template: "{{ ecran != '' and is_state(ecran, 'on') and not is_state(reveil, 'on') }}"
+      - action: light.turn_off
+        continue_on_error: true
+        target:
+          entity_id: "{{ ecran }}"
+
+  tab5_push_alertes:
+    alias: "Tab5 — push weather warnings, info banner and HA alerts"
+    description: >-
+      Sections 1 (code de pluie + vigilance, capteurs normalisés), 7 (bandeau info :
+      la vigilance à lire) et 7b (les 4 premières alertes à lire) de l'écran Tab5,
+      d'après sensor.tab5_alertes (packages/tab5_alerts.yaml). Appelé par la poussée
+      complète (tab5_ha_hmi_updater) et par la poussée légère (tab5_ha_hmi_alerts_push).
+    mode: queued
+    max: 10
+    fields:
+      vigilance_seule:
+        name: "Vigilance seule"
+        description: "Vrai : seulement le code de pluie + la vigilance (le code de pluie a changé)."
+        default: false
+        selector:
+          boolean:
+      appareil:
+        name: "Écran"
+        description: "device_id de l'écran qui vient de se connecter (poussée complète) : lui seul ; vide : chaque écran connecté."
+    sequence:
+      # Tablette absente ou hors ligne : rien à pousser, pas d'erreur (voir la poussée
+      # complète, section 0).
+      - condition: template
+        value_template: *tab5_connectee
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+            {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{{ repeat.item }}"
+            - action: "esphome.{{ tablette }}_tab5_maj_alerte_meteo_france"
+              continue_on_error: true
+              data:
+                payload: >-
+                  {%- set pluie = states('sensor.tab5_pluie_dans_l_heure') -%}
+                  {%- set globale = states('sensor.tab5_vigilance') -%}
+                  {%- set phen = state_attr('sensor.tab5_vigilance', 'phenomenes') or (['Vert'] * 11) | join('|') -%}
+                  {{ pluie if pluie.startswith('@') else '@-1,0' }}|{{ globale if globale in ['Vert', 'Jaune', 'Orange', 'Rouge'] else 'Vert' }}|{{ phen }}
+      - alias: "Changement du code de pluie : pas de relevé santé HA"
+        condition: template
+        value_template: "{{ not (vigilance_seule | default(false)) }}"
+      - variables:
+          # Alertes à lire, triées (gravité, puis la plus ancienne) : i = « id#révision »,
+          # renvoyé tel quel par la tablette au tap ; t = libellé codé, composé par la
+          # tablette dans sa langue.
+          alertes: "{{ state_attr('sensor.tab5_alertes', 'affichees') or [] }}"
+          vigi: >-
+            {%- set v = alertes | selectattr('s', 'eq', 'vigilance') | list -%}
+            {{ v[0] if v else {'i': '', 'g': ''} }}
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+            {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{{ repeat.item }}"
+            - action: "esphome.{{ tablette }}_tab5_maj_info_texte"
+              continue_on_error: true
+              data:
+                # Code composé par la tablette dans sa langue (lot 4c) :
+                # @ha|nb MAJ|titre de la MAJ s'il n'y en a qu'une|nb erreurs|nb indispo|jaune 0/1|vigilance
+                # Depuis les alertes du 06/10/2026, les MAJ, erreurs et indisponibles sont des
+                # bandeaux d'alerte (section 7b) : ce bandeau ne dit plus que la vigilance à
+                # lire (rouge ou orange : bannière ; jaune : « Vigilance Jaune »), vide sinon.
+                texte: >-
+                  {%- set niveau = vigi.g | lower -%}
+                  @ha|0||0|0|{{ 1 if niveau == 'jaune' else 0 }}|{{ niveau if niveau in ['rouge', 'orange'] else '' }}
+                couleur: >-
+                  {{ 'Rouge' if vigi.g == 'Rouge' else ('Orange' if vigi.g in ['Orange', 'Jaune'] else 'Blanc') }}
+                meteo_id: "{{ vigi.i }}"
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+            {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{{ repeat.item }}"
+            - action: "esphome.{{ tablette }}_tab5_maj_alertes_ha_bulk"
+              continue_on_error: true
+              data:
+                # Les quatre premières (déjà rangées : rouge, orange, jaune, puis la plus
+                # ancienne). Au-delà, un en-tête « @n:total » : la tablette affiche le rang de
+                # chaque bandeau, « 2/6 ». Un jeton sans « | » : un firmware d'avant l'ignore.
+                # Taille bornée (audit du 07/10/2026, DO-6) : la tablette refuse TOUT payload de
+                # plus de 1024 octets (parse_and_update_ha_alerts_bulk, Tab5/ecran/tab5_central.cpp),
+                # et les quatre bandeaux restaient alors sur les anciennes alertes. Le libellé
+                # est coupé à 100 caractères (Jinja coupe par caractère, jamais au milieu d'un
+                # caractère UTF-8) et débarrassé des deux séparateurs « | » et « ; » ; puis une
+                # alerte n'est ajoutée que si le tout reste sous 1024 octets, comptés en UTF-8
+                # (longueur du base64, filtre base64_encode de HA). Quatre alertes aux ids et
+                # libellés longs y tiennent (tests/test_alertes_ecran.py) ; seul un cas extrême
+                # (libellés tout en emoji) en laisse une dehors, au lieu de toutes les refuser.
+                payload: >-
+                  {%- macro octets(x) -%}
+                    {%- set b = x | base64_encode -%}{{ (b | length) // 4 * 3 - ((b | length) - (b.rstrip('=') | length)) }}
+                  {%- endmacro -%}
+                  {%- set autres = alertes | rejectattr('s', 'eq', 'vigilance') | list -%}
+                  {%- set ns = namespace(r=['@n:' ~ (autres | count)] if autres | count > 4 else []) -%}
+                  {%- for a in autres[:4] -%}
+                  {%- set texte = (a.t | string | replace('|', '/') | replace(';', ','))[:100] -%}
+                  {%- set jeton = a.i ~ '|' ~ ('Rouge' if a.g == 'Rouge' else 'Orange') ~ '|' ~ texte -%}
+                  {%- if octets((ns.r + [jeton]) | join(';')) | int <= 1024 -%}
+                  {%- set ns.r = ns.r + [jeton] -%}
+                  {%- endif -%}
+                  {%- endfor -%}
+                  {{- ns.r | join(';') -}}
+
+  # Historique des alertes (lot 4, popup « Alertes » de la tablette) : les 20 dernières
+  # alertes abonnées, à la demande (événement esphome.tab5_alertes_historique, émis à
+  # l'ouverture du popup, packages/tab5_evenements.yaml) et quand l'historique change
+  # pendant que le popup est ouvert (tab5_ha_hmi_alertes_historique_push). Un firmware
+  # d'avant n'émet jamais l'événement et n'affiche jamais « Alertes » : ce script ne
+  # l'appelle donc jamais (une action absente arrêterait le script, « Action not
+  # found » n'est pas rattrapé par continue_on_error).
+  tab5_push_alertes_historique:
+    alias: "Tab5 — push the alerts history"
+    description: >-
+      Les 20 dernières alertes abonnées de sensor.tab5_alertes (packages/tab5_alerts.yaml),
+      pour le popup « Alertes » de la tablette : « apparue|lue|terminée|gravité|libellé »
+      séparés par « ; » (custom_templates/tab5_alertes.jinja).
+    mode: queued
+    max: 3
+    sequence:
+      - condition: template
+        value_template: *tab5_connectee
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+            {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{{ repeat.item }}"
+            - action: "esphome.{{ tablette }}_tab5_maj_alertes_historique"
+              continue_on_error: true
+              data:
+                payload: >-
+                  {% from 'tab5_alertes.jinja' import tab5_alertes_historique %}{{ tab5_alertes_historique('payload') }}
+
+  tab5_push_pluie:
+    alias: "Tab5 — push the next-hour rain bars"
+    description: >-
+      Les 9 barres du graphe de pluie (section 4b). Appelé par la poussée complète à
+      chaque passage et par la poussée légère au changement du code ou des barres de
+      pluie (tab5_ha_hmi_alerts_push, 07/10/2026).
+    mode: queued
+    max: 10
+    fields:
+      appareil:
+        name: "Écran"
+        description: "device_id de l'écran qui vient de se connecter (poussée complète) : lui seul ; vide : chaque écran connecté."
+    sequence:
+      # Tablette absente ou hors ligne : rien à pousser, pas d'erreur (voir la poussée
+      # complète, section 0).
+      - condition: template
+        value_template: *tab5_connectee
+      # Payload « idx|intensité;… » (ADR-0003), construit par le capteur normalisé
+      # (attribut `barres`, packages/tab5_meteo_sources.yaml) selon la source choisie.
+      # Sans capteur : 9 barres vides, pour ne pas laisser les anciennes à l'écran.
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+            {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{{ repeat.item }}"
+            - action: "esphome.{{ tablette }}_tab5_maj_pluie_1h_bulk"
+              continue_on_error: true
+              data:
+                payload: >
+                  {{ state_attr('sensor.tab5_pluie_dans_l_heure', 'barres') or '0|0;1|0;2|0;3|0;4|0;5|0;6|0;7|0;8|0;' }}
+
+  tab5_push_meteo:
+    alias: "Tab5 — push the current weather and probabilities"
+    description: >-
+      Carte météo (condition, température, humidité) et probabilités (UV, gel,
+      neige). Appelé au changement (tab5_ha_hmi_meteo_push) et à la (re)connexion
+      du Tab5 (tab5_ha_hmi_updater).
+    mode: queued
+    max: 10
+    fields:
+      appareil:
+        name: "Écran"
+        description: "device_id de l'écran qui vient de se connecter (poussée complète) : lui seul ; vide : chaque écran connecté."
+    sequence:
+      # Tablette absente ou hors ligne : rien à pousser, pas d'erreur (voir la poussée
+      # complète, section 0).
+      - condition: template
+        value_template: *tab5_connectee
+      # Une source météo existe mais aucune ne répond (choisie indisponible, pas de
+      # repli) : rien ne part, la tablette garde le dernier affichage (08/10/2026 :
+      # elle recevait « unavailable » à 0 °C).
+      - condition: template
+        value_template: >-
+          {{ (state_attr('sensor.tab5_meteo', 'entite_effective') or '') != ''
+             or (state_attr('sensor.tab5_meteo', 'entite') or '') == '' }}
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+            {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{{ repeat.item }}"
+            - action: "esphome.{{ tablette }}_tab5_maj_meteo_actuelle"
+              continue_on_error: true
+              data:
+                condition: "{{ states('sensor.tab5_meteo') }}"
+                temperature: "{{ state_attr('sensor.tab5_meteo', 'temperature') | float(0) }}"
+                humidite: "{{ state_attr('sensor.tab5_meteo', 'humidite') | float(0) }}"
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+            {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{{ repeat.item }}"
+            - action: "esphome.{{ tablette }}_tab5_maj_probabilites"
+              continue_on_error: true
+              data:
+                uv: "{{ state_attr('sensor.tab5_meteo', 'uv') | int(0) }}"
+                gel: "{{ state_attr('sensor.tab5_meteo', 'gel') | int(0) }}"
+                neige: "{{ state_attr('sensor.tab5_meteo', 'neige') | int(0) }}"
+
+  tab5_push_volet:
+    alias: "Tab5 — push the greenhouse shutter state"
+    description: >-
+      En_mouvement pendant la course, sinon l'état mémorisé. Appelé au changement
+      (tab5_volet_updater) et à la (re)connexion (tab5_ha_hmi_updater). Seulement avec
+      le package optionnel volet_serre_tracking.yaml ET un volet choisi dans
+      « Tab5 · shutter with simulated travel » ; sinon le blueprint « Tab5 — emplacements »
+      pousse le volet lui-même, ou la tablette masque sa tuile (zone « volet »).
+    mode: queued
+    max: 10
+    fields:
+      appareil:
+        name: "Écran"
+        description: "device_id de l'écran qui vient de se connecter (poussée complète) : lui seul ; vide : chaque écran connecté."
+    sequence:
+      # Tablette absente ou hors ligne : rien à pousser, pas d'erreur (voir la poussée
+      # complète, section 0).
+      - condition: template
+        value_template: *tab5_connectee
+      - condition: template
+        value_template: >-
+          {%- set v = states('select.tab5_volet_a_course_simulee') -%}
+          {{ v.startswith('cover.') and expand(v) | count > 0 and states['script.tab5_volet_action'] is not none }}
+      - repeat:
+          for_each: >-
+            {%- from 'tab5_tablette.jinja' import tab5_destinataires -%}
+            {{ tab5_destinataires(appareil | default('')).split(',') | select | list }}
+          sequence:
+            - variables:
+                tablette: "{{ repeat.item }}"
+            - action: "esphome.{{ tablette }}_tab5_maj_volet_etat"
+              continue_on_error: true
+              data:
+                etat_physique: >-
+                  {{ 'En_mouvement' if is_state('input_boolean.volet_serre_mouvement', 'on') else states('input_text.volet_serre_etat') }}
+
+# Le capteur « Tab5 Rain in the next hour » (code « @niveau,début ») vit depuis le
+# lot 4c-2 dans packages/tab5_meteo_sources.yaml, avec « Tab5 Weather warnings » : même
+# unique_id, même entité, mais sa source se choisit dans HA (Météo-France,
+# OpenWeatherMap ou aucune).

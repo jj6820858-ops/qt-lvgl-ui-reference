@@ -1,0 +1,640 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file packages/tab5_meteo_sources.yaml
+# @role Adaptateurs météo du Tab5 (lot 4c-2 de l'audit « ouverture », 27/09/2026).
+#       Ramènent chaque fournisseur au format que lit la tablette, derrière deux
+#       capteurs NORMALISÉS, seuls lus par les poussées (packages/tab5_push.yaml) :
+#         - sensor.tab5_pluie_dans_l_heure : état = code « @niveau,début » (phrase
+#           de pluie composée par la tablette), attribut `barres` = payload des
+#           9 barres « idx|intensité;… » (tab5_maj_pluie_1h_bulk) ;
+#         - sensor.tab5_vigilance : état = niveau global Vert / Jaune / Orange /
+#           Rouge, attribut `phenomenes` = 11 niveaux séparés par « | » (les 9 cases
+#           Météo-France, puis Brouillard et Feux de forêt).
+#       La source se choisit dans HA, sans toucher au YAML : input_select
+#       « Tab5 · next-hour rain source » et « Tab5 · weather warnings source ».
+#       Depuis le 03/10/2026 (discussion #278), aussi dans la section « Météo » du
+#       blueprint tab5_emplacements : remplie, elle ÉCRIT son choix dans ces listes et dans
+#       input_text.tab5_meteo_previsions (une liste changée à la main y revient, avec une
+#       notification) ; vide, elle n'y touche pas. Les listes restent la seule source lue
+#       ici : rien à changer dans ce fichier pour l'une ou l'autre façon de choisir.
+# @sources Vérifiées dans le code de HA 2026.9.3 le 27/09/2026 :
+#       - pluie dans l'heure : Météo-France (`sensor.<ville>_next_rain`, créneaux de
+#         5 à 10 min) ou OpenWeatherMap en mode « v3.0 » (action
+#         `openweathermap.get_minute_forecast`, série à la minute en mm/h, lue dans
+#         le cache de l'intégration : aucun appel d'API en plus). Aucune autre
+#         intégration officielle n'expose une série exploitable en barres : depuis le
+#         29/09/2026, quatre services SANS CLÉ sont interrogés directement par
+#         `rest_command.tab5_pluie` (radars Buienradar, DWD par Bright Sky, Met.no ;
+#         modèle Open-Meteo), aux coordonnées de zone.home ;
+#       - vigilances : Météo-France (`sensor.<dept>_weather_alert`, 9 phénomènes),
+#         MeteoAlarm (39 pays européens, `binary_sensor`, UNE seule alerte : la
+#         bibliothèque s'arrête à la première ; `on` seulement si elle n'a pas expiré),
+#         DWD (Allemagne, intégration `dwd_weather_warnings`, toutes les alertes de la
+#         région) ou CAP Alerts (intégration HACS `cap_alerts` : MeteoAlarm, NWS,
+#         Canada, services nationaux de l'OMM ; une entité par alerte). Ces deux-là
+#         sont lus par la macro de custom_templates/tab5_vigilance.jinja (29/09/2026).
+# @detection Depuis le 28/09/2026 (ADR-0024), plus de placeholder : les entités de
+#       chaque fournisseur sont TROUVÉES par `sensor.tab5_sources_meteo` (capteur à
+#       déclencheurs, plus bas) : Météo-France = la ville de l'entité météo choisie
+#       si elle est de Météo-France, sinon la première ville Météo-France, et ses
+#       capteurs sur le même appareil (noms anglais fixes de l'intégration :
+#       `_next_rain`, `_weather_alert`, `_uv`, `_freeze_chance`, `_snow_chance`) ;
+#       OpenWeatherMap = l'entité météo choisie si elle en est, sinon la première ;
+#       MeteoAlarm = le binary_sensor signé « Information provided by MeteoAlarm »
+#       (attribution fixe de l'intégration ; plateforme YAML sans unique_id, donc
+#       absente du registre des entités et d'integration_entities()) ; DWD = les
+#       capteurs de l'intégration (la macro lit la première région et écarte les
+#       préavis) ; CAP Alerts = tous les capteurs de l'intégration (la macro garde ceux
+#       qui portent incident_platform_version, donc les alertes).
+#       Sans ces intégrations (données de test du CI), les mêmes formes sont
+#       reconnues à leurs attributs.
+#       Une source choisie sans entité donne « pas de données » (pluie) ou aucune
+#       vigilance ; « None » masque la carte. Les sources de pluie sans clé n'ont
+#       rien à trouver : hors de leur zone, elles donnent « pas de données ».
+# @defaut Météo-France est le premier choix des deux listes, donc celui d'une
+#       installation neuve. Sans capteur de pluie Météo-France, la pluie laissée sur
+#       Météo-France passe sur Open-Meteo, seul service qui répond partout (variable
+#       `source` du capteur de pluie ; 02/10/2026, retour d'un utilisateur en Turquie,
+#       discussion #278). Les vigilances laissées sur Météo-France sans l'intégration
+#       restent toutes vertes, comme « None ». La liste garde le choix de
+#       l'utilisateur : Météo-France ajouté plus tard reprend la main tout seul.
+# @install `homeassistant: packages: !include_dir_named packages`, puis ce fichier
+#       dans config/packages/. Rien à renseigner. « Tab5 Weather » importe
+#       custom_templates/tab5_meteo.jinja (repli, 08/10/2026) : le déployer et
+#       recharger les modèles Jinja personnalisés AVANT ce fichier.
+# @ai_warning Les options des input_select sont lues par les modèles ci-dessous :
+#       les renommer demande de changer les comparaisons (`source == '…'`).
+# ============================================================================
+
+input_select:
+  tab5_source_pluie:
+    name: "Tab5 · next-hour rain source"
+    icon: mdi:weather-pouring
+    options:
+      - "Météo-France"
+      - "OpenWeatherMap"
+      - "Buienradar"
+      - "DWD"
+      - "Met.no"
+      - "Open-Meteo"
+      - "None"
+  tab5_source_vigilance:
+    name: "Tab5 · weather warnings source"
+    icon: mdi:alert-outline
+    options:
+      - "Météo-France"
+      - "MeteoAlarm"
+      - "DWD"
+      - "CAP Alerts"
+      - "None"
+
+# Source des prévisions (lot 4c-3) : mémorise l'entité weather.* choisie dans la
+# liste « Tab5 · forecast source » (template select plus bas, dont les options
+# sont les entités météo présentes), ou écrite par la section « Météo » du blueprint
+# quand elle est remplie. Sans `initial` : HA garde le choix au redémarrage.
+# Vide ou entité disparue : la première entité Météo-France, sinon la première
+# entité météo (sensor.tab5_sources_meteo, attribut `meteo`).
+input_text:
+  tab5_meteo_previsions:
+    name: "Tab5 · chosen weather entity"
+    icon: mdi:weather-partly-cloudy
+    max: 255
+
+# Pluie dans l'heure des sources radar sans clé (29/09/2026), appelée par « Tab5 Rain in the next hour » seulement quand l'une d'elles est choisie (Open-Meteo aussi quand la
+# liste est restée sur Météo-France sans l'intégration, voir @defaut). Coordonnées du domicile
+# (zone.home) arrondies à 0,01° (~1 km, la maille des radars), envoyées au seul
+# service choisi. Réponses vérifiées le 29/09/2026 :
+#   - Buienradar : Pays-Bas et Belgique (hors zone : 404), usage non commercial, source
+#     à citer (https://www.buienradar.nl/overbuienradar/gratis-weerdata) ;
+#   - DWD par Bright Sky (https://brightsky.dev) : composite radar du DWD, Allemagne et
+#     pays voisins (hors zone : 404) ; `date` = il y a 5 min, sinon la réponse commence
+#     1 h avant la dernière mesure ; gzip exigé ;
+#   - Met.no Nowcast 2.0 : pays nordiques (hors zone : 422), User-Agent identifiant
+#     exigé, CC BY 4.0 ;
+#   - Open-Meteo : partout, mais un MODÈLE et non le radar, au pas de 15 min (vrai pas
+#     de 15 min en Europe centrale et en Amérique du Nord, interpolé ailleurs) ; usage
+#     non commercial, CC BY 4.0.
+rest_command:
+  tab5_pluie:
+    url: >-
+      {%- set la = '%.2f' | format(lat | float(0)) -%}{%- set lo = '%.2f' | format(lon | float(0)) -%}
+      {%- if source == 'Buienradar' -%}
+        https://gpsgadget.buienradar.nl/data/raintext?lat={{ la }}&lon={{ lo }}
+      {%- elif source == 'DWD' -%}
+        https://api.brightsky.dev/radar?lat={{ la }}&lon={{ lo }}&distance=0&format=plain&date={{ (utcnow() - timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M') }}
+      {%- elif source == 'Met.no' -%}
+        https://api.met.no/weatherapi/nowcast/2.0/complete?lat={{ la }}&lon={{ lo }}
+      {%- else -%}
+        https://api.open-meteo.com/v1/forecast?latitude={{ la }}&longitude={{ lo }}&minutely_15=precipitation&forecast_minutely_15=6&timeformat=unixtime
+      {%- endif -%}
+    method: get
+    headers:
+      User-Agent: "M5-Tab5-ESPHome-LVGL (https://github.com/Axellum/M5-Tab5-ESPHome-LVGL)"
+      Accept-Encoding: "gzip"
+    timeout: 15
+
+template:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Sources détectées — capteur à DÉCLENCHEURS : il parcourt les capteurs de la
+  # maison, ce qu'un modèle ordinaire referait à chaque changement de l'un d'eux.
+  # Recalculé au démarrage, au rechargement des modèles, à l'ajout ou au
+  # renommage d'une entité et au changement de l'entité météo choisie.
+  # ──────────────────────────────────────────────────────────────────────────
+  - triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+      - trigger: event
+        event_type: entity_registry_updated
+      - trigger: state
+        entity_id: input_text.tab5_meteo_previsions
+    # Audit du 07/10/2026, HA-18 : pas pour une mise à jour du registre qui ne touche que
+    # capabilities / supported_features / options / suggested_object_id (419 des 485
+    # entity_registry_updated chez l'auteur du 01 au 08/10/2026), que la liste ne lit
+    # pas. Une création, une suppression, un renommage, un nom ou une classe passent.
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.platform != 'event' or trigger.event.event_type != 'entity_registry_updated'
+             or trigger.event.data.action != 'update'
+             or (trigger.event.data.changes | default({}, true)).keys()
+                | reject('in', ['capabilities', 'supported_features', 'options', 'suggested_object_id'])
+                | list | count > 0 }}
+    variables:
+      meteos: "{{ states.weather | map(attribute='entity_id') | list }}"
+      choix: "{{ states('input_text.tab5_meteo_previsions') }}"
+      mf_meteos: "{{ integration_entities('meteo_france') | select('match', 'weather[.]') | list }}"
+      owm_meteos: "{{ integration_entities('openweathermap') | select('match', 'weather[.]') | list }}"
+      meteo: "{{ choix if choix in meteos else (mf_meteos | first if mf_meteos else (meteos | first | default(''))) }}"
+      mf_ville: "{{ meteo if meteo in mf_meteos else (mf_meteos | first | default('')) }}"
+      mf_capteurs: "{{ device_entities(device_id(mf_ville)) | select('match', 'sensor[.]') | list if mf_ville else [] }}"
+      # Sans intégration Météo-France, une entité météo et ses capteurs nommés comme
+      # elle (weather.<ville>, sensor.<ville>_next_rain…) : ceux du test « HA neuf ».
+      meme_nom: "{{ 'sensor.' ~ meteo.split('.', 1)[1] if meteo else '' }}"
+      meteoalarm: >-
+        {{ states.binary_sensor | selectattr('attributes.attribution', 'defined')
+           | selectattr('attributes.attribution', 'eq', 'Information provided by MeteoAlarm')
+           | map(attribute='entity_id') | first | default('') }}
+      # DWD : les deux capteurs de chaque région (alertes et préavis), dans l'ordre du
+      # registre. Leur identifiant suit la langue de HA (vérifié le 29/09/2026 sur un HA
+      # en français : sensor.berlin_niveau_d_alerte_actuel / _anticipee) : la macro les
+      # distingue par l'urgence de chaque alerte, pas par le nom.
+      dwd: >-
+        {%- set l = integration_entities('dwd_weather_warnings') | select('match', 'sensor[.]') | list -%}
+        {{ l if l else (states.sensor | selectattr('attributes.attribution', 'defined')
+                        | selectattr('attributes.attribution', 'eq', 'Data provided by DWD')
+                        | selectattr('attributes.warning_count', 'defined')
+                        | map(attribute='entity_id') | list) }}
+      # CAP Alerts : les alertes vont et viennent (entity_registry_updated relance ce
+      # capteur) ; les capteurs de diagnostic de la liste sont écartés par la macro.
+      cap: >-
+        {%- set l = integration_entities('cap_alerts') | select('match', 'sensor[.]') | list -%}
+        {{ l if l else (states.sensor | selectattr('attributes.incident_platform_version', 'defined')
+                        | map(attribute='entity_id') | list) }}
+    sensor:
+      - name: "Tab5 · weather sources"
+        unique_id: tab5_sources_meteo
+        default_entity_id: sensor.tab5_sources_meteo
+        icon: mdi:weather-cloudy-clock
+        state: >-
+          {%- set l = (['Météo-France'] if mf_ville else []) + (['OpenWeatherMap'] if owm_meteos else [])
+                      + (['MeteoAlarm'] if meteoalarm else []) + (['DWD'] if dwd else [])
+                      + (['CAP Alerts'] if cap else []) -%}
+          {{ l | join(', ') if l else 'aucune' }}
+        attributes:
+          meteo: "{{ meteo }}"
+          meteo_france: "{{ mf_ville }}"
+          mf_pluie: >-
+            {%- set l = mf_capteurs | select('match', '.*_next_rain$') | list -%}
+            {%- set l = l if l else (integration_entities('meteo_france') | select('match', 'sensor[.].*_next_rain$') | list) -%}
+            {{ l | first if l else (meme_nom ~ '_next_rain' if meme_nom and expand(meme_nom ~ '_next_rain') | count > 0 else '') }}
+          mf_vigilance: >-
+            {%- set l = mf_capteurs | select('match', '.*_weather_alert$') | list -%}
+            {%- set l = l if l else (integration_entities('meteo_france') | select('match', 'sensor[.].*_weather_alert$') | list) -%}
+            {%- set l = l if l else (states.sensor | map(attribute='entity_id') | select('match', 'sensor[.].*_weather_alert$') | list) -%}
+            {{ l | first | default('') }}
+          mf_uv: >-
+            {%- set l = mf_capteurs | select('match', '.*_uv$') | list -%}
+            {{ l | first if l else (meme_nom ~ '_uv' if meme_nom and expand(meme_nom ~ '_uv') | count > 0 else '') }}
+          mf_gel: >-
+            {%- set l = mf_capteurs | select('match', '.*_freeze_chance$') | list -%}
+            {{ l | first if l else (meme_nom ~ '_freeze_chance' if meme_nom and expand(meme_nom ~ '_freeze_chance') | count > 0 else '') }}
+          mf_neige: >-
+            {%- set l = mf_capteurs | select('match', '.*_snow_chance$') | list -%}
+            {{ l | first if l else (meme_nom ~ '_snow_chance' if meme_nom and expand(meme_nom ~ '_snow_chance') | count > 0 else '') }}
+          owm: "{{ meteo if meteo in owm_meteos else (owm_meteos | first | default('')) }}"
+          meteoalarm: "{{ meteoalarm }}"
+          dwd: "{{ dwd }}"
+          cap: "{{ cap }}"
+
+  # Relevé de la pluie Météo-France : change à chaque mise à jour du capteur
+  # (état et `forecast_time_ref`, toutes les 5 min) et déclenche le capteur de pluie
+  # aussitôt, comme le faisait un déclencheur `state:` sur sensor.<ville>_next_rain.
+  - sensor:
+      - name: "Tab5 · Météo-France rain reading"
+        unique_id: tab5_releve_pluie_meteo_france
+        default_entity_id: sensor.tab5_releve_pluie_meteo_france
+        icon: mdi:weather-rainy
+        state: >-
+          {%- set e = state_attr('sensor.tab5_sources_meteo', 'mf_pluie') or '' -%}
+          {{ (states(e) ~ ' ' ~ (state_attr(e, 'forecast_time_ref') or ''))[:250] if e else 'aucun' }}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Pluie dans l'heure — capteur à déclencheurs : il peut appeler l'action
+  # d'OpenWeatherMap ou rest_command.tab5_pluie (`actions:`), dont la réponse est
+  # ramenée à une série commune (`serie`) que lisent les modèles.
+  # ──────────────────────────────────────────────────────────────────────────
+  - triggers:
+      # Météo-France : état ET attributs (`1_hour_forecast` change toutes les 5 min).
+      - trigger: state
+        entity_id: sensor.tab5_releve_pluie_meteo_france
+      # Sources détectées de nouveau (entité ajoutée, autre ville choisie).
+      - trigger: state
+        entity_id: sensor.tab5_sources_meteo
+      # OpenWeatherMap : HA l'interroge toutes les 10 min ; 5 min ici pour que les
+      # créneaux, calculés par rapport à maintenant, restent justes. Sources radar :
+      # une requête toutes les 5 min (leur pas), seulement quand elles sont choisies.
+      - trigger: time_pattern
+        minutes: "/5"
+      - trigger: state
+        entity_id: input_select.tab5_source_pluie
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+    # Le relevé Météo-France ne sert qu'à Météo-France : avec une autre source, il
+    # doublerait les requêtes (et, sans requête, viderait la série).
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ not (trigger.platform == 'state' and trigger.entity_id == 'sensor.tab5_releve_pluie_meteo_france'
+                  and states('input_select.tab5_source_pluie') != 'Météo-France') }}
+    variables:
+      mf_pluie: "{{ state_attr('sensor.tab5_sources_meteo', 'mf_pluie') or '' }}"
+      owm_meteo: "{{ state_attr('sensor.tab5_sources_meteo', 'owm') or '' }}"
+      # Source effective, lue par les actions ET par les modèles du capteur (jamais la
+      # liste elle-même) : Météo-France sans capteur de pluie → Open-Meteo (@defaut).
+      # « None » de la liste (« Aucune » avant le 24/10/2026) → « none » : HA relirait un
+      # rendu « None » comme le None de Python (Template._parse_result).
+      source: >-
+        {%- set choix = states('input_select.tab5_source_pluie') -%}
+        {{ 'Open-Meteo' if choix == 'Météo-France' and mf_pluie == '' else 'none' if choix in ['None', 'Aucune'] else choix }}
+      lat: "{{ state_attr('zone.home', 'latitude') }}"
+      lon: "{{ state_attr('zone.home', 'longitude') }}"
+    actions:
+      # Garde has_value() : sans l'intégration OpenWeatherMap, l'action n'existe pas
+      # et HA lève « Action … not found », que continue_on_error ne rattrape PAS
+      # (vérifié le 27/09/2026 : le capteur restait figé, une erreur toutes les
+      # 5 min). Sans entité, `owm` reste indéfini → « pas de données ».
+      - if:
+          - condition: state
+            entity_id: input_select.tab5_source_pluie
+            state: "OpenWeatherMap"
+          - condition: template
+            value_template: "{{ has_value(owm_meteo) }}"
+        then:
+          - action: openweathermap.get_minute_forecast
+            target:
+              entity_id: "{{ owm_meteo }}"
+            response_variable: owm
+            continue_on_error: true
+      # Sources radar sans clé (29/09/2026) : rest_command.tab5_pluie (plus bas), aux
+      # coordonnées du domicile. Hors zone, le service répond 404 ou 422 (« pas de
+      # données ») ; une panne réseau est rattrapée par continue_on_error.
+      - if:
+          - condition: template
+            value_template: >-
+              {{ source in ['Buienradar', 'DWD', 'Met.no', 'Open-Meteo'] and lat is number and lon is number }}
+        then:
+          - action: rest_command.tab5_pluie
+            data:
+              source: "{{ source }}"
+              lat: "{{ lat }}"
+              lon: "{{ lon }}"
+            response_variable: rep
+            continue_on_error: true
+      # Série commune : [début (epoch), durée (min), intensité (mm/h)] par point ;
+      # none = pas de réponse exploitable. Unités d'origine :
+      #   - OpenWeatherMap : points à la minute, `precipitation` en mm/h ; réponse d'une
+      #     action d'entité (clé = entity_id, la forme nue { forecast: [...] } aussi) ;
+      #   - Buienradar : texte « valeur|HH:MM » par 5 min sur 2 h, valeur 0-255 en
+      #     mm/h = 10^((valeur - 109) / 32) (formule de la bibliothèque buienradar) ;
+      #     heure d'Amsterdam, supposée celle de HA (même fuseau en NL, BE, LU, FR, DE) ;
+      #   - DWD (Bright Sky, produit radar RV) : `precipitation_5` en 0,01 mm / 5 min ;
+      #   - Met.no (Nowcast 2.0) : `precipitation_rate` en mm/h par 5 min, seulement si
+      #     `radar_coverage` = ok ;
+      #   - Open-Meteo : `minutely_15.precipitation` = mm tombés dans les 15 min
+      #     PRÉCÉDANT l'heure donnée (epoch, timeformat=unixtime).
+      - variables:
+          serie: >-
+            {%- set ns = namespace(l=[]) -%}
+            {%- if source == 'OpenWeatherMap' -%}
+              {%- set r = (owm.get(owm_meteo, owm) if owm is defined and owm is mapping else {}) -%}
+              {%- for e in (r.get('forecast', []) if r is mapping else []) -%}
+                {%- set ns.l = ns.l + [[as_timestamp(e.get('datetime'), 0) | int(0), 1, e.get('precipitation') | float(0)]] -%}
+              {%- endfor -%}
+            {%- elif rep is defined and rep is mapping and rep.get('status') == 200 -%}
+              {%- set c = rep.get('content') -%}
+              {%- if source == 'Buienradar' and c is string -%}
+                {%- set n0 = now().replace(second=0, microsecond=0) -%}
+                {%- for ligne in c.split('\n') if '|' in ligne -%}
+                  {%- set v = ligne.split('|')[0] | trim | int(-1) -%}
+                  {%- set hm = ligne.split('|')[1] | trim -%}
+                  {%- set d = (hm[:2] | int(0)) * 60 + (hm[3:5] | int(0)) - (n0.hour * 60 + n0.minute) -%}
+                  {%- set d = d + 1440 if d < -720 else (d - 1440 if d > 720 else d) -%}
+                  {%- if v >= 0 -%}
+                    {%- set ns.l = ns.l + [[(n0 + timedelta(minutes=d)).timestamp() | int, 5,
+                                           (10 ** ((v - 109) / 32)) if v > 0 else 0]] -%}
+                  {%- endif -%}
+                {%- endfor -%}
+              {%- elif source == 'DWD' and c is mapping -%}
+                {%- for x in c.get('radar', []) -%}
+                  {%- set v = x.get('precipitation_5', 0) -%}
+                  {%- set v = (v | first | first) if v is iterable and v is not string else v -%}
+                  {%- set ns.l = ns.l + [[as_timestamp(x.get('timestamp'), 0) | int(0), 5, (v | float(0)) * 0.12]] -%}
+                {%- endfor -%}
+              {%- elif source == 'Met.no' and c is mapping
+                    and (c.get('properties') or {}).get('meta', {}).get('radar_coverage') == 'ok' -%}
+                {%- for x in c.get('properties', {}).get('timeseries', []) -%}
+                  {%- set d = ((x.get('data') or {}).get('instant') or {}).get('details') or {} -%}
+                  {%- set ns.l = ns.l + [[as_timestamp(x.get('time'), 0) | int(0), 5, d.get('precipitation_rate', 0) | float(0)]] -%}
+                {%- endfor -%}
+              {%- elif source == 'Open-Meteo' and c is mapping -%}
+                {%- set m = c.get('minutely_15') or {} -%}
+                {%- set p = m.get('precipitation') or [] -%}
+                {%- for t in m.get('time') or [] -%}
+                  {%- set mm = (p[loop.index0] if loop.index0 < p | length else 0) | float(0) -%}
+                  {%- set ns.l = ns.l + [[(t | int(0)) - 900, 15, mm * 4]] -%}
+                {%- endfor -%}
+              {%- endif -%}
+            {%- endif -%}
+            {{ ns.l if ns.l else none }}
+    sensor:
+      - name: "Tab5 Rain in the next hour"
+        unique_id: tab5_pluie_dans_l_heure
+        default_entity_id: sensor.tab5_pluie_dans_l_heure
+        icon: mdi:weather-rainy
+        # Code « @niveau,début » lu par la tablette (lot 4c) : niveau -1 pas de
+        # données, 0 temps sec, 1 à 4 pluie faible à très forte, 5 intensité
+        # inconnue ; début = epoch UTC du début de la pluie, 0 s'il pleut déjà ;
+        # « @- » = aucune source (phrase et carte masquées). La tablette compose la
+        # phrase dans sa langue et décompte les minutes elle-même.
+        # `source` = la source effective (variables plus haut), pas la liste : « none »
+        # pour « None » (« Aucune » avant le 24/10/2026).
+        state: >
+          {% if source == 'none' %}
+            @-
+          {% elif source in ['OpenWeatherMap', 'Buienradar', 'DWD', 'Met.no', 'Open-Meteo'] %}
+            {# Série commune (variables des actions). Seuils en mm/h : < 0,1 sec,
+               < 2,5 faible, < 7,6 modérée, < 50 forte, au-delà très forte (classes
+               usuelles « light / moderate / heavy / violent »). #}
+            {% if serie is not defined or serie is none or serie | length == 0 %}
+              @-1,0
+            {% else %}
+              {# Points déjà finis ignorés : la série d'OpenWeatherMap vient du cache de
+                 l'intégration, rafraîchi toutes les 10 min — une averse finie il y a
+                 5 min y figure encore et donnait « pluie en cours » avec 9 barres vides
+                 (banc du 29/09/2026). Un point dure son pas (1, 5 ou 15 min). #}
+              {% set ns = namespace(debut=0, mmh=0, trouve=false) %}
+              {% set t = now().timestamp() %}
+              {% for p in serie %}
+                {% if not ns.trouve and p[0] + p[1] * 60 > t and p[2] >= 0.1 %}
+                  {% set ns.trouve = true %}
+                  {% set ns.debut = p[0] %}
+                  {% set ns.mmh = p[2] %}
+                {% endif %}
+              {% endfor %}
+              {% if not ns.trouve %}
+                @0,0
+              {% else %}
+                {% set n = 1 if ns.mmh < 2.5 else 2 if ns.mmh < 7.6 else 3 if ns.mmh < 50 else 4 %}
+                @{{ n }},{{ ns.debut if ns.debut > t else 0 }}
+              {% endif %}
+            {% endif %}
+          {% else %}
+            {# Météo-France — même logique que l'ancien capteur « Phrase Prochaine
+               Pluie » (vérifiée à l'identique le 27/09/2026, lot 4c-1). #}
+            {% set ent = mf_pluie %}
+            {% set niv = {'Temps sec': 0, 'Pluie faible': 1, 'Pluie modérée': 2, 'Pluie forte': 3,
+                          'Pluie très forte': 4, 'Pluie trés forte': 4} %}
+            {% if ent == '' %}
+              {# Sans capteur de pluie Météo-France, la source effective est Open-Meteo
+                 (@defaut, 02/10/2026) : branche gardée pour un état inattendu de la
+                 liste. Aucune source, comme « None » — et non « temps sec » (lot 5b). #}
+              @-
+            {% elif not has_value(ent) %}
+              @0,0
+            {% else %}
+              {% set next_rain = states(ent) | as_timestamp(default=0) %}
+              {% set ref = state_attr(ent, 'forecast_time_ref') | as_timestamp(default=0) %}
+              {% set fc = state_attr(ent, '1_hour_forecast') %}
+              {% if next_rain > 0 and ref > 0 and fc is not none %}
+                {% set actuel = fc.get('0 min', 'Temps sec') %}
+                {% if actuel != 'Temps sec' %}
+                  @{{ niv.get(actuel, 5) }},0
+                {% else %}
+                  {% set cle = ((next_rain - ref) / 60) | int(0) ~ ' min' %}
+                  @{{ niv.get(fc.get(cle, 'Pluie'), 5) }},{{ next_rain | int(0) }}
+                {% endif %}
+              {% else %}
+                @-1,0
+              {% endif %}
+            {% endif %}
+          {% endif %}
+        attributes:
+          # 9 barres « idx|intensité; » (idx 0..8 = 0, 5, 10, 15, 20, 25, 35, 45,
+          # 55 min). Météo-France : ses libellés, tels quels. Autres sources : niveau
+          # 0 à 4, le plus fort des points qui touchent la fenêtre (mêmes seuils que
+          # l'état ; un point de 15 min d'Open-Meteo couvre trois barres). Aucune
+          # source ou pas de données : 9 barres vides (le panneau Pluie ne tourne pas).
+          barres: >
+            {% set ns = namespace(r='') %}
+            {% if source == 'Météo-France' and state_attr(mf_pluie, '1_hour_forecast') is mapping %}
+              {% set fc = state_attr(mf_pluie, '1_hour_forecast') %}
+              {% set cles = ['0 min', '5 min', '10 min', '15 min', '20 min', '25 min', '35 min', '45 min', '55 min'] %}
+              {% for k in cles %}{% set ns.r = ns.r ~ loop.index0 ~ '|' ~ fc.get(k, 'Inconnu') ~ ';' %}{% endfor %}
+            {% elif source in ['OpenWeatherMap', 'Buienradar', 'DWD', 'Met.no', 'Open-Meteo']
+                    and serie is defined and serie is not none %}
+              {% set bornes = [0, 5, 10, 15, 20, 25, 35, 45, 55, 60] %}
+              {% set maintenant = now().timestamp() %}
+              {% for i in range(9) %}
+                {% set f = namespace(mx=0) %}
+                {% for p in serie %}
+                  {% set rel = (p[0] - maintenant) / 60 %}
+                  {% if rel < bornes[i + 1] and rel + p[1] > bornes[i] and p[2] > f.mx %}{% set f.mx = p[2] %}{% endif %}
+                {% endfor %}
+                {% set n = 0 if f.mx < 0.1 else 1 if f.mx < 2.5 else 2 if f.mx < 7.6 else 3 if f.mx < 50 else 4 %}
+                {% set ns.r = ns.r ~ i ~ '|' ~ n ~ ';' %}
+              {% endfor %}
+            {% else %}
+              {% for i in range(9) %}{% set ns.r = ns.r ~ i ~ '|0;' %}{% endfor %}
+            {% endif %}
+            {{ ns.r }}
+          # Source effective : « Open-Meteo » quand la liste, restée sur Météo-France,
+          # n'a pas de capteur Météo-France à lire.
+          source: "{{ source }}"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Vigilances — capteur ordinaire : il se recalcule dès qu'une entité lue change.
+  # DWD et CAP Alerts passent par la macro tab5_vigilance (custom_templates/), qui
+  # rend « global|11 cases » ; l'import est DANS leur branche, pour que Météo-France et
+  # MeteoAlarm marchent sans le fichier.
+  # ──────────────────────────────────────────────────────────────────────────
+  - sensor:
+      - name: "Tab5 Weather warnings"
+        unique_id: tab5_vigilance
+        default_entity_id: sensor.tab5_vigilance
+        icon: mdi:alert-outline
+        # Niveau global : Vert, Jaune, Orange ou Rouge (codes lus par la tablette
+        # et par le bandeau info, jamais traduits).
+        state: >
+          {% set source = states('input_select.tab5_source_vigilance') %}
+          {% set alerte = state_attr('sensor.tab5_sources_meteo', 'meteoalarm') or '' %}
+          {% if source == 'Météo-France' %}
+            {% set v = states(state_attr('sensor.tab5_sources_meteo', 'mf_vigilance') or '') | capitalize %}
+            {{ v if v in ['Vert', 'Jaune', 'Orange', 'Rouge'] else 'Vert' }}
+          {% elif source == 'MeteoAlarm' and is_state(alerte, 'on') %}
+            {# awareness_level « 3; orange; Severe » : 2 jaune, 3 orange, 4 rouge ; un
+               1 (vert) alors que l'alerte est active compte comme jaune, comme le fait
+               la carte HACS MeteoalarmCard. #}
+            {% set n = (state_attr(alerte, 'awareness_level') | string).split(';')[0] | int(0) %}
+            {{ 'Rouge' if n >= 4 else 'Orange' if n == 3 else 'Jaune' }}
+          {% elif source in ['DWD', 'CAP Alerts'] %}
+            {% from 'tab5_vigilance.jinja' import tab5_vigilance %}
+            {{ tab5_vigilance(source, state_attr('sensor.tab5_sources_meteo', 'dwd') or [],
+                              state_attr('sensor.tab5_sources_meteo', 'cap') or []).split('|')[0] }}
+          {% else %}
+            Vert
+          {% endif %}
+        attributes:
+          # 11 niveaux séparés par « | », dans l'ordre du payload de la tablette :
+          # vent, inondation, orages, pluie-inondation, neige-verglas, grand froid,
+          # vagues-submersion, canicule, avalanches, brouillard, feux de forêt.
+          phenomenes: >
+            {% set source = states('input_select.tab5_source_vigilance') %}
+            {% set alerte = state_attr('sensor.tab5_sources_meteo', 'meteoalarm') or '' %}
+            {% if source == 'Météo-France' %}
+              {% set ent = state_attr('sensor.tab5_sources_meteo', 'mf_vigilance') or '' %}
+              {% set ns = namespace(l=[]) %}
+              {% for ph in ['Vent violent', 'Inondation', 'Orages', 'Pluie-inondation', 'Neige-verglas',
+                            'Grand-froid', 'Vagues-submersion', 'Canicule', 'Avalanches'] %}
+                {% set ns.l = ns.l + [state_attr(ent, ph) | default('Vert', true) | capitalize] %}
+              {% endfor %}
+              {{ (ns.l + ['Vert', 'Vert']) | join('|') }}
+            {% elif source == 'MeteoAlarm' and is_state(alerte, 'on') %}
+              {# awareness_type « 8; forest-fire » → case de la tablette. Codes
+                 MeteoAlarm : 1 vent, 2 neige-verglas, 3 orages, 4 brouillard,
+                 5 canicule, 6 grand froid, 7 submersion, 8 feux de forêt,
+                 9 avalanches, 10 pluie, 12 inondation, 13 pluie-inondation. #}
+              {% set n = (state_attr(alerte, 'awareness_level') | string).split(';')[0] | int(0) %}
+              {% set niveau = 'Rouge' if n >= 4 else 'Orange' if n == 3 else 'Jaune' %}
+              {% set t = (state_attr(alerte, 'awareness_type') | string).split(';')[0] | int(0) %}
+              {% set case = {1: 0, 2: 4, 3: 2, 4: 9, 5: 7, 6: 5, 7: 6, 8: 10, 9: 8, 10: 3, 12: 1, 13: 3} %}
+              {% set ns = namespace(l=['Vert'] * 11) %}
+              {% if t in case %}
+                {% set i = case[t] %}
+                {% set ns.l = ns.l[:i] + [niveau] + ns.l[i + 1:] %}
+              {% endif %}
+              {{ ns.l | join('|') }}
+            {% elif source in ['DWD', 'CAP Alerts'] %}
+              {% from 'tab5_vigilance.jinja' import tab5_vigilance %}
+              {{ tab5_vigilance(source, state_attr('sensor.tab5_sources_meteo', 'dwd') or [],
+                                state_attr('sensor.tab5_sources_meteo', 'cap') or []).split('|')[1:] | join('|') }}
+            {% else %}
+              {{ (['Vert'] * 11) | join('|') }}
+            {% endif %}
+          # « none » pour « None » (« Aucune » avant le 24/10/2026) : un rendu « None »
+          # serait relu par HA comme le None de Python.
+          source: >-
+            {%- set s = states('input_select.tab5_source_vigilance') -%}
+            {{ 'none' if s in ['None', 'Aucune'] else s }}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Prévisions et météo du moment (lot 4c-3) : n'importe quelle entité weather.*.
+  # ──────────────────────────────────────────────────────────────────────────
+  - select:
+      - name: "Tab5 · forecast source"
+        unique_id: tab5_source_previsions
+        default_entity_id: select.tab5_source_des_previsions
+        icon: mdi:weather-partly-cloudy
+        options: "{{ states.weather | map(attribute='entity_id') | list }}"
+        state: "{{ state_attr('sensor.tab5_meteo', 'entite') }}"
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_meteo_previsions
+            data:
+              value: "{{ option }}"
+    sensor:
+      - name: "Tab5 Weather"
+        unique_id: tab5_meteo
+        default_entity_id: sensor.tab5_meteo
+        icon: mdi:weather-partly-cloudy
+        # État = condition du moment de l'entité EFFECTIVE (codes HA standard : sunny,
+        # rainy… — ce que lit la tablette). Attributs : ce que lisent les poussées.
+        # Entité effective (custom_templates/tab5_meteo.jinja, 08/10/2026) : la source
+        # choisie (attribut `meteo` de sensor.tab5_sources_meteo), ou, tant qu'elle est
+        # indisponible ou sans relève depuis 2 h, une autre entité météo qui répond (OpenWeatherMap, Météo-France,
+        # puis n'importe laquelle) ; '' s'il n'y en a aucune (les poussées météo sont
+        # alors sautées). Relue dans CHAQUE modèle : `this` porterait l'état précédent.
+        state: >-
+          {%- from 'tab5_meteo.jinja' import tab5_meteo_effective -%}
+          {%- set e = tab5_meteo_effective() -%}
+          {{ states(e if e else (state_attr('sensor.tab5_sources_meteo', 'meteo') or '')) }}
+        attributes:
+          # La source choisie (le select « Tab5 · forecast source » l'affiche) ;
+          # entite_effective : celle qui sert vraiment (poussées, diagnostic).
+          entite: "{{ state_attr('sensor.tab5_sources_meteo', 'meteo') or '' }}"
+          entite_effective: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_effective -%}
+            {{ tab5_meteo_effective() }}
+          nom_effectif: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_effective, tab5_meteo_nom -%}
+            {{ tab5_meteo_nom(tab5_meteo_effective()) }}
+          # Repli en cours (la source choisie ne répond pas) : raison ('indisponible',
+          # 'perimee', '' sinon), depuis quand (epoch, heure locale en texte) et son nom.
+          # Lus par l'alerte « Météo : … » de la carte centrale (tab5_alertes.jinja) et la
+          # vue Santé du tableau de bord.
+          repli: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_repli -%}
+            {{ tab5_meteo_repli('raison') }}
+          repli_depuis: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_repli -%}
+            {{ tab5_meteo_repli('depuis') }}
+          repli_heure: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_repli -%}
+            {{ tab5_meteo_repli('heure') }}
+          nom_choisi: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_nom -%}
+            {{ tab5_meteo_nom(state_attr('sensor.tab5_sources_meteo', 'meteo') or '') }}
+          temperature: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_effective -%}
+            {{ state_attr(tab5_meteo_effective(), 'temperature') }}
+          humidite: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_effective -%}
+            {{ state_attr(tab5_meteo_effective(), 'humidity') }}
+          # Ce que l'entité sait fournir (WeatherEntityFeature : 1 jours, 2 heures,
+          # 4 demi-journées, vérifié dans le code de HA 2026.9.3). Les poussées ne
+          # demandent jamais un type non géré.
+          type_jours: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_effective -%}
+            {% set f = state_attr(tab5_meteo_effective(), 'supported_features') | int(0) %}
+            {{ 'daily' if f | bitwise_and(1) else 'twice_daily' if f | bitwise_and(4) else 'hourly' if f | bitwise_and(2) else '' }}
+          heures_ok: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_effective -%}
+            {{ (state_attr(tab5_meteo_effective(), 'supported_features') | int(0)) | bitwise_and(2) > 0 }}
+          # Probabilités : capteurs Météo-France s'ils existent (même ville), sinon ce
+          # que donne l'entité effective. La neige ne sert qu'à l'icône flocon (≥ 5) :
+          # sans capteur, 100 si la condition du moment est neigeuse.
+          uv: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_effective -%}
+            {% set e = tab5_meteo_effective() %}
+            {% set u = state_attr('sensor.tab5_sources_meteo', 'mf_uv') or '' %}
+            {{ states(u) | int(0) if has_value(u) else state_attr(e, 'uv_index') | int(0) }}
+          gel: "{{ states(state_attr('sensor.tab5_sources_meteo', 'mf_gel') or '') | int(0) }}"
+          neige: >-
+            {%- from 'tab5_meteo.jinja' import tab5_meteo_effective -%}
+            {% set e = tab5_meteo_effective() %}
+            {% set n = state_attr('sensor.tab5_sources_meteo', 'mf_neige') or '' %}
+            {{ states(n) | int(0) if has_value(n) else (100 if states(e) in ['snowy', 'snowy-rainy'] else 0) }}

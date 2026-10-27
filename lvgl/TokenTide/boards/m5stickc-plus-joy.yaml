@@ -1,0 +1,50 @@
+# tokentide on the M5StickC Plus with the Joystick Hat: same minimal UI
+# as the bare stick, plus joystick press = refresh and Y-axis = brightness.
+
+substitutions:
+  name: tokentide-stick
+  friendly_name: TokenTide Stick Joy
+  # Long-lived Claude Code OAuth token (`claude setup-token`). Leave empty
+  # for a device without Claude.
+  claude_token: ""
+  # Seconds between usage polls; the footer shows the resulting req/day.
+  poll_interval: "120"
+  # Small-screen sprites for the theme pages.
+  theme_sprite_size: "small"
+  # Short tap on theme pages is wake-only; set to "toggle_saver" when
+  # opting into packages/saver.yaml.
+  theme_tap_script: "note_activity"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.4.0
+  on_boot:
+    - priority: 600
+      then:
+        - light.turn_on:
+            id: lcd_backlight
+            brightness: 80%
+
+esp32:
+  variant: esp32
+  flash_size: 4MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+
+packages:
+  common: !include ../packages/common.yaml
+  hardware: !include ../packages/hardware-m5stickc-plus.yaml
+  input: !include ../packages/input-joystick-hat.yaml
+  poller: !include ../packages/usage-poller.yaml
+  versioncheck: !include ../packages/version-check.yaml
+  idle: !include ../packages/idle.yaml
+  ui: !include ../packages/ui-240x135-minimal.yaml
+  themes: !include ../packages/themes.yaml
+  theme_graveyard: !include ../packages/theme-graveyard.yaml
+  theme_solar: !include ../packages/theme-solar.yaml
+  theme_horses: !include ../packages/theme-horses.yaml
+  theme_metro: !include ../packages/theme-metro.yaml
+  chime: !include ../packages/chime.yaml
+  led: !include ../packages/led.yaml

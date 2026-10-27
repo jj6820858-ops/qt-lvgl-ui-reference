@@ -1,0 +1,513 @@
+name: Rendu hors tablette
+
+# Lot 7 de l'audit « ouverture » (ADR-0021) : l'interface de la tablette compilée pour
+# la plateforme `host` d'ESPHome (tab5-rendu-host.yaml), lancée sur le runner puis
+# capturée : les scènes du mode démo, puis chaque fenêtre, sous-fenêtre, écran de jeu
+# (tools/rendu/capturer.py, plan dans tools/rendu/ecrans.py), dans les sept langues
+# de l'écran, une tâche par langue en parallèle. Les captures sont comparées
+# (tools/rendu/comparer.py) à celles du dernier run réussi sur main, et les scènes à la
+# galerie versionnée docs/images/rendu/ : INFORMATIF, un écart est signalé sans faire
+# échouer le job (choix d'Axel, 27/09/2026). Galerie : tools/rendu/maj_references.py.
+# Tâche « clair » (thèmes, ADR-0029) : les mêmes captures en français (sans les consoles
+# de jeu, qui restent sombres), thème clair, deux
+# fois — peintes en sombre puis basculées à chaud, puis après un démarrage à froid en
+# clair — et les deux séries doivent être identiques au pixel près (seule comparaison
+# qui fait échouer une tâche : un écart veut dire qu'une couleur n'est pas repeinte).
+# Tâche « galerie » (thèmes, lot 3) : l'accueil et le popup de la climatisation de chaque
+# thème dans ses deux modes, choisis à chaud l'un après l'autre, puis chacun après un
+# démarrage à froid ; les deux séries doivent être identiques au pixel près (un écart =
+# une forme, une police ou une couleur qu'un thème laisse au suivant).
+# Tâche « compiler » (OUT-6 de l'audit du 07/10/2026) : le rendu est compilé UNE fois et
+# passé en artefact aux neuf tâches « rendu », qui le recompilaient chacune (~2 min de
+# runner par tâche) ; les paquets pip d'ESPHome sont gardés en cache par version.
+# Tâche « rendu-7b » (ADR-0061) : le même rendu compilé pour la Waveshare 7B
+# (`-s tab5_carte waveshare-7b`, dalle virtuelle 1024×600 tournée de 180°), scènes et écrans
+# en français, artefact « rendu-1024x600 » à part (pas dans la comparaison des captures
+# du Tab5). INFORMATIF : seul ce que les popups ont en commun suit la taille de la carte
+# (lot 2), l'accueil et les jeux pas encore ; le robot rejoue les gestes du Tab5 ramenés à
+# cet écran, et ouvre par la navigation ce que l'accueil y cache (tools/rendu/vers_carte.py,
+# `--carte`). La tâche n'échoue que si le rendu ne compile pas, ne capture rien ou si une
+# capture n'est pas en 1024×600. Tâche « bilan-7b » : écrans ouverts sur la 7B / attendus
+# (ceux du Tab5) et objets coupés des popups (tools/rendu/bilan_carte.py), dans son résumé.
+
+on:
+  workflow_dispatch:
+    inputs:
+      langues:
+        description: "Langues, en JSON (fr, en, de, nl, es, it, tr ; « clair » : thème clair, à chaud et à froid ; « galerie » : chaque thème)"
+        default: '["fr", "en", "de", "nl", "es", "it", "tr", "clair", "galerie"]'
+      seulement:
+        description: "Mise au point : ces écrans seulement (noms de tools/rendu/ecrans.py, séparés par des espaces), sans les scènes"
+        default: ""
+  push:
+    branches: [main]
+    # Même liste que pull_request, plus bas. Sans elle, un merge de doc seule relançait
+    # 13 min de rendu sur main (28/09/2026). Les références des PR restent les captures
+    # du dernier run réussi sur main : justes, puisque l'écran n'a pas changé depuis.
+    # Gardées 90 jours ; au-delà, comparer.py n'a plus que la galerie (scènes seulement).
+    paths:
+      - 'tab5-ha-hmi.yaml'
+      - 'tab5-rendu-host.yaml'
+      - 'Tab5/**'
+      - 'tools/rendu/**'
+      - 'tools/demo/**'
+      - 'docs/images/rendu/**'
+      - '.github/workflows/rendu-host.yml'
+      - '!**/*.md'
+  pull_request:
+    paths:
+      - 'tab5-ha-hmi.yaml'
+      - 'tab5-rendu-host.yaml'
+      - 'Tab5/**'
+      - 'tools/rendu/**'
+      - 'tools/demo/**'
+      - 'docs/images/rendu/**'
+      - '.github/workflows/rendu-host.yml'
+      - '!**/*.md'
+
+# Un nouveau commit sur une PR annule le rendu devenu inutile : trois pushes en dix
+# minutes lançaient trois rendus complets (18 jobs de 13 min, 28/09/2026), et les jobs
+# en trop faisaient attendre 17 min ceux des autres runs. Sur main, les runs se suivent
+# au lieu de se chevaucher ; un run en attente est remplacé par le plus récent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  actions: read   # captures du dernier run de main (références des écrans)
+
+jobs:
+  compiler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      esphome: ${{ steps.version.outputs.esphome }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Version plancher d'ESPHome (min_version de tab5-ha-hmi.yaml)
+        id: version
+        run: |
+          v=$(sed -n 's/^[[:space:]]*min_version:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' tab5-ha-hmi.yaml | head -n 1)
+          echo "ESPHome $v" >> "$GITHUB_STEP_SUMMARY"
+          echo "esphome=$v" >> "$GITHUB_OUTPUT"
+      # Paquets pip téléchargés, par version d'ESPHome (même clé, lue seulement, dans les
+      # tâches « rendu »).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/pip
+          key: pip-esphome-${{ steps.version.outputs.esphome }}-py3.13
+      - name: ESPHome à la version plancher
+        # Réessais : PyPI répond parfois « from versions: none » (tools/ci/pip_reessai.sh).
+        # Pillow aussi, pour que le cache le garde pour les tâches « rendu ».
+        env:
+          ESPHOME_VERSION: ${{ steps.version.outputs.esphome }}
+        run: bash tools/ci/pip_reessai.sh "esphome==$ESPHOME_VERSION" pillow
+      # Plateforme `native` et outils de PlatformIO, par version d'ESPHome : sur la PR #391,
+      # leur téléchargement a pris 3,5 min (délais du registre de PlatformIO) pour ~1 min de
+      # compilation.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.platformio
+          key: pio-host-${{ steps.version.outputs.esphome }}
+      - name: Compiler le rendu (plateforme host)
+        # Le fuseau d'une horloge `host` est celui de la compilation (le runner est en UTC).
+        env:
+          TZ: Europe/Paris
+        run: |
+          esphome compile tab5-rendu-host.yaml
+          prog=$(find .esphome/build/tab5-rendu -name program -type f | head -n 1)
+          echo "Programme : $prog ($(du -h "$prog" | cut -f1))" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p rendu-programme
+          cp "$prog" rendu-programme/program
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rendu-programme
+          path: rendu-programme/program
+          if-no-files-found: error
+          retention-days: 1
+
+  rendu:
+    needs: compiler
+    runs-on: ubuntu-latest
+    # La galerie démarre le rendu une fois par thème et par mode (36 démarrages à froid).
+    # « clair » rejoue les captures deux fois (bascule à chaud, puis démarrage à froid) : mesuré
+    # le 2026-10-09 sur main, 26,1 à 29,5 min (30,1 min = annulé à la limite de 30, run 37936987986),
+    # contre 19 à 21 min pour une langue et 29 min pour la galerie. Remesuré le 2026-10-14 (runs
+    # 38122146609, 38142719679, 38442520187 sur main) : clair 44 min, galerie 30 min, une langue
+    # 27 min, à une minute de leur plafond. Plafonds = durée mesurée + ~50 % : clair 70, galerie 45,
+    # langue 45 (les écrans ajoutés, comme les trois du Bilan en kWh, allongent chaque tâche).
+    # Remesuré le 2026-10-18 (runs 39155417393 sur main et 39158496347, PR #517 : dix pièces de
+    # vingt éléments, ADR-0066) : clair 68 min, puis 70 = annulé à la limite ; une langue 38-39 min,
+    # galerie 30 min. Plafonds : clair 105, galerie et langue 60.
+    timeout-minutes: ${{ matrix.langue == 'clair' && 105 || 60 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        langue: ${{ fromJSON(inputs.langues || '["fr", "en", "de", "nl", "es", "it", "tr", "clair", "galerie"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/pip
+          key: pip-esphome-${{ needs.compiler.outputs.esphome }}-py3.13
+      - name: ESPHome à la version plancher (son aioesphomeapi sert à capturer.py), Pillow, faketime
+        env:
+          ESPHOME_VERSION: ${{ needs.compiler.outputs.esphome }}
+        run: |
+          # Réessais : PyPI répond parfois « from versions: none » (tools/ci/pip_reessai.sh).
+          bash tools/ci/pip_reessai.sh "esphome==$ESPHOME_VERSION" pillow
+          sudo apt-get install -y --no-install-recommends faketime
+      - name: Rendu compilé par la tâche « compiler »
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: rendu-programme
+          path: rendu-programme
+      - name: Lancer le rendu et capturer scènes et écrans (${{ matrix.langue }})
+        # Date et heure FIGÉES (faketime sans « @ » : l'horloge ne tourne pas), pour le rendu
+        # ET le script : l'heure affichée et le « dans N mn » de la pluie ne changent pas
+        # d'un run à l'autre. Une heure qui avance franchissait une minute pendant les
+        # ~64 s des trois scènes (07:45 → 07:46 sur la dernière capture, vu le 27/09/2026).
+        # L'horloge monotone reste la vraie : ESPHome y mesure le temps depuis
+        # le démarrage (millis), et une date de 2026 la ferait croire vieille de 56 ans
+        # (la fenêtre d'appairage de 30 min se fermait dès le démarrage).
+        # Hors français, on choisit d'abord la langue : comme la tablette, le rendu
+        # l'enregistre et redémarre, c'est-à-dire qu'il s'arrête sur host ; on le relance
+        # avec les mêmes préférences (ESPHOME_PREFDIR), neuves pour chaque langue.
+        env:
+          TZ: Europe/Paris
+          DEPART: "2026-06-16 07:45:00"
+          FAKETIME_DONT_FAKE_MONOTONIC: "1"
+          ESPHOME_PREFDIR: ${{ runner.temp }}/prefs
+          LANGUE: ${{ matrix.langue }}
+          SEULEMENT: ${{ inputs.seulement }}
+        run: |
+          # Un artefact ne garde pas le bit d'exécution.
+          prog="$PWD/rendu-programme/program"
+          chmod +x "$prog"
+          echo "Programme : $prog"
+          mkdir -p captures
+          export ESPHOME_SNAPSHOT_DIR="$PWD/captures"
+          case "$LANGUE" in
+            fr) nom="" ;;
+            en) nom="English" ;;
+            de) nom="Deutsch" ;;
+            nl) nom="Nederlands" ;;
+            es) nom="Español" ;;
+            it) nom="Italiano" ;;
+            tr) nom="Türkçe" ;;
+            clair|galerie) nom="" ;;
+            *) echo "Langue inconnue : $LANGUE"; exit 1 ;;
+          esac
+          # faketime lance le programme dans un processus fils : tuer faketime ne
+          # l'arrête pas, et la passe suivante ne pourrait pas ouvrir le port de l'API.
+          arreter() {
+            pkill -f "$prog" 2>/dev/null || true
+            for _ in $(seq 1 20); do pgrep -f "$prog" >/dev/null || break; sleep 1; done
+            pkill -9 -f "$prog" 2>/dev/null || true
+            wait "$1" 2>/dev/null || true
+          }
+
+          if [ "$LANGUE" = galerie ]; then
+            # À chaud : un démarrage, chaque thème et chaque mode choisis l'un après l'autre.
+            mkdir -p chaud
+            ESPHOME_SNAPSHOT_DIR="$PWD/chaud" faketime -f "$DEPART" "$prog" > "captures/rendu-galerie-chaud.log" 2>&1 &
+            pid=$!
+            sleep 8
+            faketime -f "$DEPART" python tools/rendu/capturer.py --dossier chaud --galerie
+            arreter "$pid"
+            # À froid : chaque démarrage capture le thème enregistré par le précédent.
+            mapfile -t combis < <(python tools/rendu/capturer.py --dossier captures --liste-galerie)
+            IFS='|' read -r nom0 _ mode0 <<< "${combis[0]}"
+            faketime -f "$DEPART" "$prog" > "captures/rendu-galerie-0.log" 2>&1 &
+            pid=$!
+            sleep 8
+            faketime -f "$DEPART" python tools/rendu/capturer.py --dossier captures --preparer \
+              --puis-theme "$nom0" --puis-mode-theme "$mode0"
+            arreter "$pid"
+            for i in "${!combis[@]}"; do
+              IFS='|' read -r _ fichier mode <<< "${combis[$i]}"
+              suite=()
+              if [ $((i + 1)) -lt "${#combis[@]}" ]; then
+                IFS='|' read -r nom_s _ mode_s <<< "${combis[$((i + 1))]}"
+                suite=(--puis-theme "$nom_s" --puis-mode-theme "$mode_s")
+              fi
+              faketime -f "$DEPART" "$prog" > "captures/rendu-galerie-$((i + 1)).log" 2>&1 &
+              pid=$!
+              sleep 8
+              faketime -f "$DEPART" python tools/rendu/capturer.py --dossier captures \
+                --galerie-un "theme-$fichier-${mode,,}" "${suite[@]}"
+              arreter "$pid"
+            done
+            exit 0
+          fi
+
+          if [ "$LANGUE" = clair ]; then
+            # Passe 1 : démarrage en sombre ; avant chaque capture, « Clair ou sombre »
+            # passe à Clair (bascule à chaud), puis revient à Sombre. À la fin, le mode
+            # Clair est enregistré : la passe suivante démarre à froid en clair.
+            mkdir -p chaud
+            ESPHOME_SNAPSHOT_DIR="$PWD/chaud" faketime -f "$DEPART" "$prog" > "captures/rendu-clair-chaud.log" 2>&1 &
+            pid=$!
+            sleep 8
+            faketime -f "$DEPART" python tools/rendu/capturer.py --dossier chaud --suffixe clair \
+              --bascule Clair --puis-mode-theme Clair --sans-jeux
+            arreter "$pid"
+          fi
+
+          if [ -n "$nom" ]; then
+            faketime -f "$DEPART" "$prog" > "captures/rendu-$LANGUE-choix.log" 2>&1 &
+            pid=$!
+            sleep 8
+            faketime -f "$DEPART" python tools/rendu/capturer.py --dossier captures --langue "$nom"
+            for i in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+            kill "$pid" 2>/dev/null || true
+          fi
+
+          faketime -f "$DEPART" "$prog" > "captures/rendu-$LANGUE.log" 2>&1 &
+          pid=$!
+          sleep 8
+          args=(--dossier captures)
+          [ "$LANGUE" != fr ] && args+=(--suffixe "$LANGUE")
+          # Thème clair : même nom de capture qu'à chaud, pour comparer les deux séries ;
+          # sans les consoles, qui restent sombres (les deux passes tiennent en 30 min).
+          [ "$LANGUE" = clair ] && args+=(--sans-jeux)
+          # shellcheck disable=SC2206 # noms d'écrans séparés par des espaces
+          [ -n "$SEULEMENT" ] && args+=(--seulement $SEULEMENT)
+          faketime -f "$DEPART" python tools/rendu/capturer.py "${args[@]}"
+          kill "$pid" 2>/dev/null || true
+      - name: "Thème clair : bascule à chaud = démarrage à froid"
+        if: matrix.langue == 'clair'
+        run: |
+          code=0
+          python tools/rendu/comparer.py --captures chaud --references captures --strict \
+            --titre "Thème clair, bascule à chaud contre démarrage à froid" || code=$?
+          # Images des écarts (pixels changés en magenta) dans l'artefact de la tâche.
+          [ -d chaud/diff ] && cp -r chaud/diff captures/diff-bascule
+          exit "$code"
+      - name: "Galerie des thèmes : bascule à chaud = démarrage à froid"
+        if: matrix.langue == 'galerie'
+        run: |
+          code=0
+          python tools/rendu/comparer.py --captures chaud --references captures --strict \
+            --titre "Galerie des thèmes, bascule à chaud contre démarrage à froid" || code=$?
+          [ -d chaud/diff ] && cp -r chaud/diff captures/diff-bascule
+          exit "$code"
+      - name: Formats de couleur de LVGL
+        # Un format que lv_conf.h n'active pas (LV_DRAW_SW_SUPPORT_*) : LVGL l'écrit au
+        # journal et dessine des pixels non initialisés (vignette de caméra appuyée,
+        # discussion #278, 17/10/2026). Drapeaux : build_flags de tab5-ha-hmi.yaml.
+        if: always()
+        run: |
+          if grep -ah "is not enabled" captures/rendu-*.log | sed 's/^\[[0-9:]*\]//' | sort | uniq -c | grep .; then
+            echo "::error::LVGL : un format de couleur n'est pas activé (journal du rendu ci-dessus)"
+            exit 1
+          fi
+      - name: Journaux du rendu
+        if: always()
+        run: tail -n 80 captures/rendu-*.log || true
+      - name: Captures (${{ matrix.langue }})
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rendu-captures-${{ matrix.langue }}
+          path: |
+            captures/
+            !captures/*.bmp
+          if-no-files-found: warn
+          retention-days: 3
+
+  # Waveshare 7B, 1024×600 (ADR-0061) : voir l'en-tête. Indépendante des tâches du Tab5
+  # (ni `needs`, ni artefact « rendu-captures-* » que `comparer` réunit).
+  rendu-7b:
+    runs-on: ubuntu-latest
+    # Compilation (~2 à 4 min) + scènes et ~200 écrans en une passe (~20 min pour une langue).
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Version plancher d'ESPHome (min_version de tab5-ha-hmi.yaml)
+        id: version
+        run: |
+          v=$(sed -n 's/^[[:space:]]*min_version:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' tab5-ha-hmi.yaml | head -n 1)
+          echo "esphome=$v" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/pip
+          key: pip-esphome-${{ steps.version.outputs.esphome }}-py3.13
+      - name: ESPHome à la version plancher, Pillow, faketime
+        env:
+          ESPHOME_VERSION: ${{ steps.version.outputs.esphome }}
+        run: |
+          bash tools/ci/pip_reessai.sh "esphome==$ESPHOME_VERSION" pillow
+          sudo apt-get install -y --no-install-recommends faketime
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.platformio
+          key: pio-host-${{ steps.version.outputs.esphome }}
+      - name: Compiler le rendu de la Waveshare 7B (1024×600)
+        env:
+          TZ: Europe/Paris
+        run: |
+          esphome -s tab5_carte waveshare-7b -s rendu_nom tab5-rendu-7b compile tab5-rendu-host.yaml
+          prog=$(find .esphome/build/tab5-rendu-7b -name program -type f | head -n 1)
+          echo "Programme 1024×600 : $prog ($(du -h "$prog" | cut -f1))" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p rendu-programme
+          cp "$prog" rendu-programme/program
+      - name: Lancer le rendu et capturer scènes et écrans (1024×600)
+        # Mêmes réglages que la tâche « fr » (date figée, préférences neuves). Les alertes de
+        # capturer.py (« identique à … : l'appui n'a rien ouvert ? ») sont attendues ici :
+        # gardées dans le journal, pas en annotations de la PR. `seulement` (lancement à la
+        # main) vaut aussi ici : la mise au point d'un popup de la 7B en quelques minutes.
+        env:
+          TZ: Europe/Paris
+          DEPART: "2026-06-16 07:45:00"
+          FAKETIME_DONT_FAKE_MONOTONIC: "1"
+          ESPHOME_PREFDIR: ${{ runner.temp }}/prefs
+          SEULEMENT: ${{ inputs.seulement }}
+        run: |
+          set -o pipefail
+          prog="$PWD/rendu-programme/program"
+          chmod +x "$prog"
+          mkdir -p captures
+          export ESPHOME_SNAPSHOT_DIR="$PWD/captures"
+          faketime -f "$DEPART" "$prog" > "captures/rendu-7b.log" 2>&1 &
+          pid=$!
+          sleep 8
+          args=(--dossier captures --carte waveshare-7b)
+          [ -n "$SEULEMENT" ] && args+=(--seulement $SEULEMENT)
+          faketime -f "$DEPART" python tools/rendu/capturer.py "${args[@]}" \
+            | sed 's/^::warning[^:]*::/alerte : /'
+          pkill -f "$prog" 2>/dev/null || true
+          kill "$pid" 2>/dev/null || true
+      - name: Taille des captures (1024×600)
+        run: |
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import sys
+          from pathlib import Path
+          from PIL import Image
+          sys.path.insert(0, "tools/rendu")
+          from capturer import _portrait
+          tailles = {}
+          for png in sorted(Path("captures").glob("*.png")):
+              with Image.open(png) as image:
+                  if not _portrait(png.stem):
+                      tailles.setdefault(image.size, []).append(png.stem)
+          print("### Rendu 1024×600 (Waveshare 7B, informatif)")
+          for (l, h), noms in sorted(tailles.items()):
+              print(f"- {len(noms)} captures en {l}×{h}")
+          if set(tailles) != {(1024, 600)}:
+              sys.exit(f"Captures pas toutes en 1024×600 : {sorted(tailles)}")
+          EOF
+      - name: Formats de couleur de LVGL (1024×600)
+        # Comme la tâche « rendu » : ici, les images des caméras sont réduites (cadre et
+        # cases plus petits que les images de HA), le chemin de la transformation.
+        if: always()
+        run: |
+          if grep -ah "is not enabled" captures/rendu-7b.log | sed 's/^\[[0-9:]*\]//' | sort | uniq -c | grep .; then
+            echo "::error::LVGL : un format de couleur n'est pas activé (journal du rendu ci-dessus)"
+            exit 1
+          fi
+      - name: Journal du rendu
+        if: always()
+        run: tail -n 80 captures/rendu-7b.log || true
+      - name: Captures 1024×600
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rendu-1024x600
+          path: |
+            captures/
+            !captures/*.bmp
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Écrans ouverts sur la 7B / attendus (ceux du Tab5), objets coupés des popups
+  # (tools/rendu/bilan_carte.py, lot 2 du portage) : le bilan de chaque carte vient de sa
+  # tâche (ecrans-<carte>.json, écrit par capturer.py), d'où une tâche à part, qui attend
+  # les deux. INFORMATIF, dans le résumé de cette tâche.
+  bilan-7b:
+    name: "Rendu 7B : écrans ouverts / attendus"
+    needs: [rendu, rendu-7b]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Bilan du Tab5 (tâche « fr »)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        continue-on-error: true
+        with:
+          name: rendu-captures-fr
+          path: tab5
+      - name: Bilan de la 7B
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        continue-on-error: true
+        with:
+          name: rendu-1024x600
+          path: carte
+      - name: Écrans ouverts et objets coupés
+        run: |
+          if [ ! -f tab5/ecrans-tab5.json ] || [ ! -f carte/ecrans-waveshare-7b.json ]; then
+            echo "Bilan impossible : ecrans-tab5.json ou ecrans-waveshare-7b.json absent" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python tools/rendu/bilan_carte.py --tab5 tab5/ecrans-tab5.json \
+            --carte carte/ecrans-waveshare-7b.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+  comparer:
+    needs: rendu
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - run: bash tools/ci/pip_reessai.sh pillow
+      - name: Réunir les captures des sept langues
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: rendu-captures-*
+          merge-multiple: true
+          path: captures
+      - name: Captures du dernier run réussi sur main (références des écrans)
+        if: github.ref != 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow rendu-host.yml --branch main \
+                 --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$id" ]; then
+            echo "Références : run $id de main"
+            gh run download "$id" --repo "$GITHUB_REPOSITORY" --name rendu-captures --dir references-main \
+              || echo "::notice title=Rendu::captures du run $id de main indisponibles"
+          fi
+      - name: Comparer (informatif)
+        run: |
+          refs=(--references docs/images/rendu)
+          [ -d references-main ] && refs+=(--references references-main)
+          python tools/rendu/comparer.py --captures captures "${refs[@]}"
+      - name: Captures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rendu-captures
+          path: |
+            captures/
+            !captures/*.bmp
+          if-no-files-found: warn
+          # Celles de main servent de références aux PR : gardées plus longtemps.
+          retention-days: ${{ github.ref == 'refs/heads/main' && 90 || 14 }}

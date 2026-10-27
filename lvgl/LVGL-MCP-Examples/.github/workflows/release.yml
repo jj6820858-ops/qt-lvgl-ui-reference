@@ -1,0 +1,545 @@
+name: Release
+
+# Release flow: tag vX.Y.Z (== mcp-server/package.json version)
+#   -> verify-version -> build (linux-x64, macos-arm64, macos-x64, windows-x64:
+#      source build + tests, prebuilt LVGL, archive, no-toolchain smoke test)
+#   -> create-release -> publish-npm
+# Recommended: run the "Tag release" workflow (tag.yml). It creates the
+# annotated tag and dispatches this workflow with it, because a tag created
+# with GITHUB_TOKEN does not trigger `push: tags`. Pushing a tag by hand
+# triggers this workflow directly.
+# workflow_dispatch runs the flow for an EXISTING tag (it never creates one).
+# If only a late job failed (e.g. npm publish), use "Re-run failed jobs" instead:
+# verify-version refuses tags that already have a release or an npm version.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, e.g. v2.1.0 (must equal v + mcp-server/package.json version)"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "22"
+  PACKAGE_NAME: lvgl-mcp-server
+
+jobs:
+  verify-version:
+    name: Verify tag and version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - name: Check tag, package.json, CHANGELOG, GitHub release and npm
+        id: check
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "tag '$TAG' is not of the form vMAJOR.MINOR.PATCH"
+
+          version="$(node -p "require('./mcp-server/package.json').version")"
+          [ "$TAG" = "v$version" ] || fail "tag $TAG does not match mcp-server/package.json version $version"
+
+          grep -qE "^## \[${version//./\\.}\]" CHANGELOG.md || fail "CHANGELOG.md has no '## [$version]' section"
+
+          if out="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName 2>&1)"; then
+            fail "GitHub release $TAG already exists"
+          elif ! grep -qi "not found" <<<"$out"; then
+            fail "could not query GitHub releases: $out"
+          fi
+
+          npm view "$PACKAGE_NAME" name >/dev/null || fail "npm registry query for $PACKAGE_NAME failed"
+          published="$(npm view "${PACKAGE_NAME}@${version}" version 2>/dev/null || true)"
+          [ -z "$published" ] || fail "${PACKAGE_NAME}@${version} is already published on npm"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG"
+
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: verify-version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        # platform = simulator/prebuilt/<platform> shipped in the archive
+        # (scripts/build-prebuilt.sh|.ps1): a static LVGL library and a
+        # ready-to-run lvgl_sim, so each archive is architecture-specific.
+        include:
+          - os: ubuntu-latest
+            asset: lvgl-mcp-esp32-linux-x64.tar.gz
+            platform: linux-x64
+          - os: macos-latest # Apple Silicon
+            asset: lvgl-mcp-esp32-macos-arm64.tar.gz
+            platform: macos-arm64
+          - os: macos-26-intel
+            asset: lvgl-mcp-esp32-macos-x64.tar.gz
+            platform: macos-x64
+          - os: windows-latest
+            asset: lvgl-mcp-esp32-windows-x64.zip
+            platform: windows-x64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.verify-version.outputs.tag }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # No dependency cache in the release pipeline (cache poisoning).
+          package-manager-cache: false
+
+      - name: Install Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+
+      # The macOS images ship Xcode (Apple clang), CMake, Ninja and GNU tar;
+      # install only what is missing. GNU tar packs the archive: bsdtar would
+      # add AppleDouble (._*) entries and macOS extended attributes.
+      - name: Toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          command -v ninja >/dev/null || brew install ninja
+          command -v cmake >/dev/null || brew install cmake
+          command -v gtar >/dev/null || brew install gnu-tar
+          echo "Xcode: $(xcode-select -p)"
+          cc --version | head -n1
+          cmake --version | head -n1
+          echo "ninja $(ninja --version)"
+
+      # This exports vcvars' environment, including Platform=x64. Windows env
+      # names are case-insensitive, so a step env named PLATFORM would merge
+      # into that "Platform" key and Git Bash would not see $PLATFORM; hence
+      # PREBUILT_PLATFORM below.
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      # Windows steps use pwsh, not Git Bash: its /usr/bin/link would shadow
+      # MSVC's link.exe.
+      - name: Build simulator (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cmake -S simulator -B simulator/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build simulator/build --parallel
+
+      - name: Build simulator (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S simulator -B simulator/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          cmake --build simulator/build --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+
+      - name: Smoke test (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: node scripts/smoke-test.mjs simulator/build/lvgl_sim 320 240
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          node scripts/smoke-test.mjs simulator/build/lvgl_sim.exe 320 240
+          if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
+
+      # simulator/prebuilt/<platform>/: liblvgl.a (lvgl.lib), headers,
+      # lv_conf.sha256 and lvgl_sim, built from this tree in Release.
+      # --verify links the simulator against it, requires byte-identical PNGs
+      # from the source build, the prebuilt link and the shipped lvgl_sim,
+      # and checks that a changed lv_conf.h falls back to the source build.
+      # Built before the tests so the e2e tests run with it in place, as users
+      # get it.
+      - name: Build prebuilt LVGL (Linux, macOS)
+        if: runner.os != 'Windows'
+        env:
+          PREBUILT_PLATFORM: ${{ matrix.platform }}
+        run: ./scripts/build-prebuilt.sh --platform "$PREBUILT_PLATFORM" --build-dir "$RUNNER_TEMP/prebuilt-build" --verify
+
+      - name: Build prebuilt LVGL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PREBUILT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          if ($env:PREBUILT_PLATFORM -ne "windows-x64") { throw "build-prebuilt.ps1 builds windows-x64, matrix wants $env:PREBUILT_PLATFORM" }
+          & .\scripts\build-prebuilt.ps1 -BuildDir (Join-Path $env:RUNNER_TEMP "prebuilt-build") -Verify
+          if ($LASTEXITCODE -ne 0) { throw "build-prebuilt.ps1 failed with $LASTEXITCODE" }
+
+      - name: Build MCP server
+        working-directory: mcp-server
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+
+      - name: Unit + end-to-end tests
+        working-directory: mcp-server
+        env:
+          LVGL_E2E: "1"
+        run: npm test
+
+      # Slim bundle: the simulator + LVGL sources (renders of C code compile
+      # against them) and simulator/prebuilt/<platform>/ (static LVGL library
+      # + lvgl_sim for this platform). A configured build dir is NOT shipped:
+      # CMakeCache.txt/build.ninja hold absolute runner paths, so on another
+      # machine CMake has to reconfigure anyway; the prebuilt library is what
+      # saves the full LVGL compile.
+      - name: Stage slim archive
+        shell: bash
+        env:
+          COPYFILE_DISABLE: "1" # macOS: no AppleDouble files, whatever tar runs
+          PREBUILT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          tar=tar
+          if [ "$RUNNER_OS" = "macOS" ]; then tar=gtar; fi
+          temp="$RUNNER_TEMP"
+          if command -v cygpath >/dev/null 2>&1; then temp="$(cygpath -u "$RUNNER_TEMP")"; fi
+          stage="$temp/stage"
+          rm -rf "$stage"
+          mkdir -p "$stage/simulator" "$stage/mcp-server/scripts"
+
+          "$tar" -C simulator \
+            --exclude='./build*' \
+            --exclude=./lib/lvgl/tests \
+            --exclude=./lib/lvgl/demos \
+            --exclude=./lib/lvgl/docs \
+            --exclude=./lib/lvgl/examples \
+            --exclude=./lib/lvgl/scripts \
+            --exclude='./lib/lvgl/.git*' \
+            --exclude='./.git*' \
+            -cf - . | "$tar" -C "$stage/simulator" -xf -
+
+          cp -R mcp-server/dist mcp-server/bin "$stage/mcp-server/"
+          cp mcp-server/package.json mcp-server/package-lock.json "$stage/mcp-server/"
+          cp mcp-server/scripts/postinstall.mjs "$stage/mcp-server/scripts/"
+          cp LICENSE README.md CHANGELOG.md "$stage/"
+
+          # Exactly this platform's prebuilt dir, complete.
+          pre="$stage/simulator/prebuilt/$PREBUILT_PLATFORM"
+          found="$(find "$stage/simulator/prebuilt" -mindepth 1 -maxdepth 1 -exec basename {} \; | tr '\n' ' ')"
+          [ "$found" = "$PREBUILT_PLATFORM " ] \
+            || { echo "::error::simulator/prebuilt must hold only $PREBUILT_PLATFORM, found: $found"; exit 1; }
+          if [ "$RUNNER_OS" = "Windows" ]; then lib=lvgl.lib; sim=lvgl_sim.exe; else lib=liblvgl.a; sim=lvgl_sim; fi
+          for f in "$lib" "$sim" include/lvgl.h include/include/lvgl/lvgl.h include/include/lvgl/lv_version.h lv_conf.sha256 BUILD-INFO.txt; do
+            [ -f "$pre/$f" ] || { echo "::error::$pre/$f is missing"; exit 1; }
+          done
+          cat "$pre/BUILD-INFO.txt"
+
+          echo "Staged size:"; du -sh "$stage" "$stage/simulator/lib/lvgl" "$pre"
+
+      # Prove the slim tree still configures and builds, both from source
+      # (nothing in the removed LVGL folders is needed) and against the staged
+      # prebuilt library (same PNG), in build dirs outside the stage.
+      - name: Verify the slim tree builds (Linux, macOS)
+        if: runner.os != 'Windows'
+        env:
+          PREBUILT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/stage/simulator"
+          cmake -S "$src" -B "$RUNNER_TEMP/slim-build" -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/slim-build" --parallel
+          "$RUNNER_TEMP/slim-build/lvgl_sim" --width 64 --height 64 \
+            --output-png "$RUNNER_TEMP/slim.png" --output-json "$RUNNER_TEMP/slim.json"
+          test -s "$RUNNER_TEMP/slim.png"
+
+          cmake -S "$src" -B "$RUNNER_TEMP/slim-prebuilt" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLVGL_PREBUILT_DIR="$src/prebuilt/$PREBUILT_PLATFORM" 2>&1 | tee "$RUNNER_TEMP/slim-prebuilt.log"
+          grep -q "LVGL_PREBUILT: using" "$RUNNER_TEMP/slim-prebuilt.log" \
+            || { echo "::error::the slim tree did not use its prebuilt LVGL"; exit 1; }
+          cmake --build "$RUNNER_TEMP/slim-prebuilt" --parallel
+          "$RUNNER_TEMP/slim-prebuilt/lvgl_sim" --width 64 --height 64 \
+            --output-png "$RUNNER_TEMP/slim-prebuilt.png" --output-json "$RUNNER_TEMP/slim-prebuilt.json"
+          cmp "$RUNNER_TEMP/slim.png" "$RUNNER_TEMP/slim-prebuilt.png" \
+            || { echo "::error::prebuilt-linked render differs from the source build"; exit 1; }
+
+          for d in "$src"/build*; do
+            if [ -e "$d" ]; then echo "::error::build dir $d leaked into the stage"; exit 1; fi
+          done
+
+      - name: Verify the slim tree builds (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PREBUILT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          $src = Join-Path $env:RUNNER_TEMP "stage\simulator"
+          $bld = Join-Path $env:RUNNER_TEMP "slim-build"
+          cmake -S $src -B $bld -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          if ($LASTEXITCODE -ne 0) { throw "configure of the slim tree failed" }
+          cmake --build $bld --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build of the slim tree failed" }
+          $png = Join-Path $env:RUNNER_TEMP "slim.png"
+          & (Join-Path $bld "lvgl_sim.exe") --width 64 --height 64 --output-png $png --output-json (Join-Path $env:RUNNER_TEMP "slim.json")
+          if ($LASTEXITCODE -ne 0) { throw "slim lvgl_sim exited with $LASTEXITCODE" }
+          if ((Get-Item $png).Length -eq 0) { throw "empty PNG" }
+
+          $pbld = Join-Path $env:RUNNER_TEMP "slim-prebuilt"
+          $pdir = Join-Path $src "prebuilt\$env:PREBUILT_PLATFORM"
+          $cfg = cmake -S $src -B $pbld -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "-DLVGL_PREBUILT_DIR=$pdir" 2>&1 | Out-String
+          Write-Host $cfg
+          if ($LASTEXITCODE -ne 0) { throw "configure of the slim tree with the prebuilt LVGL failed" }
+          if ($cfg -notmatch "LVGL_PREBUILT: using") { throw "the slim tree did not use its prebuilt LVGL" }
+          cmake --build $pbld --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build of the slim tree against the prebuilt LVGL failed" }
+          $ppng = Join-Path $env:RUNNER_TEMP "slim-prebuilt.png"
+          & (Join-Path $pbld "lvgl_sim.exe") --width 64 --height 64 --output-png $ppng --output-json (Join-Path $env:RUNNER_TEMP "slim-prebuilt.json")
+          if ($LASTEXITCODE -ne 0) { throw "prebuilt-linked lvgl_sim exited with $LASTEXITCODE" }
+          $a = [System.IO.File]::ReadAllBytes($png)
+          $b = [System.IO.File]::ReadAllBytes($ppng)
+          if ([System.Convert]::ToBase64String($a) -ne [System.Convert]::ToBase64String($b)) { throw "prebuilt-linked render differs from the source build" }
+
+          if (Get-ChildItem -Path $src -Directory -Filter "build*") { throw "a build dir leaked into the stage" }
+
+      - name: Create archive (Linux, macOS)
+        if: runner.os != 'Windows'
+        env:
+          COPYFILE_DISABLE: "1"
+        run: |
+          tar=tar
+          if [ "$RUNNER_OS" = "macOS" ]; then tar=gtar; fi
+          "$tar" -czf "${{ matrix.asset }}" -C "$RUNNER_TEMP/stage" .
+          "$tar" -tzf "${{ matrix.asset }}" > "$RUNNER_TEMP/archive-list.txt"
+          grep -xE '(\./)?simulator/CMakeLists\.txt' "$RUNNER_TEMP/archive-list.txt" >/dev/null \
+            || { echo "::error::simulator/CMakeLists.txt missing from the archive"; exit 1; }
+          if grep -E '(^|/)\._' "$RUNNER_TEMP/archive-list.txt"; then
+            echo "::error::AppleDouble (._*) entries in the archive"; exit 1
+          fi
+
+      - name: Create archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:GITHUB_WORKSPACE "${{ matrix.asset }}"
+          Push-Location (Join-Path $env:RUNNER_TEMP "stage")
+          try {
+            7z a -tzip -mx=9 $dest .\*
+            if ($LASTEXITCODE -ne 0) { throw "7z failed with $LASTEXITCODE" }
+          } finally { Pop-Location }
+          # postinstall extracts with the bsdtar that ships with Windows; make
+          # sure it can read the zip and sees forward-slash entry names.
+          $list = & "$env:SystemRoot\System32\tar.exe" -tf $dest
+          if ($LASTEXITCODE -ne 0) { throw "tar.exe cannot read $dest" }
+          if (-not ($list -match '^(\./)?simulator/CMakeLists\.txt$')) { throw "simulator/CMakeLists.txt missing from the zip" }
+
+      # What a user without a toolchain gets: unpack the archive as postinstall
+      # does, check postinstall maps this runner to the shipped prebuilt dir,
+      # and render examples/06-ui.json with the packaged lvgl_sim under an
+      # environment whose PATH has no compiler, CMake, Ninja or Make
+      # (smoke-test.mjs --no-toolchain asserts that). No build dir may appear.
+      - name: Smoke test the packaged lvgl_sim without a toolchain (Linux, macOS)
+        if: runner.os != 'Windows'
+        env:
+          ASSET: ${{ matrix.asset }}
+          PREBUILT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          x="$RUNNER_TEMP/unpacked"
+          rm -rf "$x" && mkdir -p "$x"
+          tar -xzf "$ASSET" -C "$x"
+          # shellcheck disable=SC2016 # JavaScript template literal, not shell
+          X="$x/simulator" node --input-type=module -e '
+            const m = await import(process.cwd() + "/mcp-server/scripts/postinstall.mjs");
+            const r = m.preparePrebuilt(process.env.X);
+            if (r.id !== process.env.PREBUILT_PLATFORM || !r.ok) {
+              console.error(`postinstall sees ${JSON.stringify(r)} for ${process.platform}-${process.arch}, expected ${process.env.PREBUILT_PLATFORM}`);
+              process.exit(1);
+            }'
+          node scripts/smoke-test.mjs "$x/simulator/prebuilt/$PREBUILT_PLATFORM/lvgl_sim" 480 320 \
+            --ui examples/06-ui.json --expect-names title,target,settings_btn --no-toolchain
+          if [ -e "$x/simulator/build" ]; then echo "::error::a build dir appeared in the unpacked tree"; exit 1; fi
+
+      - name: Smoke test the packaged lvgl_sim without a toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ASSET: ${{ matrix.asset }}
+          PREBUILT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          $x = Join-Path $env:RUNNER_TEMP "unpacked"
+          if (Test-Path $x) { Remove-Item -Recurse -Force $x }
+          New-Item -ItemType Directory -Force -Path $x | Out-Null
+          & "$env:SystemRoot\System32\tar.exe" -xf (Join-Path $env:GITHUB_WORKSPACE $env:ASSET) -C $x
+          if ($LASTEXITCODE -ne 0) { throw "tar.exe failed to unpack $env:ASSET" }
+          $env:X = Join-Path $x "simulator"
+          $url = ([System.Uri](Join-Path $env:GITHUB_WORKSPACE "mcp-server\scripts\postinstall.mjs")).AbsoluteUri
+          node --input-type=module -e "const m = await import('$url'); const r = m.preparePrebuilt(process.env.X); if (r.id !== process.env.PREBUILT_PLATFORM || !r.ok) { console.error('postinstall sees ' + JSON.stringify(r) + ', expected ' + process.env.PREBUILT_PLATFORM); process.exit(1); }"
+          if ($LASTEXITCODE -ne 0) { throw "postinstall does not find the prebuilt dir" }
+          node scripts/smoke-test.mjs (Join-Path $x "simulator\prebuilt\$env:PREBUILT_PLATFORM\lvgl_sim.exe") 480 320 --ui examples/06-ui.json --expect-names title,target,settings_btn --no-toolchain
+          if ($LASTEXITCODE -ne 0) { throw "smoke test of the packaged lvgl_sim.exe failed" }
+          if (Test-Path (Join-Path $x "simulator\build")) { throw "a build dir appeared in the unpacked tree" }
+
+      - name: Archive size
+        shell: bash
+        run: ls -l "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  create-release:
+    name: Create GitHub release
+    needs: [verify-version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release
+      id-token: write # build provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.verify-version.outputs.tag }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist-assets
+          pattern: lvgl-mcp-esp32-*
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist-assets
+        run: |
+          assets=(lvgl-mcp-esp32-linux-x64.tar.gz lvgl-mcp-esp32-macos-arm64.tar.gz lvgl-mcp-esp32-macos-x64.tar.gz lvgl-mcp-esp32-windows-x64.zip)
+          for a in "${assets[@]}"; do test -f "$a" || { echo "::error::$a is missing"; exit 1; }; done
+          sha256sum "${assets[@]}" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist-assets/lvgl-mcp-esp32-linux-x64.tar.gz
+            dist-assets/lvgl-mcp-esp32-macos-arm64.tar.gz
+            dist-assets/lvgl-mcp-esp32-macos-x64.tar.gz
+            dist-assets/lvgl-mcp-esp32-windows-x64.zip
+
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            /^## \[/ { if (found) exit; if (index($0, "## [" v "]") == 1) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no (or an empty) section for $VERSION"
+            exit 1
+          fi
+          cat >> release-notes.md <<'EOF'
+
+          ---
+          **Install:** `npm install -g lvgl-mcp-server` (the matching simulator is downloaded and SHA-256 verified on install), or `claude mcp add lvgl-simulator -- npx -y lvgl-mcp-server@2`.
+          Each archive ships a prebuilt LVGL library and `lvgl_sim` for its platform (`simulator/prebuilt/<platform>/`): JSON UI renders (`lvgl_render_ui`) need no toolchain. Renders of C code need a C/C++ compiler, CMake >= 3.16 and Ninja (or Make) (Windows: Visual Studio Build Tools; macOS: `xcode-select --install` and `brew install cmake ninja`; Linux: gcc or clang); the first one links the prebuilt LVGL instead of compiling it.
+
+          **Verify downloads:** `sha256sum --ignore-missing -c SHA256SUMS.txt` (macOS: `shasum -a 256 --ignore-missing -c SHA256SUMS.txt`) and `gh attestation verify <archive> --repo jaklys/Lvgl-mcp-esp32`.
+          EOF
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify-version.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$TAG" \
+            --notes-file release-notes.md \
+            dist-assets/lvgl-mcp-esp32-linux-x64.tar.gz \
+            dist-assets/lvgl-mcp-esp32-macos-arm64.tar.gz \
+            dist-assets/lvgl-mcp-esp32-macos-x64.tar.gz \
+            dist-assets/lvgl-mcp-esp32-windows-x64.zip \
+            dist-assets/SHA256SUMS.txt
+
+  publish-npm:
+    name: Publish to npm
+    needs: [verify-version, create-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # npm provenance (and trusted publishing)
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.verify-version.outputs.tag }}
+          persist-credentials: false
+
+      # Node 24 ships npm 11, which supports both --provenance with a token
+      # and npm trusted publishing (OIDC, npm >= 11.5.1).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Build and test
+        working-directory: mcp-server
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          npm test
+
+      - name: Check package version
+        working-directory: mcp-server
+        env:
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: test "$(node -p "require('./package.json').version")" = "$VERSION"
+
+      # Auth: NPM_TOKEN (an npm "automation"/granular token with publish
+      # rights) is used when the secret is set. Alternative without a stored
+      # secret: configure npm trusted publishing for this repository and the
+      # workflow file "release.yml" on npmjs.com ->
+      # package settings -> Trusted publishers, then delete the NPM_TOKEN
+      # secret; npm then authenticates with the job's OIDC token (id-token:
+      # write above) and adds provenance automatically.
+      - name: Publish
+        working-directory: mcp-server
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
+
+      - name: Confirm the version is live
+        env:
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          for _ in 1 2 3 4 5 6; do
+            if [ "$(npm view "${PACKAGE_NAME}@${VERSION}" version 2>/dev/null)" = "$VERSION" ]; then
+              echo "${PACKAGE_NAME}@${VERSION} is live"; exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::${PACKAGE_NAME}@${VERSION} not visible on the registry yet"

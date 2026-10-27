@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+      http://www.kde.org/standards/kcfg/1.0/kcfg.xsd" >
+  <kcfgfile name=""/>
+
+  <group name="General">
+    <entry name="minValue" type="Double">
+      <default>0.0</default>
+      <min>0.0</min>
+      <max>1000000000000</max>
+    </entry>
+    <entry name="maxValue" type="Double">
+      <default>100.0</default>
+      <min>0.0</min>
+      <max>1000000000000</max>
+    </entry>
+    <entry name="numTicks" type="Int">
+      <default>10</default>
+      <min>3</min>
+      <max>20</max>
+    </entry>
+
+    <entry name="dataSensorName" type="String">
+      <default>cpu/system/TotalLoad</default>
+    </entry>
+    <entry name="dataSensorLabel" type="String">
+      <default>CPU Load (%)</default>
+    </entry>
+    <entry name="dataSensorUpdateIntervalMS" type="Int">
+      <default>1000</default>
+      <min>50</min>
+      <max>10000</max>
+    </entry>
+
+    <entry name="useWarningArea" type="Bool">
+      <default>false</default>
+    </entry>
+    <entry name="warningLow" type="Double">
+      <default>80.0</default>
+      <min>0.0</min>
+      <max>1000000000000</max>
+    </entry>
+    <entry name="warningHigh" type="Double">
+      <default>100.0</default>
+      <min>0.0</min>
+      <max>1000000000000</max>
+    </entry>
+
+    <entry name="useDesiredArea" type="Bool">
+      <default>false</default>
+    </entry>
+    <entry name="desiredLow" type="Double">
+      <default>0.0</default>
+      <min>0.0</min>
+      <max>1000000000000</max>
+    </entry>
+    <entry name="desiredHigh" type="Double">
+      <default>15.0</default>
+      <min>0.0</min>
+      <max>1000000000000</max>
+    </entry>
+
+
+  </group>
+</kcfg>

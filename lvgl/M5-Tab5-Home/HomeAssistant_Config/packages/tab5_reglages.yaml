@@ -1,0 +1,968 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file packages/tab5_reglages.yaml
+# @role Les RÉGLAGES du Tab5 côté Home Assistant, choisis à la souris (ADR-0024,
+#       28/09/2026) : plus aucun identifiant de la maison n'est écrit dans les
+#       packages. Trois parties :
+#         1. les listes « Tab5 · … » (agendas, téléphone, capteur de présence), à
+#            régler dans Paramètres → Appareils et services → Entités (chercher
+#            « Tab5 · »), ou sur un tableau de bord ;
+#         2. la tablette elle-même, DÉTECTÉE par le modèle de son appareil
+#            (tab5-ha-hmi, bloc `project:` du firmware) : ses entités (écran, réveil
+#            en cours, micro, satellite…) quel que soit le nom donné à l'appareil ;
+#         3. des « miroirs » : un déclencheur `state:` exige un entity_id écrit dans
+#            le YAML, alors les automatisations se déclenchent sur ces capteurs, qui
+#            recopient l'entité choisie ou détectée.
+# @architecture_constraint Une liste = un template select À DÉCLENCHEURS + un
+#       input_text qui garde le choix (sans `initial` : HA le restaure au
+#       redémarrage). Déclencheurs plutôt qu'un modèle ordinaire : parcourir
+#       `states.binary_sensor` dans un modèle ordinaire le ferait recalculer à chaque
+#       changement d'un capteur de la maison (jusqu'à une fois par seconde).
+#       Ici : au démarrage, au rechargement des modèles, quand une entité est
+#       ajoutée ou renommée (entity_registry_updated) et quand un choix change.
+# @contrat État d'une liste = entity_id choisi, ou « Not set » (décision d'Axel du
+#       25/10/2026 ; jamais « None », relu par HA comme le None de Python). Une mémoire
+#       écrite avant peut contenir « Aucun », « Aucune » ou « none » : chaque lecture les
+#       accepte, avec « None », et l'état dit « Not set »). Les packages lisent
+#       `states('select.tab5_…')` et vérifient l'existence (`expand(x) | count > 0`,
+#       qui ne lève jamais d'erreur, contrairement à `states[x]` sur « Not set »).
+#       « Tab5 · music players » (ADR-0050) est une liste à PLUSIEURS choix : son
+#       état est un résumé (« 2 chosen », « 2 choisi(s) · 2 chosen » avant le 24/10/2026), ses options « ✓ Salon · media_player.x »
+#       (choisi : le toucher le retire) et « ○ Salon · media_player.x » (le toucher l'ajoute, 6
+#       au plus) ; la mémoire input_text.tab5_choix_lecteurs garde les entity_id séparés par
+#       des virgules, dans l'ordre du choix : c'est elle que lit packages/tab5_lecteur.yaml.
+#       Le nom de l'entité vient avant son entity_id (17/10/2026 : sans le tableau de bord
+#       du projet, une liste d'entity_id bruts ne disait pas quel capteur est le
+#       congélateur) ; l'entity_id est le DERNIER mot de l'option (il n'a pas d'espace),
+#       c'est lui que relit select_option. Sans nom, l'option reste « ○ media_player.x ».
+#       « Tab5 · tracked sensors » (ADR-0054) marche de même (options « ✓ Nom · sensor.x » /
+#       « ○ Nom · sensor.x », 6 au plus, mémoire input_text.tab5_choix_suivis lue par
+#       packages/tab5_suivi.yaml) ; ne propose que les capteurs à state_class measurement
+#       (ceux qui ont des statistiques, donc une courbe).
+#       « Tab5 · fridges » et « Tab5 · freezers » (ADR-0055) aussi (mémoires
+#       input_text.tab5_choix_frigos / tab5_choix_congelateurs, lues par
+#       packages/tab5_froid.yaml) : capteurs de température à state_class measurement,
+#       quatre appareils au plus EN TOUT (les cartes du popup Froid), un capteur choisi
+#       dans une liste n'est pas proposé dans l'autre.
+#       Choix par défaut (liste jamais réglée) seulement quand il n'y a pas
+#       d'ambiguïté : le seul agenda dont le nom dit « anniversaires » (ou
+#       birthday…), le seul agenda de jours fériés (intégration Jours fériés, ou nom
+#       qui le dit), le seul téléphone de l'application mobile, le seul agenda dont
+#       le nom dit « vacances scolaires » (ou school holidays…). Agenda de travail,
+#       agenda des rendez-vous, capteur de présence, pipeline de discussion, lecteurs
+#       de musique, capteurs suivis, réfrigérateurs et congélateurs : jamais devinés.
+# @i18n Noms en anglais depuis le 24/10/2026 (décision d'Axel : noms et options en
+#       anglais, identifiants gardés ; « français · english » du 29/09/2026 avant) :
+#       c'est eux que cherche un utilisateur non francophone. Les ÉTATS (« Not set »,
+#       entity_id, noms de pipeline) restent ceux que les packages lisent.
+# @ai_warning L'entity_id de chaque entité modèle est fixé par `default_entity_id` :
+#       sans lui, il dériverait du nom (à la première installation), et les packages la
+#       lisent par cet entity_id. Une entité nouvelle en a un aussi
+#       (tests/test_installation_ha.py, test_entites_modeles_fixent_leur_entity_id).
+# @install Avec les autres packages (`homeassistant: packages: !include_dir_named
+#       packages`). Rien à renseigner dans ce fichier. La tablette est cherchée par
+#       custom_templates/tab5_tablette.jinja (macro tab5_api, 08/10/2026) : à déployer
+#       et recharger AVANT ce package.
+# ============================================================================
+
+input_text:
+  # Mémoire des listes ci-dessous : écrite par la liste, pas à la main.
+  tab5_choix_agenda_travail:
+    name: "Tab5 · memory · work calendar"
+    icon: mdi:content-save-outline
+    max: 255
+  tab5_choix_agenda_rdv:
+    name: "Tab5 · memory · appointments calendar"
+    icon: mdi:content-save-outline
+    max: 255
+  tab5_choix_agenda_anniversaires:
+    name: "Tab5 · memory · birthdays calendar"
+    icon: mdi:content-save-outline
+    max: 255
+  tab5_choix_agenda_feries:
+    name: "Tab5 · memory · public holidays calendar"
+    icon: mdi:content-save-outline
+    max: 255
+  tab5_choix_telephone:
+    name: "Tab5 · memory · phone"
+    icon: mdi:content-save-outline
+    max: 255
+  tab5_choix_presence:
+    name: "Tab5 · memory · presence sensor"
+    icon: mdi:content-save-outline
+    max: 255
+  tab5_choix_agenda_vacances:
+    name: "Tab5 · memory · school holidays calendar"
+    icon: mdi:content-save-outline
+    max: 255
+  tab5_choix_pipeline_discussion:
+    name: "Tab5 · memory · chat pipeline"
+    icon: mdi:content-save-outline
+    max: 255
+  # Lecteurs de musique du popup Musique (ADR-0050) : entity_id séparés par des virgules.
+  tab5_choix_lecteurs:
+    name: "Tab5 · memory · music players"
+    icon: mdi:content-save-outline
+    max: 255
+  # Capteurs suivis du popup Suivi (ADR-0054) : entity_id séparés par des virgules.
+  tab5_choix_suivis:
+    name: "Tab5 · memory · tracked sensors"
+    icon: mdi:content-save-outline
+    max: 255
+  # Capteurs de température des réfrigérateurs et des congélateurs (popup Froid,
+  # ADR-0055) : entity_id séparés par des virgules, quatre en tout avec l'autre liste.
+  tab5_choix_frigos:
+    name: "Tab5 · memory · fridges"
+    icon: mdi:content-save-outline
+    max: 255
+  tab5_choix_congelateurs:
+    name: "Tab5 · memory · freezers"
+    icon: mdi:content-save-outline
+    max: 255
+  # Plage de l'extinction de nuit, « HH:MM-HH:MM » ou « Not set » ; une plage écrite ici à
+  # la main (même format) devient une option de la liste.
+  tab5_choix_extinction_nuit:
+    name: "Tab5 · memory · night screen off"
+    icon: mdi:content-save-outline
+    max: 255
+  # Écran que montrent les listes « Tab5 · this screen · … » (ADR-0072) : son device_id.
+  tab5_choix_ecran_a_regler:
+    name: "Tab5 · memory · screen to set"
+    icon: mdi:content-save-outline
+    max: 255
+  # Réglé à la main (pas une mémoire de liste). Mots qui font d'un événement de
+  # l'agenda de travail un événement de TRAVAIL (horaires du planning, heure du
+  # réveil) : séparés par des virgules, sans casse, cherchés dans le titre. Vide =
+  # tous les événements de l'agenda de travail (un agenda qui ne contient que des
+  # postes). Chez l'auteur, « Travail » : son agenda de travail porte aussi ses
+  # rendez-vous. Sans `initial` : HA garde la valeur au redémarrage.
+  tab5_mot_travail:
+    name: "Tab5 · work event keyword"
+    icon: mdi:briefcase-search
+    max: 255
+
+template:
+  # ──────────────────────────────────────────────────────────────────────────
+  # 1. Les listes de choix
+  # ──────────────────────────────────────────────────────────────────────────
+  - triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+      - trigger: event
+        event_type: entity_registry_updated
+      - trigger: state
+        entity_id: sensor.tab5_ecrans
+        attribute: ecrans
+      - trigger: state
+        entity_id:
+          - input_text.tab5_choix_agenda_travail
+          - input_text.tab5_choix_agenda_rdv
+          - input_text.tab5_choix_agenda_anniversaires
+          - input_text.tab5_choix_agenda_feries
+          - input_text.tab5_choix_agenda_vacances
+          - input_text.tab5_choix_telephone
+          - input_text.tab5_choix_presence
+          - input_text.tab5_choix_lecteurs
+          - input_text.tab5_choix_suivis
+          - input_text.tab5_choix_frigos
+          - input_text.tab5_choix_congelateurs
+          # Listes « Tab5 · this screen · … » (ADR-0072) : un autre écran à régler, un
+          # réglage d'écran changé (et, plus haut, un écran ajouté).
+          - input_text.tab5_choix_ecran_a_regler
+          - sensor.tab5_reglages_ecrans
+    # Audit du 07/10/2026, HA-18 : pas pour une mise à jour du registre qui ne touche que
+    # capabilities / supported_features / options / suggested_object_id (419 des 485
+    # entity_registry_updated chez l'auteur du 01 au 08/10/2026), que la liste ne lit
+    # pas. Une création, une suppression, un renommage, un nom ou une classe passent.
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.platform != 'event' or trigger.event.event_type != 'entity_registry_updated'
+             or trigger.event.data.action != 'update'
+             or (trigger.event.data.changes | default({}, true)).keys()
+                | reject('in', ['capabilities', 'supported_features', 'options', 'suggested_object_id'])
+                | list | count > 0 }}
+    variables:
+      agendas: "{{ states.calendar | map(attribute='entity_id') | list }}"
+      # Suivi du téléphone : device_tracker ou personne (états home / not_home).
+      suivis: "{{ (states.device_tracker | map(attribute='entity_id') | list) + (states.person | map(attribute='entity_id') | list) }}"
+      presences: >-
+        {{ states.binary_sensor | selectattr('attributes.device_class', 'defined')
+           | selectattr('attributes.device_class', 'in', ['occupancy', 'presence', 'motion'])
+           | map(attribute='entity_id') | list }}
+      # Choix par défaut (voir @contrat) : une liste d'UN seul candidat, sinon rien.
+      auto_anniversaires: "{{ agendas | select('search', 'anniversaire|birthday|geburtstag|verjaardag|cumplea|compleann') | list }}"
+      # Vacances scolaires : l'agenda d'un fichier ICS (intégration « Calendrier
+      # distant », par ex. celui du ministère pour une zone française), que son nom
+      # désigne souvent. Posé avant les fériés, qu'il ne doit pas grossir : « school
+      # holidays » contient « holiday ».
+      auto_vacances: "{{ agendas | select('search', 'vacances_scolaires|calendrier_scolaire|school|schulferien|schoolvakantie|vacaciones_escolares|vacanze_scolastiche') | list }}"
+      auto_feries: >-
+        {{ ((integration_entities('holiday') | select('match', 'calendar[.]') | list)
+            + (agendas | select('search', 'ferie|holiday|feiertag|feestdag|festiv') | reject('in', auto_vacances) | list)) | unique | list }}
+      auto_telephones: "{{ integration_entities('mobile_app') | select('match', 'device_tracker[.]') | list }}"
+      # Lecteurs de musique (ADR-0050) : tous les media_player, les choisis d'abord.
+      lecteurs_ha: "{{ states.media_player | map(attribute='entity_id') | list }}"
+      lecteurs_choisis: >-
+        {{ states('input_text.tab5_choix_lecteurs').split(',') | map('trim')
+           | select('match', 'media_player[.]') | unique | list }}
+      lecteurs_resume: "{{ lecteurs_choisis | count }} chosen"
+      # Capteurs suivis (ADR-0054) : ceux qui ont des statistiques (state_class
+      # measurement, donc une courbe), les choisis d'abord.
+      suivis_ha: >-
+        {{ states.sensor | selectattr('attributes.state_class', 'defined')
+           | selectattr('attributes.state_class', 'eq', 'measurement')
+           | map(attribute='entity_id') | list }}
+      suivis_choisis: >-
+        {{ states('input_text.tab5_choix_suivis').split(',') | map('trim')
+           | select('match', 'sensor[.]') | unique | list }}
+      suivis_resume: "{{ suivis_choisis | count }} chosen"
+      # Réfrigérateurs et congélateurs (ADR-0055) : capteurs de température à statistiques
+      # (la courbe des 24 h et les moyennes de 5 min de packages/tab5_froid.yaml). Un
+      # capteur choisi dans une liste n'est pas proposé dans l'autre.
+      froid_ha: >-
+        {{ states.sensor | selectattr('attributes.device_class', 'defined')
+           | selectattr('attributes.device_class', 'eq', 'temperature')
+           | selectattr('attributes.state_class', 'defined')
+           | selectattr('attributes.state_class', 'eq', 'measurement')
+           | map(attribute='entity_id') | list }}
+      frigos_choisis: >-
+        {{ states('input_text.tab5_choix_frigos').split(',') | map('trim')
+           | select('match', 'sensor[.]') | unique | list }}
+      congelateurs_choisis: >-
+        {{ states('input_text.tab5_choix_congelateurs').split(',') | map('trim')
+           | select('match', 'sensor[.]') | unique | reject('in', frigos_choisis) | list }}
+      frigos_resume: "{{ frigos_choisis | count }} chosen"
+      congelateurs_resume: "{{ congelateurs_choisis | count }} chosen"
+      # Réglages par écran (ADR-0072) : l'écran choisi dans « Tab5 · screen to set », sa
+      # valeur propre ('' : celle de la maison) et la valeur qui vaut pour lui.
+      ecran: "{% from 'tab5_tablette.jinja' import tab5_ecran_a_regler %}{{ tab5_ecran_a_regler() }}"
+      ecran_presence: "{% from 'tab5_tablette.jinja' import tab5_reglage_propre %}{{ tab5_reglage_propre(ecran, 'presence') }}"
+      ecran_lecteurs_propres: "{% from 'tab5_tablette.jinja' import tab5_reglage_propre %}{{ tab5_reglage_propre(ecran, 'lecteurs') != '' }}"
+      ecran_lecteurs: >-
+        {%- from 'tab5_tablette.jinja' import tab5_reglage -%}
+        {{ tab5_reglage(ecran, 'lecteurs').split(',') | select | list }}
+      ecran_lecteurs_resume: >-
+        {{ (ecran_lecteurs | count ~ ' chosen') if ecran_lecteurs_propres else ('Same as home (' ~ ecran_lecteurs | count ~ ')') }}
+    select:
+      - name: "Tab5 · work calendar"
+        unique_id: tab5_agenda_de_travail
+        default_entity_id: select.tab5_agenda_de_travail
+        icon: mdi:briefcase-clock
+        # Événements « Travail… » horodatés : horaires du planning et heure du réveil
+        # (calculée par la tablette), jours de repos. Ses autres événements comptent
+        # comme des rendez-vous.
+        options: >-
+          {%- set m = states('input_text.tab5_choix_agenda_travail') -%}
+          {{ agendas + ([m] if m.startswith('calendar.') and m not in agendas else []) + ['Not set'] }}
+        state: >-
+          {%- set m = states('input_text.tab5_choix_agenda_travail') -%}
+          {{ m if m.startswith('calendar.') else 'Not set' }}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_agenda_travail
+            data:
+              value: "{{ option }}"
+      - name: "Tab5 · appointments calendar"
+        unique_id: tab5_agenda_des_rendez_vous
+        default_entity_id: select.tab5_agenda_des_rendez_vous
+        icon: mdi:calendar-account
+        # Rendez-vous du popup calendrier, annonces et briefing du réveil.
+        options: >-
+          {%- set m = states('input_text.tab5_choix_agenda_rdv') -%}
+          {{ agendas + ([m] if m.startswith('calendar.') and m not in agendas else []) + ['Not set'] }}
+        state: >-
+          {%- set m = states('input_text.tab5_choix_agenda_rdv') -%}
+          {{ m if m.startswith('calendar.') else 'Not set' }}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_agenda_rdv
+            data:
+              value: "{{ option }}"
+      - name: "Tab5 · birthdays calendar"
+        unique_id: tab5_agenda_des_anniversaires
+        default_entity_id: select.tab5_agenda_des_anniversaires
+        icon: mdi:cake-variant
+        options: >-
+          {%- set m = states('input_text.tab5_choix_agenda_anniversaires') -%}
+          {{ agendas + ([m] if m.startswith('calendar.') and m not in agendas else []) + ['Not set'] }}
+        state: >-
+          {%- set m = states('input_text.tab5_choix_agenda_anniversaires') -%}
+          {{ m if m.startswith('calendar.') else ('Not set' if m in ['Not set', 'none', 'None', 'Aucun', 'Aucune'] or auto_anniversaires | count != 1 else auto_anniversaires[0]) }}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_agenda_anniversaires
+            data:
+              value: "{{ option }}"
+      - name: "Tab5 · public holidays calendar"
+        unique_id: tab5_agenda_des_jours_feries
+        default_entity_id: select.tab5_agenda_des_jours_feries
+        icon: mdi:calendar-star
+        # Agenda de l'intégration « Jours fériés » (holiday) : tous ses événements sont
+        # fériés. Autre agenda (Google « Jours fériés et autres fêtes ») : seuls les
+        # intitulés de la liste blanche de packages/tab5_calendar.yaml.
+        options: >-
+          {%- set m = states('input_text.tab5_choix_agenda_feries') -%}
+          {{ agendas + ([m] if m.startswith('calendar.') and m not in agendas else []) + ['Not set'] }}
+        state: >-
+          {%- set m = states('input_text.tab5_choix_agenda_feries') -%}
+          {{ m if m.startswith('calendar.') else ('Not set' if m in ['Not set', 'none', 'None', 'Aucun', 'Aucune'] or auto_feries | count != 1 else auto_feries[0]) }}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_agenda_feries
+            data:
+              value: "{{ option }}"
+      - name: "Tab5 · school holidays calendar"
+        unique_id: tab5_agenda_des_vacances_scolaires
+        default_entity_id: select.tab5_agenda_des_vacances_scolaires
+        icon: mdi:school-outline
+        # Jours de vacances du popup calendrier (tous ses événements), avec leur titre
+        # dans le détail du jour. Remplace la table fixe de la zone A (Bordeaux) d'avant
+        # le 29/09/2026 : un agenda suit l'année scolaire et le pays de chacun.
+        options: >-
+          {%- set m = states('input_text.tab5_choix_agenda_vacances') -%}
+          {{ agendas + ([m] if m.startswith('calendar.') and m not in agendas else []) + ['Not set'] }}
+        state: >-
+          {%- set m = states('input_text.tab5_choix_agenda_vacances') -%}
+          {{ m if m.startswith('calendar.') else ('Not set' if m in ['Not set', 'none', 'None', 'Aucun', 'Aucune'] or auto_vacances | count != 1 else auto_vacances[0]) }}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_agenda_vacances
+            data:
+              value: "{{ option }}"
+      - name: "Tab5 · phone"
+        unique_id: tab5_telephone
+        default_entity_id: select.tab5_telephone
+        icon: mdi:cellphone-marker
+        # Allume l'écran à son retour, l'éteint à son départ (packages/tab5_push.yaml).
+        options: >-
+          {%- set m = states('input_text.tab5_choix_telephone') -%}
+          {{ suivis + ([m] if '.' in m and m not in suivis else []) + ['Not set'] }}
+        state: >-
+          {%- set m = states('input_text.tab5_choix_telephone') -%}
+          {{ m if m.startswith('device_tracker.') or m.startswith('person.') else ('Not set' if m in ['Not set', 'none', 'None', 'Aucun', 'Aucune'] or auto_telephones | count != 1 else auto_telephones[0]) }}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_telephone
+            data:
+              value: "{{ option }}"
+      - name: "Tab5 · presence sensor"
+        unique_id: tab5_capteur_de_presence
+        default_entity_id: select.tab5_capteur_de_presence
+        icon: mdi:motion-sensor
+        # Allume l'écran à la détection, l'éteint après 15 min sans présence.
+        options: >-
+          {%- set m = states('input_text.tab5_choix_presence') -%}
+          {{ presences + ([m] if m.startswith('binary_sensor.') and m not in presences else []) + ['Not set'] }}
+        state: >-
+          {%- set m = states('input_text.tab5_choix_presence') -%}
+          {{ m if m.startswith('binary_sensor.') else 'Not set' }}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_presence
+            data:
+              value: "{{ option }}"
+      # Plusieurs choix (voir @contrat) : toucher « ○ x » l'ajoute à la fin (6 au plus,
+      # les pastilles du popup Musique), « ✓ x » le retire ; le résumé ne change rien.
+      - name: "Tab5 · music players"
+        unique_id: tab5_lecteurs_de_musique
+        default_entity_id: select.tab5_lecteurs_de_musique
+        icon: mdi:music-box-multiple
+        options: >-
+          {%- set ns = namespace(o=[lecteurs_resume]) -%}
+          {%- for e in lecteurs_choisis + (lecteurs_ha | reject('in', lecteurs_choisis) | list) -%}
+            {%- set n = state_attr(e, 'friendly_name') -%}
+            {%- set ns.o = ns.o + [('✓ ' if e in lecteurs_choisis else '○ ') ~ ((n ~ ' · ') if n and n != e else '') ~ e] -%}
+          {%- endfor -%}
+          {{ ns.o }}
+        state: "{{ lecteurs_resume }}"
+        select_option:
+          - variables:
+              entite: "{{ option.split(' ') | last }}"
+              liste: >-
+                {%- set choisis = states('input_text.tab5_choix_lecteurs').split(',') | map('trim')
+                     | select('match', 'media_player[.]') | unique | list -%}
+                {%- if option.startswith('✓ ') -%}
+                  {{ choisis | reject('eq', entite) | join(',') }}
+                {%- elif option.startswith('○ ') and entite.startswith('media_player.') and entite not in choisis
+                         and choisis | count < 6 -%}
+                  {{ (choisis + [entite]) | join(',') }}
+                {%- else -%}
+                  {{ choisis | join(',') }}
+                {%- endif -%}
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_lecteurs
+            data:
+              value: "{{ liste }}"
+      # Même principe (ADR-0054) : six capteurs au plus, les cartes du popup Suivi ; le
+      # premier est aussi la carte de la zone à gauche de l'horloge (contenu « capteur »).
+      - name: "Tab5 · tracked sensors"
+        unique_id: tab5_capteurs_suivis
+        default_entity_id: select.tab5_capteurs_suivis
+        icon: mdi:chart-line
+        options: >-
+          {%- set ns = namespace(o=[suivis_resume]) -%}
+          {%- for e in suivis_choisis + (suivis_ha | reject('in', suivis_choisis) | list) -%}
+            {%- set n = state_attr(e, 'friendly_name') -%}
+            {%- set ns.o = ns.o + [('✓ ' if e in suivis_choisis else '○ ') ~ ((n ~ ' · ') if n and n != e else '') ~ e] -%}
+          {%- endfor -%}
+          {{ ns.o }}
+        state: "{{ suivis_resume }}"
+        select_option:
+          - variables:
+              entite: "{{ option.split(' ') | last }}"
+              liste: >-
+                {%- set choisis = states('input_text.tab5_choix_suivis').split(',') | map('trim')
+                     | select('match', 'sensor[.]') | unique | list -%}
+                {%- if option.startswith('✓ ') -%}
+                  {{ choisis | reject('eq', entite) | join(',') }}
+                {%- elif option.startswith('○ ') and entite.startswith('sensor.') and entite not in choisis
+                         and choisis | count < 6 -%}
+                  {{ (choisis + [entite]) | join(',') }}
+                {%- else -%}
+                  {{ choisis | join(',') }}
+                {%- endif -%}
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_suivis
+            data:
+              value: "{{ liste }}"
+      # Même principe (ADR-0055) : les capteurs de température des réfrigérateurs, puis
+      # ceux des congélateurs ; quatre appareils au plus EN TOUT (les cartes du popup
+      # Froid). Un capteur de l'autre liste n'est ni proposé ni ajouté.
+      - name: "Tab5 · fridges"
+        unique_id: tab5_refrigerateurs
+        default_entity_id: select.tab5_refrigerateurs
+        icon: mdi:fridge-outline
+        options: >-
+          {%- set ns = namespace(o=[frigos_resume]) -%}
+          {%- for e in frigos_choisis + (froid_ha | reject('in', frigos_choisis + congelateurs_choisis) | list) -%}
+            {%- set n = state_attr(e, 'friendly_name') -%}
+            {%- set ns.o = ns.o + [('✓ ' if e in frigos_choisis else '○ ') ~ ((n ~ ' · ') if n and n != e else '') ~ e] -%}
+          {%- endfor -%}
+          {{ ns.o }}
+        state: "{{ frigos_resume }}"
+        select_option:
+          - variables:
+              entite: "{{ option.split(' ') | last }}"
+              autres: >-
+                {{ states('input_text.tab5_choix_congelateurs').split(',') | map('trim')
+                   | select('match', 'sensor[.]') | unique | list }}
+              liste: >-
+                {%- set choisis = states('input_text.tab5_choix_frigos').split(',') | map('trim')
+                     | select('match', 'sensor[.]') | unique | list -%}
+                {%- if option.startswith('✓ ') -%}
+                  {{ choisis | reject('eq', entite) | join(',') }}
+                {%- elif option.startswith('○ ') and entite.startswith('sensor.') and entite not in choisis
+                         and entite not in autres and (choisis + autres) | unique | list | count < 4 -%}
+                  {{ (choisis + [entite]) | join(',') }}
+                {%- else -%}
+                  {{ choisis | join(',') }}
+                {%- endif -%}
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_frigos
+            data:
+              value: "{{ liste }}"
+      - name: "Tab5 · freezers"
+        unique_id: tab5_congelateurs
+        default_entity_id: select.tab5_congelateurs
+        icon: mdi:snowflake-thermometer
+        options: >-
+          {%- set ns = namespace(o=[congelateurs_resume]) -%}
+          {%- for e in congelateurs_choisis + (froid_ha | reject('in', frigos_choisis + congelateurs_choisis) | list) -%}
+            {%- set n = state_attr(e, 'friendly_name') -%}
+            {%- set ns.o = ns.o + [('✓ ' if e in congelateurs_choisis else '○ ') ~ ((n ~ ' · ') if n and n != e else '') ~ e] -%}
+          {%- endfor -%}
+          {{ ns.o }}
+        state: "{{ congelateurs_resume }}"
+        select_option:
+          - variables:
+              entite: "{{ option.split(' ') | last }}"
+              autres: >-
+                {{ states('input_text.tab5_choix_frigos').split(',') | map('trim')
+                   | select('match', 'sensor[.]') | unique | list }}
+              liste: >-
+                {%- set choisis = states('input_text.tab5_choix_congelateurs').split(',') | map('trim')
+                     | select('match', 'sensor[.]') | unique | list -%}
+                {%- if option.startswith('✓ ') -%}
+                  {{ choisis | reject('eq', entite) | join(',') }}
+                {%- elif option.startswith('○ ') and entite.startswith('sensor.') and entite not in choisis
+                         and entite not in autres and (choisis + autres) | unique | list | count < 4 -%}
+                  {{ (choisis + [entite]) | join(',') }}
+                {%- else -%}
+                  {{ choisis | join(',') }}
+                {%- endif -%}
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_congelateurs
+            data:
+              value: "{{ liste }}"
+      # Réglages par écran (ADR-0072, 25/10/2026) : la valeur de l'écran choisi dans
+      # « Tab5 · screen to set » ; « Same as home » = la liste de la maison ci-dessus.
+      # Un choix émet tab5_reglage_ecran, que garde sensor.tab5_reglages_ecrans (plus
+      # bas). Les variables du déclencheur n'existent pas dans select_option : l'écran
+      # y est relu.
+      - name: "Tab5 · this screen · presence sensor"
+        unique_id: tab5_ecran_capteur_de_presence
+        default_entity_id: select.tab5_ecran_capteur_de_presence
+        icon: mdi:motion-sensor
+        availability: "{{ ecran != '' }}"
+        options: >-
+          {{ ['Same as home'] + presences
+             + ([ecran_presence] if ecran_presence.startswith('binary_sensor.') and ecran_presence not in presences else [])
+             + ['Not set'] }}
+        state: >-
+          {{ ecran_presence if ecran_presence.startswith('binary_sensor.') or ecran_presence == 'Not set' else 'Same as home' }}
+        select_option:
+          - event: tab5_reglage_ecran
+            event_data:
+              appareil: "{% from 'tab5_tablette.jinja' import tab5_ecran_a_regler %}{{ tab5_ecran_a_regler() }}"
+              cle: presence
+              valeur: "{{ '' if option == 'Same as home' else option }}"
+      # Comme « Tab5 · music players » : « ○ x » ajoute (6 au plus), « ✓ x » retire ; la
+      # liste de l'écran part de celle de la maison au premier choix ; « ↺ Same as home »
+      # la rend à la maison. Plus aucun lecteur : « Not set » (aucun, pas la maison).
+      - name: "Tab5 · this screen · music players"
+        unique_id: tab5_ecran_lecteurs_de_musique
+        default_entity_id: select.tab5_ecran_lecteurs_de_musique
+        icon: mdi:music-box-multiple
+        availability: "{{ ecran != '' }}"
+        options: >-
+          {%- set ns = namespace(o=[ecran_lecteurs_resume] + (['↺ Same as home'] if ecran_lecteurs_propres else [])) -%}
+          {%- for e in ecran_lecteurs + (lecteurs_ha | reject('in', ecran_lecteurs) | list) -%}
+            {%- set n = state_attr(e, 'friendly_name') -%}
+            {%- set ns.o = ns.o + [('✓ ' if e in ecran_lecteurs else '○ ') ~ ((n ~ ' · ') if n and n != e else '') ~ e] -%}
+          {%- endfor -%}
+          {{ ns.o }}
+        state: "{{ ecran_lecteurs_resume }}"
+        select_option:
+          - variables:
+              appareil: "{% from 'tab5_tablette.jinja' import tab5_ecran_a_regler %}{{ tab5_ecran_a_regler() }}"
+              entite: "{{ option.split(' ') | last }}"
+              choisis: >-
+                {%- from 'tab5_tablette.jinja' import tab5_reglage -%}
+                {{ tab5_reglage(appareil, 'lecteurs').split(',') | select | list }}
+              valeur: >-
+                {%- if option == '↺ Same as home' -%}
+                {%- elif option.startswith('✓ ') -%}
+                  {{ (choisis | reject('eq', entite) | join(',')) or 'Not set' }}
+                {%- elif option.startswith('○ ') and entite.startswith('media_player.') and entite not in choisis
+                         and choisis | count < 6 -%}
+                  {{ (choisis + [entite]) | join(',') }}
+                {%- else -%}
+                  inchangé
+                {%- endif -%}
+          - condition: template
+            value_template: "{{ appareil != '' and valeur != 'inchangé' }}"
+          - event: tab5_reglage_ecran
+            event_data:
+              appareil: "{{ appareil }}"
+              cle: lecteurs
+              valeur: "{{ valeur }}"
+
+  # Pipeline du mode « Discussion » de l'écran (bouton « Discu ») : un des pipelines
+  # Assist de HA. Modèle ORDINAIRE, sans déclencheurs : il ne lit que le select de
+  # pipeline de la tablette et sa mémoire, et suit ainsi un pipeline créé ou renommé
+  # (ses options changent sans entity_registry_updated). Jamais deviné : « Not set »
+  # masque les boutons Domo / Discu d'un firmware qui connaît la zone « discussion »
+  # (blueprint), et le mode Discussion retombe sur le pipeline préféré
+  # (tab5_evenements.yaml). Avant le 29/09/2026, le firmware demandait un pipeline
+  # nommé exactement « Discussion LLM » (celui de l'auteur).
+  - select:
+      - name: "Tab5 · chat pipeline"
+        unique_id: tab5_pipeline_de_discussion
+        default_entity_id: select.tab5_pipeline_de_discussion
+        icon: mdi:chat-processing-outline
+        options: >-
+          {%- set s = state_attr('sensor.tab5_tablette', 'pipeline') or '' -%}
+          {%- set p = ((state_attr(s, 'options') or []) | reject('eq', 'preferred') | list) if s else [] -%}
+          {%- set m = states('input_text.tab5_choix_pipeline_discussion') -%}
+          {{ p + ([m] if m not in ['', 'unknown', 'unavailable', 'Not set', 'none', 'None', 'Aucun', 'Aucune'] and m not in p else []) + ['Not set'] }}
+        state: >-
+          {%- set m = states('input_text.tab5_choix_pipeline_discussion') -%}
+          {{ m if m not in ['', 'unknown', 'unavailable', 'Not set', 'none', 'None', 'Aucun', 'Aucune'] else 'Not set' }}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_pipeline_discussion
+            data:
+              value: "{{ option }}"
+
+  # Extinction de nuit de l'écran (16/10/2026, audit anti-casse : une image fixe 24 h/24
+  # marque une dalle, les fabricants conseillent de l'éteindre aux heures creuses). Pendant
+  # la plage, l'écran s'éteint après 1 min sans toucher (un toucher le rallume) et se
+  # rallume seul à la fin (packages/tab5_push.yaml, « Tab5 — night screen off », qui tient
+  # l'interrupteur « Tab5 Nuit (écran éteint) » de la tablette). Modèle ORDINAIRE : il ne lit
+  # que sa mémoire et celle du capteur de présence. Proposée par défaut (liste jamais
+  # réglée) : 00:00-06:00, sauf pour qui a choisi un capteur de présence, qui éteint déjà
+  # l'écran d'une pièce vide : « Not set », son écran se comporte comme avant.
+  - select:
+      - name: "Tab5 · night screen off"
+        unique_id: tab5_extinction_de_nuit
+        default_entity_id: select.tab5_extinction_de_nuit
+        icon: mdi:weather-night
+        options: >-
+          {%- set plages = ['00:00-06:00', '00:00-07:00', '23:00-06:00', '23:00-07:00', '22:00-06:00', '22:00-07:00', '01:00-07:00'] -%}
+          {%- set m = states('input_text.tab5_choix_extinction_nuit') | trim -%}
+          {{ plages + ([m] if m is match('^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$') and m not in plages else []) + ['Not set'] }}
+        state: >-
+          {%- set m = states('input_text.tab5_choix_extinction_nuit') | trim -%}
+          {%- if m in ['Not set', 'none', 'None', 'Aucun', 'Aucune'] -%}
+            Not set
+          {%- elif m is match('^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$') -%}
+            {{ m }}
+          {%- else -%}
+            {{ 'Not set' if states('input_text.tab5_choix_presence').startswith('binary_sensor.') else '00:00-06:00' }}
+          {%- endif %}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_extinction_nuit
+            data:
+              value: "{{ option }}"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Réglages par écran (ADR-0072, 25/10/2026)
+  # ──────────────────────────────────────────────────────────────────────────
+  # Capteur de présence, extinction de nuit et lecteurs de musique se règlent écran par
+  # écran : on choisit l'écran dans « Tab5 · screen to set », puis sa valeur dans les
+  # listes « Tab5 · this screen · … » (présence et lecteurs : premier bloc ci-dessus ;
+  # nuit : ci-dessous). « Same as home » (le défaut) : la liste de la maison. Le pipeline
+  # de discussion, les agendas, le téléphone et le reste restent ceux de la maison.
+  # Les valeurs propres sont gardées par sensor.tab5_reglages_ecrans, un capteur À
+  # DÉCLENCHEURS : HA restaure son état ET ses attributs au redémarrage (documentation
+  # de l'intégration Template), sans input_text de 255 caractères par écran. Les
+  # packages les lisent par tab5_reglage(appareil, cle) (custom_templates/tab5_tablette.jinja).
+  - select:
+      - name: "Tab5 · screen to set"
+        unique_id: tab5_ecran_a_regler
+        default_entity_id: select.tab5_ecran_a_regler
+        icon: mdi:tablet-cellphone
+        availability: "{{ (state_attr('sensor.tab5_ecrans', 'ecrans') or []) | count > 0 }}"
+        options: >-
+          {%- set ns = namespace(o=[]) -%}
+          {%- for e in state_attr('sensor.tab5_ecrans', 'ecrans') or [] -%}
+            {%- set ns.o = ns.o + [e.nom ~ ' · ' ~ e.prefixe] -%}
+          {%- endfor -%}
+          {{ ns.o }}
+        state: >-
+          {%- from 'tab5_tablette.jinja' import tab5_ecran_a_regler -%}
+          {%- set d = tab5_ecran_a_regler() -%}
+          {{ ((state_attr('sensor.tab5_ecrans', 'ecrans') or []) | selectattr('appareil', 'eq', d)
+              | map(attribute='nom') | first | default('')) ~ ' · ' ~ ((state_attr('sensor.tab5_ecrans', 'ecrans') or [])
+              | selectattr('appareil', 'eq', d) | map(attribute='prefixe') | first | default('')) }}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_ecran_a_regler
+            data:
+              value: >-
+                {%- set ns = namespace(d='') -%}
+                {%- for e in state_attr('sensor.tab5_ecrans', 'ecrans') or [] -%}
+                  {%- if e.nom ~ ' · ' ~ e.prefixe == option -%}{%- set ns.d = e.appareil -%}{%- endif -%}
+                {%- endfor -%}
+                {{ ns.d }}
+      - name: "Tab5 · this screen · night screen off"
+        unique_id: tab5_ecran_extinction_de_nuit
+        default_entity_id: select.tab5_ecran_extinction_de_nuit
+        icon: mdi:weather-night
+        availability: "{% from 'tab5_tablette.jinja' import tab5_ecran_a_regler %}{{ tab5_ecran_a_regler() != '' }}"
+        options: >-
+          {%- from 'tab5_tablette.jinja' import tab5_ecran_a_regler, tab5_reglage_propre -%}
+          {%- set plages = ['00:00-06:00', '00:00-07:00', '23:00-06:00', '23:00-07:00', '22:00-06:00', '22:00-07:00', '01:00-07:00'] -%}
+          {%- set m = tab5_reglage_propre(tab5_ecran_a_regler(), 'nuit') -%}
+          {{ ['Same as home'] + plages + ([m] if m is match('^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$') and m not in plages else []) + ['Not set'] }}
+        state: >-
+          {%- from 'tab5_tablette.jinja' import tab5_ecran_a_regler, tab5_reglage_propre -%}
+          {%- set m = tab5_reglage_propre(tab5_ecran_a_regler(), 'nuit') -%}
+          {{ m if m == 'Not set' or m is match('^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$') else 'Same as home' }}
+        select_option:
+          - event: tab5_reglage_ecran
+            event_data:
+              appareil: "{% from 'tab5_tablette.jinja' import tab5_ecran_a_regler %}{{ tab5_ecran_a_regler() }}"
+              cle: nuit
+              valeur: "{{ '' if option == 'Same as home' else option }}"
+
+  # Les valeurs propres de chaque écran. État : l'heure du dernier changement.
+  # Attribut `reglages` : {device_id: {cle: valeur}}, cle presence / nuit / lecteurs ;
+  # une valeur vide retire la clé (l'écran reprend celle de la maison), un écran sans
+  # clé disparaît, un appareil qui n'est plus une tablette aussi. tab5_reglage_ecran est
+  # émis par les listes ci-dessus ; une automatisation à vous peut l'émettre aussi
+  # (Outils de développement → Événements) : {appareil: <device_id>, cle: nuit, valeur: "23:00-06:00"}.
+  - triggers:
+      - trigger: event
+        event_type: tab5_reglage_ecran
+    sensor:
+      - name: "Tab5 · screen settings"
+        unique_id: tab5_reglages_ecrans
+        default_entity_id: sensor.tab5_reglages_ecrans
+        icon: mdi:tablet-cellphone
+        device_class: timestamp
+        state: "{{ now().isoformat() }}"
+        attributes:
+          reglages: >-
+            {%- set avant = this.attributes.get('reglages') if this is defined and this.attributes is defined else none -%}
+            {%- set avant = avant if avant is mapping else {} -%}
+            {%- set d = trigger.event.data.appareil | default('', true) | string -%}
+            {%- set c = trigger.event.data.cle | default('', true) | string -%}
+            {%- set v = (trigger.event.data.valeur | default('', true) | string | trim)[:255] -%}
+            {%- set ns = namespace(r={}, e={}) -%}
+            {%- for k in avant if k != d and avant[k] is mapping and '.' not in k and device_attr(k, 'model') == 'tab5-ha-hmi' -%}
+              {%- set ns.r = dict(ns.r, **{k: avant[k]}) -%}
+            {%- endfor -%}
+            {%- if d and '.' not in d and device_attr(d, 'model') == 'tab5-ha-hmi' -%}
+              {%- set e = avant[d] if d in avant and avant[d] is mapping else {} -%}
+              {%- for k in e if k != c or c not in ['presence', 'nuit', 'lecteurs'] -%}
+                {%- set ns.e = dict(ns.e, **{k: e[k]}) -%}
+              {%- endfor -%}
+              {%- if c in ['presence', 'nuit', 'lecteurs'] and v != '' -%}
+                {%- set ns.e = dict(ns.e, **{c: v}) -%}
+              {%- endif -%}
+              {%- if ns.e -%}
+                {%- set ns.r = dict(ns.r, **{d: ns.e}) -%}
+              {%- endif -%}
+            {%- endif -%}
+            {{ ns.r }}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 2. La tablette, détectée par le modèle de son appareil
+  # ──────────────────────────────────────────────────────────────────────────
+  # Même recherche que la garde « tablette connectée » des packages (#215) : le
+  # capteur « HA API Status » d'un appareil ESPHome de modèle tab5-ha-hmi (le
+  # connecté s'il y en a plusieurs), puis les entités de CET appareil par la fin de
+  # leur entity_id, qui vient des noms du firmware (jamais traduits). Le préfixe,
+  # lui, dépend du nom de l'appareil dans HA (« salon_… » chez l'auteur pour une
+  # partie des entités) : il n'est plus écrit nulle part. « (_[0-9]+)? » : le « _2 »
+  # que HA ajoute à un entity_id déjà pris (second écran, ou écran qui en remplace un ;
+  # custom_templates/tab5_tablette.jinja). Sans lui, le 17/10/2026, la Waveshare 7B
+  # n'avait ni « ecran » ni « demarrage » ni « micro » ici.
+  - triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+      # Tablette ajoutée (packages installés d'abord, comme le dit le guide),
+      # renommée, ou entité renommée.
+      - trigger: event
+        event_type: entity_registry_updated
+      - trigger: event
+        event_type: device_registry_updated
+      - trigger: event
+        event_type: esphome.tab5_connected
+    variables:
+      api: >-
+        {%- from 'tab5_tablette.jinja' import tab5_api -%}
+        {{ tab5_api() }}
+      appareil: "{{ device_id(api) if api else '' }}"
+    # Gardé pour vos automatisations et les fichiers HA d'avant : il ne suit qu'UN
+    # écran. Les packages lisent chaque écran par tab5_cibles() / tab5_entite()
+    # (custom_templates/tab5_tablette.jinja, ADR-0071), et la liste est « Tab5 · screens ».
+    sensor:
+      - name: "Tab5 · tablet"
+        unique_id: tab5_tablette
+        default_entity_id: sensor.tab5_tablette
+        icon: mdi:tablet-dashboard
+        # Nom de l'appareil dans HA, ou « absente » (pas encore ajoutée).
+        state: "{{ (device_attr(api, 'name_by_user') or device_attr(api, 'name')) if api else 'absente' }}"
+        attributes:
+          api: "{{ api }}"
+          ecran: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'ecran') }}"
+          reveil_en_cours: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'reveil_en_cours') }}"
+          raison: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'raison') }}"
+          demarrage: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'demarrage') }}"
+          micro: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'micro') }}"
+          satellite: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'satellite') }}"
+          rdv_avant: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'rdv_avant') }}"
+          # Select « Langue » du firmware (Français, English, Deutsch…).
+          langue: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'langue') }}"
+          # Interrupteur « Nuit (thème auto) » du firmware.
+          theme_nuit: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'theme_nuit') }}"
+          # Interrupteur « Tab5 Nuit (écran éteint) » du firmware (16/10/2026).
+          nuit_ecran: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'nuit_ecran') }}"
+          # Select de pipeline de la tablette (AssistPipelineSelect de HA) : ses options
+          # donnent la liste « Tab5 · chat pipeline » (les pipelines sont ceux de la maison).
+          pipeline: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'pipeline') }}"
+          # Version du projet lue dans le sw_version de l'appareil (« 3.2.2 (ESPHome
+          # 2026.9.0) » depuis la 3.0) : premier mot, ou '' si illisible.
+          version: "{{ ((device_attr(api, 'sw_version') or '') | string).split(' ') | first if api else '' }}"
+
+  # Registre des écrans (ADR-0071, 25/10/2026) : chaque appareil de modèle tab5-ha-hmi,
+  # connecté ou non. État : combien sont connectés. Attributs : `ecrans`, une ligne par
+  # écran (appareil, nom, préfixe des actions, connectée, depuis, version), et
+  # `hors_ligne`, les device_id des écrans hors ligne (alerte de santé (c), une par
+  # écran). Modèle ordinaire, pas à déclencheurs : il parcourt states.binary_sensor,
+  # HA le recalcule donc à chaque changement de ce domaine (au plus une fois par
+  # seconde), et un écran qu'on ajoute y entre sans rechargement.
+  - sensor:
+      - name: "Tab5 · screens"
+        unique_id: tab5_ecrans
+        default_entity_id: sensor.tab5_ecrans
+        icon: mdi:tablet-cellphone
+        state: >-
+          {{ states.binary_sensor | selectattr('entity_id', 'match', 'binary_sensor[.].*_ha_api_status(_[0-9]+)?$')
+             | selectattr('state', 'eq', 'on') | map(attribute='entity_id') | map('device_attr', 'model')
+             | select('eq', 'tab5-ha-hmi') | list | count }}
+        attributes:
+          ecrans: >-
+            {%- from 'tab5_tablette.jinja' import tab5_prefixe, tab5_nom -%}
+            {%- set ns = namespace(l=[], vus=[]) -%}
+            {%- for s in states.binary_sensor | selectattr('entity_id', 'match', 'binary_sensor[.].*_ha_api_status(_[0-9]+)?$') | sort(attribute='entity_id') -%}
+              {%- set d = device_id(s.entity_id) -%}
+              {%- if d and d not in ns.vus and device_attr(d, 'model') == 'tab5-ha-hmi' -%}
+                {%- set ns.vus = ns.vus + [d] -%}
+                {%- set ns.l = ns.l + [{'appareil': d, 'nom': tab5_nom(d), 'prefixe': tab5_prefixe(d),
+                      'connectee': s.state == 'on', 'depuis': s.last_changed.isoformat(),
+                      'version': ((device_attr(d, 'sw_version') or '') | string).split(' ') | first}] -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {{ ns.l }}
+          hors_ligne: >-
+            {{ states.binary_sensor | selectattr('entity_id', 'match', 'binary_sensor[.].*_ha_api_status(_[0-9]+)?$')
+               | rejectattr('state', 'eq', 'on') | map(attribute='entity_id') | map('device_id') | select
+               | select('is_device_attr', 'model', 'tab5-ha-hmi') | unique | sort | list }}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 3. Miroirs, pour les déclencheurs des automatisations
+  # ──────────────────────────────────────────────────────────────────────────
+  # Modèles ordinaires : ils suivent l'entité choisie (ou détectée) à l'instant où
+  # elle change. Indisponibles tant que rien n'est choisi : aucun déclencheur ne part.
+  - binary_sensor:
+      - name: "Tab5 · presence"
+        unique_id: tab5_presence
+        default_entity_id: binary_sensor.tab5_presence
+        device_class: occupancy
+        state: >-
+          {%- set e = states('select.tab5_capteur_de_presence') -%}
+          {{ e.startswith('binary_sensor.') and is_state(e, 'on') }}
+        availability: >-
+          {%- set e = states('select.tab5_capteur_de_presence') -%}
+          {{ e.startswith('binary_sensor.') and has_value(e) }}
+      # Liaison API de la tablette (« HA API Status ») : `off` aussi quand la tablette
+      # est indisponible ; indisponible seulement sans tablette dans HA (aucune
+      # alerte de déconnexion sur un HA qui ne la connaît pas encore).
+      - name: "Tab5 · connected"
+        unique_id: tab5_connectee
+        default_entity_id: binary_sensor.tab5_connectee
+        device_class: connectivity
+        state: "{{ is_state(state_attr('sensor.tab5_tablette', 'api') or '', 'on') }}"
+        availability: "{{ (state_attr('sensor.tab5_tablette', 'api') or '') != '' }}"
+      # Dans la plage de « Tab5 · night screen off » (heure locale, plage à cheval sur
+      # minuit comprise ; début = fin : jamais). Recalculé chaque minute (now()) : son
+      # changement fait partir « Tab5 — night screen off » (tab5_push.yaml).
+      # Indisponible sur « Not set ».
+      - name: "Tab5 · night screen off now"
+        unique_id: tab5_nuit_de_l_ecran
+        default_entity_id: binary_sensor.tab5_nuit_de_l_ecran
+        icon: mdi:weather-night
+        state: >-
+          {%- set p = states('select.tab5_extinction_de_nuit').split('-') -%}
+          {%- set h = now().strftime('%H:%M') -%}
+          {{ p | count == 2 and ((p[0] <= h < p[1]) if p[0] < p[1] else (h >= p[0] or h < p[1]) if p[0] > p[1] else false) }}
+        availability: "{{ states('select.tab5_extinction_de_nuit') is match('^[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}$') }}"
+    sensor:
+      # Par écran (ADR-0072) : les device_id des écrans où quelqu'un est là (`presents`) et
+      # de ceux où personne n'est là (`absents`), d'après le capteur de présence de chaque
+      # écran (le sien, sinon celui de la maison). État : combien d'écrans voient quelqu'un.
+      # « Tab5 — screen by presence and phone » (tab5_push.yaml) se déclenche sur ses attributs.
+      - name: "Tab5 · screens: presence"
+        unique_id: tab5_presences_ecrans
+        default_entity_id: sensor.tab5_presences_ecrans
+        icon: mdi:motion-sensor
+        state: "{% from 'tab5_tablette.jinja' import tab5_presences %}{{ tab5_presences('on').split(',') | select | list | count }}"
+        attributes:
+          presents: "{% from 'tab5_tablette.jinja' import tab5_presences %}{{ tab5_presences('on').split(',') | select | list }}"
+          absents: "{% from 'tab5_tablette.jinja' import tab5_presences %}{{ tab5_presences('off').split(',') | select | list }}"
+      # Par écran (ADR-0072) : les device_id des écrans dans leur plage d'extinction de nuit
+      # (la leur, sinon celle de la maison), recalculé chaque minute (now()). État : combien.
+      # « Tab5 — night screen off » (tab5_push.yaml) se déclenche sur son changement.
+      - name: "Tab5 · screens: night now"
+        unique_id: tab5_nuits_ecrans
+        default_entity_id: sensor.tab5_nuits_ecrans
+        icon: mdi:weather-night
+        state: "{% from 'tab5_tablette.jinja' import tab5_nuits %}{{ tab5_nuits(now().strftime('%H:%M')).split(',') | select | list | count }}"
+        attributes:
+          nuit: "{% from 'tab5_tablette.jinja' import tab5_nuits %}{{ tab5_nuits(now().strftime('%H:%M')).split(',') | select | list }}"
+      - name: "Tab5 · tracked phone"
+        unique_id: tab5_telephone_suivi
+        default_entity_id: sensor.tab5_telephone_suivi
+        icon: mdi:home-account
+        state: "{{ states(states('select.tab5_telephone')) }}"
+        availability: >-
+          {%- set e = states('select.tab5_telephone') -%}
+          {{ (e.startswith('device_tracker.') or e.startswith('person.')) and has_value(e) }}
+      # Heure du dernier démarrage de la tablette (« Tab5 Uptime ») d'UN écran, celui
+      # de sensor.tab5_tablette : « Tab5 · continuous uptime » de tab5_health.yaml (la
+      # garde (b) lit chaque écran depuis le 25/10/2026, ADR-0071). État recopié
+      # tel quel, `unavailable` compris, avec l'attribut `source` : indisponible SANS
+      # `source` = pas encore de tablette dans HA (son arrivée n'est pas un
+      # redémarrage) ; `unavailable` AVEC `source` = tablette perdue par HA.
+      - name: "Tab5 · startup"
+        unique_id: tab5_demarrage
+        default_entity_id: sensor.tab5_demarrage
+        icon: mdi:restart
+        state: "{{ states(state_attr('sensor.tab5_tablette', 'demarrage') or '') }}"
+        availability: "{{ (state_attr('sensor.tab5_tablette', 'demarrage') or '') != '' }}"
+        attributes:
+          source: "{{ state_attr('sensor.tab5_tablette', 'demarrage') or '' }}"
+      # « Rendez-vous : annoncer avant » (number du firmware) : packages/tab5_reveil.yaml
+      # republie les rendez-vous quand il change. Plusieurs écrans (ADR-0071) : la valeur
+      # de chacun, séparées par « · » (« 15 » avec un seul écran, comme avant) ; un
+      # écran hors ligne n'y figure pas.
+      - name: "Tab5 · appointments: announce before"
+        unique_id: tab5_rendez_vous_annoncer_avant
+        default_entity_id: sensor.tab5_rendez_vous_annoncer_avant
+        icon: mdi:timer-outline
+        state: >-
+          {%- from 'tab5_tablette.jinja' import tab5_cibles, tab5_entite -%}
+          {%- set ns = namespace(l=[]) -%}
+          {%- for d in tab5_cibles('').split(',') | select -%}
+            {%- set e = tab5_entite(d, 'rdv_avant') -%}
+            {%- if e and has_value(e) -%}
+              {%- set ns.l = ns.l + [states(e)] -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.l | join(' · ') }}
+        availability: >-
+          {%- from 'tab5_tablette.jinja' import tab5_cibles, tab5_entite -%}
+          {%- set ns = namespace(n=0) -%}
+          {%- for d in tab5_cibles('').split(',') | select -%}
+            {%- set e = tab5_entite(d, 'rdv_avant') -%}
+            {%- set ns.n = ns.n + (1 if e and has_value(e) else 0) -%}
+          {%- endfor -%}
+          {{ ns.n > 0 }}
+      # Nombre d'agendas choisis ; attributs = signature (état, début, fin, titre de
+      # l'événement en cours ou suivant) : ils changent quand un événement commence,
+      # finit, ou que le suivant change, comme l'état d'un agenda. `travail` relance
+      # la poussée complète (tab5_push.yaml), `rendez_vous` la liste des
+      # rendez-vous (tab5_reveil.yaml). Les deux portent aussi le mot des événements
+      # de travail : le changer refait le planning et la liste des rendez-vous.
+      - name: "Tab5 · calendars"
+        unique_id: tab5_agendas
+        default_entity_id: sensor.tab5_agendas
+        icon: mdi:calendar-sync
+        state: >-
+          {{ [states('select.tab5_agenda_de_travail'), states('select.tab5_agenda_des_rendez_vous'),
+              states('select.tab5_agenda_des_anniversaires'), states('select.tab5_agenda_des_jours_feries'),
+              states('select.tab5_agenda_des_vacances_scolaires')]
+             | select('search', '^calendar[.]') | list | count }}
+        attributes:
+          travail: >-
+            {%- set a = states('select.tab5_agenda_de_travail') -%}
+            {{ states(a) }}|{{ state_attr(a, 'start_time') }}|{{ state_attr(a, 'end_time') }}|{{ state_attr(a, 'message') }}|{{ states('input_text.tab5_mot_travail') }}
+          rendez_vous: >-
+            {%- set ns = namespace(s=states('input_text.tab5_mot_travail') ~ ';') -%}
+            {%- for a in [states('select.tab5_agenda_des_rendez_vous'), states('select.tab5_agenda_de_travail')] -%}
+              {%- set ns.s = ns.s ~ states(a) ~ '|' ~ state_attr(a, 'start_time') ~ '|' ~ state_attr(a, 'message') ~ ';' -%}
+            {%- endfor -%}
+            {{ ns.s }}

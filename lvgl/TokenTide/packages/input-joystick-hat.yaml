@@ -1,0 +1,51 @@
+# M5Stack Joystick Hat (single stick + press) on the StickC hat connector.
+# Protocol from docs.m5stack.com/en/hat/hat-joystick: I2C @0x38 on a
+# dedicated bus (SDA=G26, SCL=G0), reg 0x02 returns 3 bytes: X and Y as
+# signed -127..127, button (0 = pressed).
+# Bindings: press = force refresh; Y up/down = brightness step.
+
+i2c:
+  - id: hat_bus
+    sda: GPIO26
+    scl:
+      number: GPIO0
+      ignore_strapping_warning: true
+
+i2c_device:
+  id: joy_hat
+  i2c_id: hat_bus
+  address: 0x38
+
+interval:
+  - interval: 50ms
+    then:
+      - lambda: |-
+          static bool btn_last = false;
+          static uint32_t last_bright_ms = 0;
+          static int bright_idx = 3;                  // 25/50/75/100%
+          uint8_t data[3];
+          if (id(joy_hat).read_register(0x02, data, 3) != i2c::ERROR_OK) return;
+          int8_t jy = (int8_t) data[1];
+          bool btn = (data[2] == 0);                  // 0 = pressed
+
+          if (btn && !btn_last) {
+            id(note_activity).execute();
+            id(poll_usage).execute();
+          }
+          btn_last = btn;
+
+          // Brightness stepping with a 300ms repeat guard and +/-60 deadzone.
+          uint32_t now_ms = millis();
+          if (now_ms - last_bright_ms > 300) {
+            int step = (jy > 60) ? 1 : (jy < -60) ? -1 : 0;
+            if (step != 0) {
+              id(note_activity).execute();   // stick motion counts as activity
+              bright_idx += step;
+              if (bright_idx < 0) bright_idx = 0;
+              if (bright_idx > 3) bright_idx = 3;
+              auto call = id(lcd_backlight).turn_on();
+              call.set_brightness(0.25f * (bright_idx + 1));
+              call.perform();
+              last_bright_ms = now_ms;
+            }
+          }

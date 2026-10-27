@@ -1,0 +1,11 @@
+# <type>(<scope>): <subject>          <- 50 chars, imperative, no trailing period
+#
+# <body>                              <- what and why. The diff shows how.
+#
+# <footer>                            <- BREAKING CHANGE: ... / Refs: #123
+#
+# type:  feat fix perf refactor test docs build ci chore
+# scope: the layer or module — domain services models backend
+#        ui/controls ui/screens cmake tests docs
+#
+# Enable with:  git config commit.template .gitmessage

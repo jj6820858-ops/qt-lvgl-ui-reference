@@ -1,0 +1,134 @@
+sizes:
+  - name: small
+    size_px: 24
+
+  - name: medium
+    size_px: 80
+
+  - name: large
+    size_px: 144
+
+icons:
+  - output: png/about.png
+    input: bootstrap/info-circle.svg
+    size: medium
+
+  - output: png/bin.png
+    input: bootstrap/trash.svg
+    size: medium
+
+  - output: png/bus.png
+    input: bootstrap/bus-front.svg
+    size: medium
+
+  - output: png/home.png
+    input: bootstrap/house-fill.svg
+    size: medium
+
+  - output: png/memory.png
+    input: bootstrap/memory.svg
+    size: medium
+
+  - output: png/menu-dots.png
+    input: bootstrap/three-dots.svg
+    size: medium
+
+  - output: png/menu.png
+    input: bootstrap/three-dots.svg
+    size: medium
+
+  - output: png/no-data.png
+    input: bootstrap/database-slash.svg
+    size: large
+
+  - output: png/no-wifi.png
+    input: bootstrap/wifi-off.svg
+    size: large
+
+  - output: png/person-in.png
+    input: bootstrap/person-fill.svg
+    size: medium
+
+  - output: png/person-out.png
+    input: bootstrap/person.svg
+    size: medium
+
+  - output: png/reboot.png
+    input: bootstrap/arrow-clockwise.svg
+    size: medium
+
+  - output: png/recycling.png
+    input: bootstrap/recycle.svg
+    size: medium
+
+  - output: png/sleep.png
+    input: bootstrap/power.svg
+    size: medium
+
+  - output: png/sunrise.png
+    input: bootstrap/sunrise.svg
+    size: medium
+
+  - output: png/sunset.png
+    input: bootstrap/sunset.svg
+    size: medium
+
+  - output: png/triangle-down.png
+    input: material/triangle-down.svg
+    size: small
+
+  - output: png/triangle-up.png
+    input: material/triangle.svg
+    size: small
+
+  - output: png/weather-clear-day.png
+    input: bootstrap/sun.svg
+    size: medium
+
+  - output: png/weather-clear-night.png
+    input: bootstrap/moon-stars.svg
+    size: medium
+
+  - output: png/weather-cloudy.png
+    input: bootstrap/cloud.svg
+    size: medium
+
+  - output: png/weather-fog.png
+    input: bootstrap/cloud-fog.svg
+    size: medium
+
+  - output: png/weather-hail.png
+    input: bootstrap/cloud-hail.svg
+    size: medium
+
+  - output: png/weather-none.png
+    input: bootstrap/question-square.svg
+    size: medium
+
+  - output: png/weather-partly-cloudy-day.png
+    input: bootstrap/cloud-sun.svg
+    size: medium
+
+  - output: png/weather-partly-cloudy-night.png
+    input: bootstrap/cloud-moon.svg
+    size: medium
+
+  - output: png/weather-rain.png
+    input: bootstrap/cloud-rain.svg
+    size: medium
+
+  - output: png/weather-sleet.png
+    input: bootstrap/cloud-sleet.svg
+    size: medium
+
+  - output: png/weather-snow.png
+    input: bootstrap/cloud-snow.svg
+    size: medium
+
+  - output: png/weather-thunderstorm.png
+    input: bootstrap/cloud-lightning.svg
+    size: medium
+
+  - output: png/weather-wind.png
+    input: bootstrap/wind.svg
+    size: medium

@@ -1,0 +1,27 @@
+# Based on the Qt coding style.
+---
+Language:        Cpp
+BasedOnStyle:    WebKit
+Standard:        c++20
+ColumnLimit:     100
+IndentWidth:     4
+TabWidth:        4
+UseTab:          Never
+AccessModifierOffset: -4
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: Inline
+AlwaysBreakTemplateDeclarations: Yes
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass:      true
+  AfterFunction:   true
+  AfterNamespace:  false
+  AfterStruct:     true
+  AfterControlStatement: false
+  BeforeCatch:     false
+  BeforeElse:      false
+ConstructorInitializerAllOnOneLineOrOnePerLine: true
+NamespaceIndentation: None
+PointerAlignment: Right
+SortIncludes:    CaseSensitive
+SpaceAfterTemplateKeyword: false

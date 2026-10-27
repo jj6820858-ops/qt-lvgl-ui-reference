@@ -1,0 +1,22 @@
+sequenceDiagram
+    participant S as SimulatedReadingSource<br/>(infrastructure)
+    participant M as MonitoringService<br/>(services)
+    participant V as DashboardViewModel<br/>(models)
+    participant Q as QML delegates
+
+    S->>S: tick()
+    S->>M: readingsChanged(readings)
+    M->>M: recompute worst severity
+    M->>V: readingsUpdated(readings)
+    V->>V: diff rows against current state
+    alt some rows differ
+        V->>Q: dataChanged(first, last, roles)
+        Note over Q: delegates update in place,<br/>they are NOT recreated
+    else nothing changed
+        Note over V: emit nothing at all
+    end
+    alt overall severity changed
+        M->>V: overallSeverityChanged(severity)
+        V->>Q: overallSeverityChanged()
+        Q->>Q: StStatusPill re-evaluates
+    end

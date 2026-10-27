@@ -1,0 +1,63 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file tab5-cameras.yaml
+# @role Popup « Caméras » (ADR-0049, 09/10/2026, discussion #278) : pose les widgets que
+#       tab5_cameras.cpp peint (g_cameras_ui), l'image téléchargée et la demande à Home
+#       Assistant.
+#         - tab5_cameras_ouvrir : « Aller à l'écran → Caméras » (HA, une sonnette par
+#           exemple) ou un geste de l'accueil (code « cameras », ADR-0039), tous par
+#           tab5_ecran_ouvrir et la ligne du registre (tab5-navigation.yaml). Pose les
+#           widgets à la première ouverture, puis cameras_ouvrir().
+#         - tab5_cameras_demande : événement esphome.tab5_cameras. Le blueprint « Tab5 —
+#           emplacements » y répond par l'action tab5_maj_cameras (tab5-api-logic.yaml).
+#         - tab5_cameras_attente : le seul rappel de cameras_tic() (sonde du chargement en
+#           cours toutes les 100 ms, image de la caméra montrée toutes les 5 s, images de
+#           ses voisines entre deux, tant que le popup est ouvert). L'image est téléchargée
+#           et décodée hors de la boucle (tab5_cameras_charge.cpp : tâche FreeRTOS,
+#           décodeur JPEG matériel). Pièces, filtre et mémoire des images : ADR-0057.
+# @architecture_constraint Push-only, events-only (ADR-0001, ADR-0025) : la tablette ne
+#       nomme aucune entité. Chargé APRÈS tab5_lvgl (il référence des widgets) et après
+#       tab5_assist : le https sans vérification du certificat du chargeur vient de son
+#       client http_request assist_http (verify_ssl: false). Aucun lv_* ici.
+# @ai_warning [AI-WARNING] Pas d'online_image ici : elle téléchargeait ET décodait dans la
+#       boucle principale (~1,6 s d'écran figé par image, mesuré le 10/10/2026, ADR-0049).
+# @ai_instruction Un widget de plus = son champ dans CamerasUI (tab5_cameras.h) et sa ligne
+#       ici. Les commandes sont des lambdas SANS capture (pointeurs de fonction).
+# ============================================================================
+
+script:
+  - id: tab5_cameras_ouvrir
+    then:
+      - lambda: |-
+          CamerasUI& u = g_cameras_ui;
+          if (u.popup == nullptr) {
+            u.cadre = id(cameras_cadre);
+            u.message = id(cameras_message);
+            u.nom = id(cameras_nom);
+            u.heure = id(cameras_heure);
+            // Pastilles et puces : leurs enfants, lus par cameras_ouvrir().
+            u.pastilles = id(cameras_pastilles);
+            u.pieces = id(cameras_pieces);
+            u.demander = [] { id(tab5_cameras_demande).execute(); };
+            u.attendre = [](int ms) { id(tab5_cameras_attente).execute(ms); };
+            // En dernier : cameras_ouvrir() ne fait rien tant que popup est nul.
+            u.popup = id(cameras_popup);
+          }
+          cameras_ouvrir();
+
+  - id: tab5_cameras_demande
+    mode: queued
+    max_runs: 3
+    then:
+      - homeassistant.event:
+          event: esphome.tab5_cameras
+
+  # Un seul rappel en attente (restart) : cameras_tic() décide s'il charge, attend la fin
+  # d'un téléchargement ou libère tout (popup fermé).
+  - id: tab5_cameras_attente
+    mode: restart
+    parameters:
+      ms: int
+    then:
+      - delay: !lambda 'return (uint32_t) ms;'
+      - lambda: 'cameras_tic();'

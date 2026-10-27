@@ -1,0 +1,108 @@
+name: Site (vitrine et page de flashage)
+
+# ADR-0022, révisée le 28/09/2026. Reconstruit le site GitHub Pages sans rien compiler :
+# la racine et la page de flashage (web/, branche par défaut), l'image de partage
+# (docs/images/, sous un nom parlant) et les fichiers des releases retenues pour les canaux
+# stable et bêta (tools/publication/pages.py), et la documentation en/ et fr/, construite
+# depuis README.md et docs/ par MkDocs (tools/site/construire.py, ADR-0030). Le nom du
+# workflow date de la vitrine (remplacée par l'accueil de la documentation le 05/10/2026) :
+# gardé, des recettes le cherchent. Lancé :
+#   - par publication.yml, une fois les fichiers joints à une release ;
+#   - à chaque push sur main qui touche le site ;
+#   - à la main (workflow_dispatch).
+# Avant, seul publication.yml déployait le site : corriger la page recompilait les trois
+# firmwares et remplaçait les fichiers de la release.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'tools/publication/pages.py'
+      - 'tools/site/**'
+      - '.github/workflows/site.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  pages:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploiement.outputs.page_url }}
+    steps:
+      # La page et l'outil viennent de la branche par défaut, même lancé pour un tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Canaux stable et bêta
+        id: canaux
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # L'API, pas `gh release list` : elle dit quels fichiers sont déjà joints (une
+          # release dont publication.yml compile encore les binaires est ignorée). Un
+          # fichier en cours d'envoi a l'état « open » : pas encore joint.
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '[.[] | {tagName: .tag_name,
+            isPrerelease: .prerelease, isDraft: .draft, publishedAt: .published_at,
+            assets: [.assets[] | select(.state == "uploaded") | .name]}]' > releases.json
+          python tools/publication/pages.py choisir --releases releases.json | tee -a "$GITHUB_OUTPUT"
+      # Ce job peut écrire le site public : versions et empreintes figées, roues seulement.
+      - name: MkDocs et Material, versions et empreintes figées
+        run: |
+          bash tools/ci/pip_reessai.sh --require-hashes --only-binary :all: -r tools/site/requirements.txt
+      # Mode strict : un lien ou une ancre cassés dans docs/ arrêtent le déploiement.
+      - name: Documentation
+        run: python tools/site/construire.py --sortie doc
+      - name: Fichiers des releases retenues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE: ${{ steps.canaux.outputs.stable }}
+          BETA: ${{ steps.canaux.outputs.beta }}
+        run: |
+          for tag in $(printf '%s\n' "$STABLE" "$BETA" | sort -u); do
+            [[ -n "$tag" ]] || continue
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "assets/$tag" \
+              --pattern 'manifest-*.json' --pattern 'tab5-ha-hmi-*.bin'
+          done
+      - name: Site
+        run: |
+          python tools/publication/pages.py assembler --web web --assets assets --images docs/images --doc doc \
+            --stable "${{ steps.canaux.outputs.stable }}" --beta "${{ steps.canaux.outputs.beta }}" \
+            --sortie site | tee -a "$GITHUB_STEP_SUMMARY"
+      # GitHub Pages garde UN déploiement par commit (actions/deploy-pages lui donne
+      # GITHUB_SHA comme version ; l'API refuse en 404 une version qui n'est pas un commit,
+      # #231). Le 28/09/2026, la release v3.2.0-rc.1 visait le commit que le push de #230
+      # sur main venait de déployer : son déploiement s'est dit réussi et le site servi est
+      # resté celui du push (canal bêta sur 3.1.0). Mieux vaut une croix rouge.
+      - name: Commit pas encore déployé
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          etat=$(gh api "repos/$GITHUB_REPOSITORY/pages/deployments/$GITHUB_SHA" --jq .status 2>/dev/null || true)
+          if [[ "$etat" == succeed ]]; then
+            echo "::error title=Site::$GITHUB_SHA est déjà déployé : GitHub Pages ne garde qu'un déploiement par commit, celui-ci se dirait réussi sans rien changer. Déployer depuis un nouveau commit (un push sur main qui touche le site, ou une release sur un nouveau commit)."
+            exit 1
+          fi
+          echo "Aucun déploiement réussi pour $GITHUB_SHA (${etat:-aucun})"
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: site
+      - id: deploiement
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

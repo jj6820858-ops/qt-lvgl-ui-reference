@@ -1,0 +1,22 @@
+# French UI strings. Include as a package after the board, or copy the
+# substitutions you want into your own config (top-level always wins).
+substitutions:
+  str_waiting: "en attente de données"
+  str_refreshing: "mise à jour..."
+  str_refresh_btn: "Actualiser"
+  str_resets_in: "reset dans"
+  str_net_error: "erreur réseau"
+  str_token_error: "token expiré"
+  str_status_ok: "ok"
+  str_status_warning: "proche de la limite"
+  str_status_limit: "limite atteinte"
+  str_no_data: "pas de données"
+  str_no_data_short: "n/d"
+  str_setup: "à configurer"
+  str_time: "temps"
+  str_time_short: "t"
+  str_tokens: "tokens"
+  str_elapsed: "écoulé"
+  str_fast: "trop vite"
+  str_battery: "batt"
+  str_tok_day: "tok/jour"

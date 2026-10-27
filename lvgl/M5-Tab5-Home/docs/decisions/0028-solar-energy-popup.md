@@ -1,0 +1,63 @@
+# ADR-0028: An Energy popup for a solar installation — sensors picked in the blueprint, live values and production history pushed by HA while the popup is open
+
+**Status:** Accepted (2026-10-04, option B chosen by the author; not yet tried on a tablet nor with a real solar installation)
+**Date:** 2026-10-04
+
+## Context
+
+A user asked for his solar installation on the screen ([discussion #278](https://github.com/Axellum/M5-Tab5-ESPHome-LVGL/discussions/278)): what the panels produce, what the home uses, what goes to or comes from the grid, the battery, and the production over time. Until now a solar sensor could only sit in a room as a read-only `cap` tile (ADR-0023): one number, no history.
+
+Three ways were weighed with the author:
+
+- **A — more tile types**: a « solar » tile showing two or three numbers. No history, and the five-card room layout has no room for a flow.
+- **B — a popup** opened from a tile, with the live values on top and the production as bars below (hours, days, months). Chosen.
+- **C — a dedicated page** in the swipe carousel. Heavier (a page of its own in `tab5-lvgl.yaml`, its own idle and wake rules) for a feature most homes do not have.
+
+Constraints that hold: push-only and events-only (ADR-0001, ADR-0025) — the firmware names no entity and calls no HA action; one shared modal chrome (ADR-0009); one registry of modals (ADR-0013); no hardcoded colour (tokens); public HA files without a real entity or placeholder (ADR-0024); the screen in seven languages.
+
+## Decision
+
+- **The sensors are picked in the blueprint** « Tab5 — emplacements », in an optional, collapsed section « Énergie · Energy » (split on 2026-10-07 into « Énergie : solaire », « Énergie : réseau et maison » and « Énergie : batterie », same input keys): solar power, solar energy produced (kWh, with statistics), grid power (+ import), grid export power (optional, for meters that give it apart: grid = import − export), home consumption (optional: computed as solar + grid − battery charge, never below 0), battery level, battery power (+ charge), battery temperature, and two « Invert » booleans (grid, battery). Left empty, nothing changes on the screen.
+- **Entry points.** A `cap` tile whose entity is one of these sensors gets the new tile option **`e`**: it shows its value with `energie_formater()` (W / kW, kWh / MWh) and opens the popup on tap. The solar sensor gets the new palette icon `solaire` by default. « Aller à l'écran → Énergie » (HA select) opens it too. An older firmware ignores the unknown letter `e` (ADR-0023 parsing) and keeps a read-only tile.
+- **Popup** (`ui_components/energie_popup.yaml`, `tab5_energie.cpp`, registered as « Énergie »): the shared chrome, then up to four cards (Solar, Home, Grid, Battery; a card whose sensors are all empty is hidden, the others spread over the width), and below, the chart: title « period · total », three view buttons (Hours, Days, Months) and the bars drawn in C++ (gold, the current slot in the accent colour, a reference line at the maximum). Without the produced-energy sensor, the cards alone fill the popup. Instant transitions; MDI glyphs declared in `mdi_font_45` (rule 9).
+- **Request and answer.** The popup sends `esphome.tab5_energie` with `vue` (`heures`, `jours`, `mois`) when it opens and on each view button. The blueprint answers:
+  - no sensor picked: `tab5_maj_energie` with an empty payload (`|||||||`) — the popup says « Aucun capteur d'énergie choisi »;
+  - otherwise, if `script.tab5_energie` exists (package `packages/tab5_energie.yaml`): `script.turn_on` with the tablet's device, the view and the sensors. Without the package, nothing: the popup keeps « En attente de Home Assistant ».
+- **Two new firmware actions.** `tab5_maj_energie(payload)`: `solar|home|grid|battery %|battery W|temperature|unit|day` (W, kWh; empty field = not picked, `nan` = picked without a value). `tab5_maj_energie_historique(vue, debut, valeurs)`: the view's production in kWh, `;`-separated (24 hours, 30 days or 12 months; empty = no data), `debut` = local date of the first slot. Every caller (blueprint, package, demo, off-device render, docs) is updated with them.
+- **History from the recorder's statistics** (`recorder.get_statistics`, no new helper, no extra database write): the day = sum of the 5-minute `change` since local midnight + the part since the last 5-minute row (current state − last `state`); hours = the same rows by local hour; days = period `day` over 30 days, today replaced by the day; months = period `month` over 12 months, the current month completed by the 5-minute rows of the current hour and the partial part (just after the hour, the last full hour can miss a few minutes until the recorder compiles it). The energy sensor must have statistics (`state_class` `total_increasing` or `total`, as the HA Energy dashboard requires).
+- **Refresh while open.** The script (`mode: restart`) pushes the history of the view asked for, then the live values again at each change of a picked sensor (at most every 5 s, at least every minute), the hour bars with them, as long as the tablet's own « Écran courant » sensor says « Énergie » — after a 12 s grace, since that sensor lags by up to 5 s — and for 15 minutes at most. HA pushes nothing while the popup is closed.
+
+## Compatibility
+
+- **New blueprint, older firmware:** the `e` option is ignored (read-only tile); `esphome.tab5_energie` is never sent, so the new branch never runs; the empty-section case sends nothing.
+- **New firmware, older blueprint:** no tile gets `e`; « Aller à l'écran → Énergie » opens a popup that waits (« En attente de Home Assistant »).
+- **Without the package** `tab5_energie.yaml`: same waiting popup; the blueprint checks `script.tab5_energie` exists before calling it.
+- **Section left empty:** no tile changes, no icon changes, nothing pushed except the empty answer when the popup is opened by « Aller à l'écran ».
+
+## Consequences
+
+- One more popup, package, C++ unit (`tab5_energie.cpp`) and two actions; 21 actions in the contract. The demo pushes a solar home (room « Bureau », tile « Solaire ») and the off-device render captures the popup in its three views.
+- Sign conventions are the user's to set (two « Invert » boxes, or two grid sensors); the project does not guess an integration's convention.
+- With two tablets opening the popup at the same time, the last request wins (`mode: restart`); the other keeps its last values until its next request.
+- The popup closes itself after the usual idle time, which ends the script's loop at the next check.
+- `tests/test_energie.py` checks the payloads on both sides, renders the package's templates on simulated `get_statistics` answers against an independent Python computation, and checks the blueprint (empty section = nothing, filled = option `e` and icon `solaire`).
+- Not verified on a real HA: `script.turn_on` restarting a `mode: restart` script, and the templates against real statistics (only the HA source and simulated answers were read).
+
+## Amendment (2026-10-04): solar production in the status strip
+
+Axel asked for the solar production, as a share of the panels' maximum, among the status icons (top left). This is the one value the blueprint pushes while the popup is closed; « HA pushes nothing while the popup is closed » above still holds for the popup's live values.
+
+- **A key, not an action.** The blueprint sends `solaire|<percent>;` through the existing `tab5_maj_emplacements`. An older firmware ignores an unknown key, while an action it lacks stops HA's script (same reason as `climr`, ADR-0026, and `crRT`/`ceRT`, ADR-0027). The contract keeps 21 actions.
+- **The peak is a blueprint input** (`energie_crete`, kWp, number, default 0 = no icon) in the « Énergie · Energy » section (« Énergie : solaire » since 2026-10-07), beside the solar power sensor it divides: a constant of the installation, not an entity, so not a « Tab5 · … » list (ADR-0024 lists pick entities). Percent = power (W, kW or MW read from the sensor's unit) / peak, rounded, clamped 0–100; `nan` without sensor, peak or numeric state, and the icon hides.
+- **Rate.** With every full push (connection, reload, « MAJ Écran », HA start), then with the slow measurements every 5 minutes when the sensor changed since the previous pass: at most 12 pushes per sunny hour, none at night (sensor frozen at 0), riding a pass that runs anyway. Not on each change (an inverter publishes every 5 to 30 s) and no filter on the colour tier, which would need the last value sent kept in a helper.
+- **Screen.** Colour of `get_battery_color()` (the phone's and the tablet battery's scale); grey at 0 %. The `solar-panel` glyph at every level: the sun over the panel (`solar-power`, then `solar-power-variant`) broke into pieces at 26 px in 1 bpp (captures compared on 2026-10-04), so the colour alone carries the production. Placed before the tablet battery, which stays last. `tests/test_solaire.py`.
+
+## Amendment (2026-10-05): several solar sources
+
+The user who asked for the popup has several inverters or panel strings (« pv1 + pv2 + … », [discussion #278](https://github.com/Axellum/M5-Tab5-ESPHome-LVGL/discussions/278)): one power sensor and one energy meter each.
+
+- **Two new list inputs, not `multiple: true` on the old ones.** `energie_solaire_autres` (power) and `energie_production_autres` (energy) take the other sources; `energie_solaire` and `energie_production` stay single. An automation created before holds a *string* in those two fields, and Home Assistant's editor does not convert a string when a selector becomes a list (`ha-selector-entity` converts only when the selector changes under it; `ha-entities-picker` then calls `value.map`, frontend source read on 2026-10-05): the field would no longer show. HA itself does not check blueprint inputs against their selectors (`BlueprintInputs.validate`), so the templates still accept a string, a list or nothing in all four fields.
+- **Sums.** Solar power = the sum of the sources that have a value, each converted to W from its unit; an inverter « unavailable » at night is skipped; none with a value = `nan`, as with one source. It feeds the live card, the computed home consumption and the status-strip percentage (`energie_crete` is then the peak of all the panels). Energy = the sum of the meters' statistics, period by period (5 minutes, day, month; the recorder converts each to kWh); a meter with no row for a period counts as 0 there and does not hide the bar; the part since the last 5-minute row is computed meter by meter.
+- **What the script receives.** The blueprint still sends `solaire` and `production` (the first source), and adds the lists `solaires` and `productions`. An older `tab5_energie` package reads the first source only, without error; the new one reads the union of both. The firmware and the `tab5_maj_energie` contract do not change: they already carry one solar value and one day total.
+- **Tiles.** A `cap` tile of any of these sensors gets option `e` and, for a power sensor, the `solaire` icon; it still shows its own sensor's value, not the sum.
+- `tests/test_energie.py` and `tests/test_solaire.py`: W + kW added, one or all unavailable, kWh + Wh meters added per hour, day and month with gaps, the old single-string format giving the same values as before (also rendered against the previous templates).

@@ -1,0 +1,773 @@
+# Architecture & Code Structure
+
+## English · [Français](#version-française)
+
+---
+
+## Overview
+
+The ESPHome configuration is split into YAML packages imported by a single entry-point file (listed in section 1). This avoids a monolithic file that becomes impossible to navigate once you're past 1000 lines. Each package has a clearly defined responsibility and can be edited, tested, or replaced in isolation.
+
+### Data flow: HA pushes, the tablet sends events
+
+The Tab5 never polls Home Assistant's state ([ADR-0001](decisions/0001-push-only-zero-polling.md)). The "screen slots" blueprint and the `tab5_*` packages detect changes and call the firmware's ESPHome actions (`tab5_maj_*`, declared in `Tab5/paquets/tab5-api-logic.yaml`); the firmware parses the payload and updates LVGL in one pass. In the other direction the tablet calls no Home Assistant action: a tapped tile, a request (calendar month, announcement, console button) or its (re)connection becomes an `esphome.tab5_*` event, which the blueprint or `packages/tab5_evenements.yaml` turns into an action from a fixed whitelist ([ADR-0025](decisions/0025-events-only.md)).
+
+![How Home Assistant and the Tab5 talk: HA pushes data with the tab5_maj_* actions, the tablet answers with esphome.tab5_* events](images/flux_ha_tab5_en.svg)
+
+---
+
+## Key design decisions
+
+- **Push-only, zero polling.** The device never requests state from Home Assistant. Automations on the HA side detect changes and push data to the screen via native ESPHome service calls. In the other direction the tablet sends events, never Home Assistant actions ([ADR-0025](decisions/0025-events-only.md)). CPU stays near zero when nothing changes.
+- **Modular YAML.** The ESPHome configuration is split across thirty-seven files by concern (tokens, board (hardware, screen revision, screen size), publication channel, diagnostics sensors, home-automation sensors, API logic, styles, globals, scripts, UI, arcade, calendar, voice assistant, IMU, navigation, HA controls, alarm clock, rooms and tiles, quick-action wheel, row under the clock, energy popup, zones, settings popup, temperature popup, alerts popup, house popup, weather popup, music popup, whole-home music, tracked sensors, fridges, AI server popup, remote popup, energy saving, themes), each independently readable. Most stay under 500 lines; only the largest (`tab5-alarm.yaml`, `tab5-styles.yaml`, `tab5-lvgl.yaml`, `tab5-api-logic.yaml`, `tab5-sensors-diagnostics.yaml`, `carte-waveshare-7b.yaml`) go beyond, and the UI is further split into 108 reusable `ui_components/*.yaml`.
+- **Native LVGL, no web stack.** LVGL refreshes up to 60 times a second from a framebuffer in the ESP32-P4's PSRAM and redraws only what changed. Measured on the tablet (firmware 3.2.0, 2026-09-28): a changed value or the clock's minute redraws in under 10 ms, the rotating panel in the middle in 15-21 ms per frame, the whole screen in 133 ms, and a popup opens in 126-197 ms. Vector fonts (Material Design Icons) replace image files entirely.
+- **Data packing.** Complex payloads (15-day forecast, hourly forecast, weather alerts) are serialized as delimited strings on the HA side and parsed in C++ on the device — one network call, zero subsequent requests.
+- **Offline resilience.** All C++ lambdas check `api.connected()` and `has_state()` before touching the UI. If HA restarts, the last known state stays on screen — and the device stays usable on its own (clock, arcade, diagnostics console). It only reboots itself after a full hour without any API client (`api: reboot_timeout: 60min`), a deliberate anti-"zombie" safety net rather than a reaction to a short HA outage.
+
+---
+
+## 1. Entry point: `tab5-ha-hmi.yaml`
+
+The root file does three things:
+
+1. **Loads entity substitutions** — `substitutions: !include Tab5/user_entities.yaml` (gitignored local file). Copy `Tab5/user_entities.example.yaml` to `user_entities.yaml` and edit your HA entity IDs. Since 3.0 there is no secret to compile in: Wi-Fi comes from Improv or the fallback AP, the API key from Home Assistant, and builds are signed with `tab5_signature.pem` ([ADR-0020](decisions/0020-no-secret-firmware-signed-ota.md)).
+
+2. **Defines the boot sequence** — the `on_boot` block handles the startup order carefully: backlight on → media player volume set → amplifier enable (in that order, to avoid the ES8388 pop) → fire a `tab5_connected` event on the HA event bus, sent to Home Assistant itself as soon as it listens to actions (`ha_evenement_envoyer()`, `Tab5/ecran/tab5_journal.cpp`, since 2026-10-17: before, any client subscribed to states first, such as an aioesphomeapi tool, let the event go out unheard) → start wake-word detection if enabled.
+
+3. **Imports all packages** via `!include`.
+
+```yaml
+packages:
+  tab5_ui_tokens:  !include Tab5/paquets/tab5-ui-tokens.yaml
+  tab5_carte:      !include Tab5/paquets/carte-${ tab5_carte | default('tab5') | lower }.yaml  # board: hardware, screen, size (ADR-0061)
+  tab5_publication: !include Tab5/paquets/publication-${ tab5_publication | default('locale') }.yaml  # release channel (ADR-0022)
+  tab5_sensors_diagnostics: !include Tab5/paquets/tab5-sensors-diagnostics.yaml
+  tab5_sensors_domotique: !include Tab5/paquets/tab5-sensors-domotique.yaml
+  tab5_api_logic:  !include Tab5/paquets/tab5-api-logic.yaml
+  tab5_styles:     !include Tab5/paquets/tab5-styles.yaml
+  tab5_globals:    !include Tab5/paquets/tab5-globals.yaml
+  tab5_scripts:    !include Tab5/paquets/tab5-scripts.yaml
+  tab5_lvgl:       !include Tab5/paquets/tab5-lvgl.yaml
+  tab5_arcade:     !include Tab5/paquets/tab5-arcade${ '' if (tab5_jeux | default('oui' if (tab5_carte | default('tab5') | lower) == 'tab5' else 'non') | lower) == 'oui' else '-absente' }.yaml  # games: an optional module (ADR-0065); one package per feature (lot 8c),
+  tab5_calendar:   !include Tab5/paquets/tab5-calendar.yaml       # after tab5_lvgl: their scripts
+  tab5_assist:     !include Tab5/paquets/tab5-assist.yaml         # reference LVGL widget ids
+  tab5_imu:        !include Tab5/paquets/tab5-imu${ '' if (tab5_carte | default('tab5') | lower) == 'tab5' else '-absente' }.yaml
+  tab5_navigation: !include Tab5/paquets/tab5-navigation.yaml     # after tab5_lvgl: references LVGL widget ids
+  tab5_ha_controls: !include Tab5/paquets/tab5-ha-controls.yaml
+  tab5_alarm:      !include Tab5/paquets/tab5-alarm.yaml          # after tab5_lvgl too
+  tab5_tuiles:     !include Tab5/paquets/tab5-tuiles.yaml         # rooms and tiles (ADR-0023), after tab5_lvgl
+  tab5_roue:       !include Tab5/paquets/tab5-roue.yaml           # quick-action wheel (ADR-0036), run by tab5_tuiles_ui
+  tab5_rangee:     !include Tab5/paquets/tab5-rangee.yaml         # row under the clock (ADR-0031), after tab5_lvgl
+  tab5_reglables:  !include Tab5/paquets/tab5-reglables.yaml      # − / + tile of the climate card (ADR-0033), after tab5_lvgl
+  tab5_energie:    !include Tab5/paquets/tab5-energie.yaml        # Energy popup (ADR-0028), after tab5_lvgl
+  tab5_historique: !include Tab5/paquets/tab5-historique.yaml     # Temperature popup (ADR-0032), after tab5_lvgl
+  tab5_alertes:    !include Tab5/paquets/tab5-alertes.yaml        # Alerts history popup, after tab5_lvgl
+  tab5_maison:     !include Tab5/paquets/tab5-maison.yaml         # House popup (ADR-0037), after tab5_lvgl
+  tab5_meteo:      !include Tab5/paquets/tab5-meteo.yaml          # Weather popup (ADR-0043), after tab5_lvgl
+  tab5_lecteur:    !include Tab5/paquets/tab5-lecteur.yaml        # Music popup (ADR-0050), after tab5_lvgl and tab5_assist
+  tab5_musique:    !include Tab5/paquets/tab5-musique.yaml        # whole-home music (ADR-0067), after tab5_lvgl and tab5_assist
+  tab5_cameras:    !include Tab5/paquets/tab5-cameras.yaml        # Cameras popup (ADR-0049), after tab5_lvgl
+  tab5_suivi:      !include Tab5/paquets/tab5-suivi.yaml          # tracked sensors (ADR-0054), after tab5_lvgl
+  tab5_froid:      !include Tab5/paquets/tab5-froid.yaml          # fridges and freezers (ADR-0055), after tab5_lvgl
+  tab5_serveur_ia: !include Tab5/paquets/tab5-serveur-ia.yaml     # local AI server popup (ADR-0059), after tab5_lvgl
+  tab5_telecommande: !include Tab5/paquets/tab5-telecommande.yaml # remote popup, several remotes (ADR-0056), after tab5_lvgl
+  tab5_zones:      !include Tab5/paquets/tab5-zones.yaml          # optional zones (ADR-0018), after tab5_lvgl
+  tab5_reglages:   !include Tab5/paquets/tab5-reglages.yaml       # Settings popup, after tab5_lvgl
+  tab5_economie:   !include Tab5/paquets/tab5-economie.yaml       # energy saving: backlight cap, animations, LVGL rate
+  tab5_themes:     !include Tab5/paquets/tab5-themes.yaml         # themes (ADR-0029), LAST: repaints the packages above
+```
+
+---
+
+## 2. Package roles
+
+### `tab5-ui-tokens.yaml`
+Shared dimensional tokens, loaded first so every other package can reference them: modal card size (`modal_card_w`/`modal_card_h`), the 52 px title bar offset (`modal_body_y`), bottom margin (`modal_bottom_y`), calendar grid origin (`cal_grid_y`), and on the home page the height of a line of the row under the clock (`ligne_zone_h`) and of the Ok Nabu and − / + frames around one (`cadre_bas_h`). Changing a popup's geometry means changing a token here, not 8 hardcoded numbers across `ui_components/`.
+
+---
+
+### `carte-*.yaml`
+The board, picked at compile time by `tab5_carte:` in `Tab5/user_entities.yaml` ([ADR-0061](decisions/0061-board-and-screen-size.md)): `tab5` (the default, the M5Stack Tab5) or `waveshare-7b` (Waveshare ESP32-P4 7B, 1024×600, supported: it runs on the author's board since 2026-10-14, the home screen and the popups follow its screen size, the games do not and are left out by default, see [Waveshare ESP32-P4 7B](waveshare-7b.md)). `carte-tab5.yaml` loads `geometrie-tab5.yaml`, `tab5-hardware.yaml` and the screen revision `ecran-*.yaml` below; `carte-waveshare-7b.yaml` holds the whole hardware of that board and stubs the ids of the Tab5 hardware it lacks (power switches, battery, RTC) so the other packages compile unchanged. Each board's `geometrie-*.yaml` gives the screen size (`carte_ecran_l`/`carte_ecran_h`, from which the tokens and the C++ `kEcranL`/`kEcranH` derive), the panel size, the LVGL rotation and the scale of the large fonts. The root file also picks `tab5-imu.yaml` (BMI270) on the Tab5 and `tab5-imu-absente.yaml` elsewhere. See [`docs/hardware.md`](hardware.md#waveshare-esp32-p4-7b-board).
+
+---
+
+### `tab5-hardware.yaml`
+Low-level hardware configuration of the Tab5 (loaded by `carte-tab5.yaml`):
+- Display and touch settings shared by the three Tab5 revisions (MIPI-DSI, pins, calibration); the display model and the touch platform come from `Tab5/paquets/ecran-<revision>.yaml` (default: `M5STACK-TAB5-ST7123` and the official `st7123` I2C platform, since ESPHome 2026.7.0; the old `external_components` shim is gone) — see [`docs/hardware.md`](hardware.md#hardware-revisions)
+- I2C bus, PI4IOE5V6408 GPIO expanders (display/touch reset lines)
+- ES8388 DAC (`audio_dac:` platform) and ES7210 microphone ADC (`audio_adc:`)
+- `esp32_hosted` — ESP32-C6 Wi-Fi co-processor over SDIO
+- Backlight PWM (LEDC), I2S bus for microphone and speaker, media player, `ota:` — the voice pipeline (`micro_wake_word`/`voice_assistant`) moved to `tab5-assist.yaml` on 2026-09-25
+
+→ Details: [`docs/hardware.md`](hardware.md)
+
+---
+
+### `ecran-*.yaml`
+Screen and touch of one Tab5 revision, picked at compile time by `tab5_ecran:` in `Tab5/user_entities.yaml`: `st7123` (the default, the author's tablet), `st7121` (runs on a user's tablet since October 2026) or `ili9881c` (compiled by CI, never tested on a tablet). Each file only holds what changes from one revision to the next — the `mipi_dsi` model and the touch platform (`st7123`, or `gt911` on the original ILI9881C) — and extends the `tab5_display` and `touch` entries of `tab5-hardware.yaml` with `!extend`. See [`docs/hardware.md`](hardware.md#hardware-revisions).
+
+---
+
+### `publication-*.yaml`
+Release channel ([ADR-0022](decisions/0022-published-firmware-pages-channels.md)), picked by `tab5_publication` (default `locale`; the release CI, `.github/workflows/publication.yml`, sets it to `stable` or `beta` as a substitution). `publication-locale.yaml` is empty: a firmware compiled on your own PC gets no update entity, because the published binaries are signed with the project key, which a tablet flashed with another key refuses. `publication-stable.yaml` and `publication-beta.yaml` include `publication-commune.yaml` with the channel as a variable: an `ota: http_request` platform and a « Firmware » `update:` entity that reads the manifest of the flashing page (`<channel>/<screen revision>/manifest.json`). A beta moves on to the stable release that follows it.
+
+---
+
+### `tab5-sensors-diagnostics.yaml`
+System and network entities:
+- `wifi:` block, antenna select, GPIO power switches (Wi-Fi/USB/external 5V)
+- Internal ESP32-P4 temperature
+- Uptime, Wi-Fi signal strength, IP/SSID, HA API status
+- Free RAM / loop time (`debug`), SNTP clock, console refresh intervals
+
+### `tab5-sensors-domotique.yaml`
+Home-automation entities pushed by Home Assistant:
+- Plant moisture sensors (up to 5 BLE plant monitors)
+- Room & greenhouse temperature/humidity sensors
+- Light/PC state mirrors, phone battery
+- Audio: speaker amp switch, headphone jack, wake-word toggle
+- Plant details (EC / light / temperature / battery): `pot_sensors.yaml`, one parameterized package included five times (nested `packages:` + `vars: {n}`)
+
+These files only declare entities. No UI logic lives here.
+
+---
+
+### `tab5-api-logic.yaml`
+The most important package. Two things live here:
+
+**ESPHome API service handlers** — these are the endpoints Home Assistant calls to push data to the screen. Each handler receives a payload, validates it, then calls a C++ function of the C++ layer (`tab5_services.cpp`, declared in `tab5_custom.h`) to parse and apply it.
+
+```yaml
+api:
+  services:
+    - service: tab5_maj_previsions_jours_bulk
+      description: "Daily forecast: all 15 days in a single call."
+      variables:
+        payload:
+          type: string
+          description: "Fifteen days as idx|label|condition|tmin|tmax|… joined by ;"
+          example: "0|Auj 17|sunny|12.1|24.3|0|0|0|;"
+      then:
+        - lambda: |-
+            parse_and_update_jours_bulk(payload);
+```
+
+Every handler carries that `description`/`example` metadata (ESPHome 2026.9.0 and later). Home Assistant renders it in *Developer tools → Actions*, which is where the format of a hand-serialised payload becomes readable without opening this file. A handler missing it fails `pytest` (rule 5 of `tools/check_tab5_code_rules.py`).
+
+**C++ lambdas** — for logic that doesn't fit cleanly in YAML (state machine transitions, string parsing, conditional LVGL updates).
+
+The rule enforced throughout: before any `lv_*` call, check `boot_complete` and `api.connected()`. This prevents NaN values from crashing the UI during HA restarts.
+
+---
+
+### `tab5-styles.yaml`
+Global LVGL style definitions, declared once and referenced by ID everywhere in `tab5-lvgl.yaml`.
+
+The rationale: LVGL allocates a style object per widget if you define styles inline. With 80+ widgets on screen, that's 80+ style allocations in PSRAM. Declaring styles globally and attaching them by reference uses a handful of allocations for the whole screen.
+
+Styles defined here cover: base panel, card backgrounds, text variants (title, value, dim, small), button states (normal, pressed, active), progress bar fill, and icon color variants.
+
+---
+
+### `tab5-globals.yaml`
+Shared global variables accessible from any package:
+- `boot_complete` (bool) — gate for all UI updates
+- `conversation_mode` (bool) — toggles between Home Assistant pipeline and chat pipeline
+- Current state snapshots (last known temperature values, climate mode, etc.)
+
+Variables here are typed and initialized. Uninitialized globals on ESP32 are undefined behavior.
+
+---
+
+### `tab5-lvgl.yaml`
+The UI layout. Declares the pages, panels, labels, buttons, arcs, and icons, plus swipe gesture handling. It `!include`s 39 `ui_components/*.yaml` files directly (climate card/popup, light popup, shutter popup, device popup, TV remote popup, settings popup — whose System page is the former system console —, temperature popup, alerts popup, house popup, weather popup, tracked sensors popup and card, AI server popup, assistant/calendar/plant popups, alarm popup and ring overlay, forecast cards, the row under the clock (moisture gauges and sensor lines), the list of the − / + tile, switches card, the HA alert banner of the central card — one file included four times with `vars` —, the arcade selector and the 8 games); those in turn include the parametrized sub-templates (`pot_detail_card.yaml`, `modal_header.yaml`…), for 108 component files in total.
+
+**The dashboard is a single LVGL page, not a multi-page tab-bar layout** ([ADR-0002](decisions/0002-single-page-swipe-navigation.md)) — every home-automation feature lives on one 1280×720 `page_main`, reachable by tap, long-press or swipe. The only other pages are the 9 gaming ones (`page_arcade` + one per console), all declared `skip: true` so swipe navigation can never land on them; they are not part of the dashboard flow.
+
+`page_main` (1280×720):
+```
+page_main (1280×720, the whole dashboard)
+├── home content always visible   (clock, indoor temp/humidity, quick actions,
+│                                   climate card, moisture card)
+├── central rotating card          (planning / rain / alerts / info — auto-cycles
+│                                   every 8s, tab5-globals.yaml `interval:`; paused
+│                                   while off the default forecast window)
+├── bottom card region — one of two, toggled by `btn_control_ha` (house icon, top right):
+│   ├── HA mode cards   (`layer_switches` — the 5 devices of the current room, ADR-0023)
+│   └── forecast card   (`layer_forecast_daily` / `layer_forecast_hourly` — weather, 5 tabs)
+├── climate_popup   (near-fullscreen modal, opened by tapping the climate card)
+├── light_popup     (near-fullscreen modal, opened by tapping a light switch card)
+├── tv_remote_popup (Samsung remote, opened by a long press on the gamepad button
+│                    or on the PC card — `remote.*` services via HA)
+├── assistant_popup (STT transcription + Markdown LLM reply, long-press on the mic)
+├── calendar_popup  (monthly 7×6 grid, long-press on the date)
+├── pots_popup      (5 plant-detail cards, long-press on the moisture slots)
+└── reglages_popup  (settings in 4 pages: screen, appearance, battery, system — the
+                     system page is `console_sys`: diagnostics + volume + HA management
+                     with confirm overlays; tap on `btn_control_console`, top right =
+                     screen page, long press = system page)
+
+separate pages, outside the dashboard flow (all `skip: true` — see §6):
+├── page_arcade   (4×2 selector, opened by the gamepad button or the navigation wheel)
+└── page_marble / page_arkanoid / page_pinball / page_lode / page_go /
+    page_trivia / page_chess / page_draughts      (one per console)
+```
+
+Navigation is by touch (opening/closing the climate/light popups and the console button, and toggling the bottom card region between the weather mode and the HA mode) and by swipe gesture, handled in C++ (`handle_swipe_gesture()` in `tab5_central.cpp`):
+- swipe left/right on the lower band of the screen (`y ≥ 333`) → cycle through the 5 forecast pages (2 hourly windows + 3 daily windows, with the deliberate wrap documented in `forecast_page_suivante()`) in weather mode, then, on the left, through the pages of rooms 5 … N − 1 when Home Assistant sends more than five rooms (`pn|N`, [ADR-0066](decisions/0066-rooms-count-cut-tiles.md), with « Tab5 Appareils sur la météo » on); in HA mode, the same gesture goes to the next (left) / previous (right) **room** as a carousel (last room → room 1, empty rooms included, `tuiles_swipe_ha()`, 2026-10-18), the pagination dots in room order, and never shows the weather layers again under the cards
+- since the 14/07/2026 rework there is **no** up/down swipe anymore — the console opens by a long press on the gear button only
+
+Since 3.2 ([ADR-0023](decisions/0023-rooms-generic-tiles.md)) each forecast page is also a room of up to five devices described by Home Assistant (`tab5_tuiles.cpp`). The HA mode flag is `g_central_ctx.ha_mode` (the former `show_switches` global is gone); `tuiles_mode_ha()` crossfades the weather layer and `layer_switches` (hidden via `LV_OBJ_FLAG_HIDDEN`, never removed), paints the five cards of the current room, puts the room title in the central card and highlights the « HA » button (`tab5-lvgl.yaml`, `btn_control_ha`). See the `[AI-CONTEXT]` headers of `Tab5/ecran/tab5_tuiles.cpp` and `ui_components/switches_card.yaml` for the source-level notes.
+
+All style references point to IDs defined in `tab5-styles.yaml`. No inline style properties.
+
+→ Full file-by-file inventory and dependency graph: [`../CARTOGRAPHIE_TAB5.md`](../CARTOGRAPHIE_TAB5.md)
+
+---
+
+### `tab5-scripts.yaml`
+*Since 2026-09-25 (audit lot 8c), the game, calendar and voice/assistant scripts live in their own packages: `tab5-arcade.yaml`, `tab5-calendar.yaml`, `tab5-assist.yaml`.* Short ESPHome script blocks for reusable multi-step actions called from lambdas or HA. Keeps `tab5-api-logic.yaml` from becoming cluttered with repeated patterns. Grouped by family: debounces (volume 150 ms, brightness 200 ms, climate 250 ms — one HA call per gesture instead of one per tick), volume (single entry point `tab5_volume_apply`), climate widgets (`tab5_clim_ui`; the recolouring is in C++, `clim_recolorer()`), central rotator + dismiss, shutter, light popup, TV remote keys, and a 1 s `interval:` that returns to the home screen.
+
+---
+
+### `tab5-arcade*.yaml`
+The games are a module ([ADR-0065](decisions/0065-games-optional-module.md)), picked by `tab5_jeux` (`oui` / `non`; `oui` by default on the Tab5, `non` on a board without an IMU such as the Waveshare 7B). `tab5-arcade.yaml` is the module: the games' C++ files (`esphome: includes:`, with the console table `Tab5/jeux/jeux_registre.cpp`, `GameRegistry::kGames`, [ADR-0013](decisions/0013-single-registry-consoles-modals.md)), their colours and the chess font, their 9 LVGL pages (`page_arcade` and one per console), one `tab5_<game>_open` per console (it hands the game its LVGL pointers and fonts, which only a lambda can reach through `id()`), `tab5_arcade_open` for the selector page and `tab5_jeux_traduire` (the translation of its pages at boot). `tab5-arcade-absente.yaml` takes its place without games: the same two scripts, empty, and an empty console table (`Tab5/jeux/jeux_absents.cpp`); the Arcade is then no screen of the tablet. `tab5_games_close_all` lives in `tab5-navigation.yaml` (the core calls it). Loaded after `tab5-lvgl.yaml`: its pages follow `page_main`. See §6 and [`docs/arcade.md`](arcade.md).
+
+---
+
+### `tab5-calendar.yaml`
+Scripts of the calendar popup (`calendar_popup.yaml`): opening (long press on the date, « auto »), month render, previous / next / today, boot prefetch and the tap on a day. The grid is computed on the tablet (`tab5_calendar.cpp`); Home Assistant only fills it on request: the tablet fires `esphome.tab5_calendrier_mois` (or `_jour` for a day), `packages/tab5_evenements.yaml` runs the HA script, which answers with the `tab5_maj_calendrier_mois` / `_jour` actions. A month request always goes through `tab5_cal_request`. Loaded after `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-assist.yaml`
+The whole voice assistant: `micro_wake_word` (`okay_nabu`, plus `Stop`), `voice_assistant` and its callbacks (visual states through `assist_set_pipeline_state()`), the reply image (`http_request` + `online_image`), the voice scripts (arming the « Stop » word, interruption, `tab5_wake_word_dispatch` — the decision itself is `WakeWord::decide()` in `tab5_assist.cpp` —, reply in the central card) and those of the Assistant popup. The audio hardware (shared I2S bus, ES7210, ES8388, media player) stays in `tab5-hardware.yaml`. Loaded after `tab5-lvgl.yaml`. See [`docs/voice_assistant.md`](voice_assistant.md).
+
+---
+
+### `tab5-imu*.yaml`
+`tab5-imu.yaml` on the Tab5; on a board without an IMU (ADR-0061), `tab5-imu-absente.yaml` only keeps the « Tab5 Tap-to-Wake » switch the Settings popup reads, with no name and no effect. BMI270 accelerometer: the three axes are `internal: true` (at 10–30 Hz they would flood the HA recorder for nothing). Two consumers — tap-to-wake on the dashboard, and tilt input for the games. An `interval:` re-tunes the polling rate at runtime via `set_update_interval()`: 100 ms (10 Hz) at rest, 33 ms (30 Hz) while a tilt-controlled console is open. See §6.
+
+---
+
+### `tab5-navigation.yaml`
+Navigation between screens (2026-10-08, out of `tab5-ha-controls.yaml` and `tab5-scripts.yaml`): the modal registry (`tab5_modal_registry_init`, [ADR-0013](decisions/0013-single-registry-consoles-modals.md) — each window, its label and, for a screen opened by a script, that script), `tab5_ecran_ouvrir`, the only routine that opens a screen (the "go to screen" `select` and the gestures of the home screen, through the `tab5_geste` script, [ADR-0039](decisions/0039-gestes-accueil.md); refused while the alarm rings), the `select` itself and the `text_sensor` naming the current screen (game page or visible popup). The list of screens lives in three places ESPHome cannot merge — the `Ecran` enum, the `select` options read by HA, the registry — kept in step by `tests/test_appuis.py` and `tools/check_tab5_registry.py`. Loaded **after** `tab5-lvgl.yaml`: its lambdas reference LVGL widget ids.
+
+---
+
+### `tab5-ha-controls.yaml`
+Entities exposed to Home Assistant to tune the screen from a dashboard without standing in front of it: a `number` for the volume (single entry point `script.tab5_volume_apply`, shared with both on-screen sliders), the screen language, the switches and the automatic screen-off of the Settings popup, a `button` to reload the calendar, and a 5 s catch-up of volume changes made on the `media_player` side.
+
+---
+
+### `tab5-alarm.yaml`
+Alarm clock + appointment reminders: `rtttl:` melody on `tab5_speaker` (outside the media player), ~20 config entities exposed to HA (switches, `datetime type: time`, numbers, selects, text), the ring state machine (one melody pass, then a 3 s listening window for the on-device "Stop" wake word; snooze, max duration, crescendo) and a 1 s `interval:` that only compares two integers — all the date maths live in the pure engine `alarm_clock.cpp` (no `id()`, no network). The alarm rings without Home Assistant; HA only adds the spoken briefing, the appointment list and an optional ringtone URL. Single entry point `script.tab5_alarm_refresh` (entities → `g_alarm_cfg`, never the reverse). The mic/speaker relay it has to perform is [ADR-0010](decisions/0010-shared-i2s-bus-mic-speaker.md).
+
+---
+
+### `tab5-tuiles.yaml`
+Rooms and tiles ([ADR-0023](decisions/0023-rooms-generic-tiles.md)): the `tab5_tuiles_ui` script hands `g_tuiles_ui` the widgets that `tab5_tuiles.cpp` draws (weather-tile shoulders and buttons of every page, HA-mode cards, rows and room names of the Lights and Shutters popups, layers, page dots, central-card title, « HA » button) and its two commands (the `esphome.tab5_action` event, the shutter tap). The model, the NVS and the drawing live in `tab5_tuiles.cpp`; definitions arrive through the `tab5_maj_tuiles` action. No `lv_*` here. Run first by `tab5_zones_apply`, before the first frame; loaded after `tab5-lvgl.yaml`. Then it runs `tab5_roue_ui` (`tab5-roue.yaml`, split out on 2026-10-08), which hands `g_roue_ui` the widgets of the quick-action wheel ([ADR-0036](decisions/0036-quick-action-wheel.md), `ui_components/roue_actions.yaml`), drawn by `tab5_roue.cpp`: the long press of a `lum`, `vol` or `cli` tile opens it around the tile — a hub, a first ring (« Maison », commands, families, « Détails ») and a second ring for the touched family's choices.
+
+### `tab5-roue.yaml`
+Quick-action wheel of a tile ([ADR-0036](decisions/0036-quick-action-wheel.md)): the `tab5_roue_ui` script hands `g_roue_ui` the widgets of `ui_components/roue_actions.yaml`, drawn by `tab5_roue.cpp`, the caption of each button and the central card as the anchor of the navigation wheel ([ADR-0042](decisions/0042-navigation-wheel.md), `tab5_roue_navigation.cpp`: its long press opens the wheel on the tablet's screens), then calls `roue_brancher()`. `tab5_tuiles_ui` runs it right after the tile widgets, as when they lived in `tab5-tuiles.yaml` (split out on 2026-10-08). No `lv_*` here.
+
+### `tab5-rangee.yaml`
+Row under the clock ([ADR-0031](decisions/0031-row-under-the-clock.md)): the `tab5_rangee_ui` script hands `g_rangee_ui` the widgets that `tab5_rangee.cpp` draws (`ui_components/rangee.yaml`: the plants line, two panels of four elements for the sensor lines, the position dots). Up to three sensor lines of four elements, plus the plants line, rotate with the central card: `tab5_central_rotator_auto` calls `rangee_tour()` 0.2 s before the central card moves, and a line stays N turns of 8 s (« Time per line » in the blueprint). Definitions (`hLI`, `hp`, `hd` keys) arrive through `tab5_maj_tuiles`, states (`hLI`) through `tab5_maj_emplacements`; the model and its NVS live in `tab5_tuiles.cpp`. Display only: a tap shows the next line, a long press on the plants line opens My Plants. No `lv_*` here. Run by `tab5_zones_apply`, before the first frame; loaded after `tab5-lvgl.yaml`.
+
+### `tab5-reglables.yaml`
+− / + tile of your choice ([ADR-0033](decisions/0033-adjustable-tile.md)): the `tab5_reglables_ui` script hands `g_reglables_ui` the widgets that `tab5_reglables.cpp` draws — on the climate card (`ui_components/climate_card.yaml`: the value between − and +) and in the list (`ui_components/reglables_liste.yaml`, ten rows from `reglables_ligne.yaml`) — and the callbacks to the scripts (`tab5_volume_apply`, `tab5_action`, `tab5_debounce_reglable`). Touching the living-room temperature unfolds the list: the blueprint's climate, the devices of the blueprint's « − / + tile » section (`rN` keys of `tab5_maj_tuiles` and `tab5_maj_emplacements`), then the tablet's volume. The choice stays in NVS. Climate chosen: − / + and the value keep their former path. Other device: the value changes at once, one `esphome.tab5_action` (`rN` / `regler`, or `consigne` for a climate) leaves when the finger stops. No `lv_*` here. Run by `tab5_zones_apply`, before the first frame; loaded after `tab5-lvgl.yaml`.
+
+### `tab5-energie.yaml`
+Energy popup ([ADR-0028](decisions/0028-solar-energy-popup.md)): the `tab5_energie_ouvrir` script hands `g_energie_ui` the widgets of `ui_components/energie_popup.yaml` on the first opening, then calls `energie_ouvrir()` (`tab5_energie.cpp`); `tab5_energie_demande` sends the `esphome.tab5_energie` event (`vue` = `heures`, `jours` or `mois`) when the popup opens and on each view button. Home Assistant answers with the `tab5_maj_energie` (live values) and `tab5_maj_energie_historique` (bars) actions. Opened by a `cap` tile with the `e` option or by « Aller à l'écran → Énergie ». No `lv_*` here; loaded after `tab5-lvgl.yaml`.
+
+### `tab5-alertes.yaml`
+Alerts popup ([ADR-0034](decisions/0034-central-card-alerts.md), lot 4 of the alerts plan, 2026-10-06): the 20 latest alerts, one line each (severity dot, text, « apparue 14 h 02 · lue 14 h 10 · terminée 15 h 30 »), and « Tout marquer comme lu ». The `tab5_alertes_ouvrir` script hands `g_alertes_ui` the widgets of `ui_components/alertes_popup.yaml` on the first opening, then calls `alertes_ouvrir()` (`tab5_alertes.cpp`); `tab5_alertes_demande` sends the `esphome.tab5_alertes_historique` event when the popup opens, and Home Assistant answers with the `tab5_maj_alertes_historique` action (again while the popup stays open and the history changes). `tab5_alertes_tout_lu` reads the central card's banners at once and sends `esphome.tab5_alerte_lue` with `alert_id` « * ». Opened by a long press on the home central card or by « Aller à l'écran → Alertes ». No `lv_*` here; loaded after `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-maison.yaml`
+House popup ([ADR-0037](decisions/0037-house-popup.md), 2026-10-07): the whole house, one column per room of the blueprint that has devices (room 1 → 10; five columns at most a page, the rooms shared out evenly over ADR-0046 pages, `pages_repartir()`, ADR-0066), one row per device with the same icon, name and state as the HA-mode card. The `tab5_maison_ouvrir` script hands `g_maison_ui` the widgets of `ui_components/maison_popup.yaml` (five column headers from `maison_entete.yaml`, 25 rows from `maison_ligne.yaml`, two page names from `pages_onglet.yaml`) on the first opening, then calls `maison_ouvrir()` (`tab5_maison.cpp`), which lays out the columns and paints the rows. A row reacts like its tile: tap, long press and the « ⋯ » button go through `tuile_appui_piece()` (`tab5_tuiles.cpp`) — the long press and « ⋯ » first open the tile's quick-action wheel around the row's badge, without its « Maison » link (`tuile_roue_ouvrir()`; `roue_ouvrir()` brings it in front of this popup) —, so the commands are those of the tiles and nothing new reaches Home Assistant; « Éteindre les lumières » sends each room's « tout éteindre ». `peindre_tuile()` and `tuiles_appliquer_ui()` tell it when a state or the definitions change, only while it is shown. Opened by « Aller à l'écran → Maison » or, in HA mode, by a tap on the central card's title. No `lv_*` here; loaded after `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-meteo.yaml`
+Weather popup ([ADR-0043](decisions/0043-weather-popup.md), 2026-10-09): the weather in graphs, on three pages changed by a swipe or by their names next to the title, like the Settings — « Aujourd'hui » (now: icon, temperature, condition, low and high of the day, rain over the hours shown; then up to 15 hours: icons, a smoothed temperature curve, rain bars, the current hour marked), « 10 jours » (one row per day, low-to-high bar on a common scale) and « Détails » (rain in the next hour on a time scale, humidity, UV index, frost and snow probabilities). The `tab5_meteo_ouvrir` script (`page`) hands `g_meteo_ui` the widgets of `ui_components/meteo_popup.yaml` (four cards from `meteo_carte.yaml`) on the first opening, then calls `meteo_ouvrir()` (`tab5_meteo.cpp`), which builds the plots once and paints the page. Nothing is asked of Home Assistant: the popup reads what it already pushes (hourly and daily forecasts, rain bars, current weather, probabilities). Opened by « Aller à l'écran → Météo », a home-screen gesture (code `meteo`) or a long press on a forecast tile without a device. No `lv_*` here; loaded after `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-cameras.yaml`
+Cameras popup ([ADR-0049](decisions/0049-cameras-popup.md), 2026-10-09, discussion #278): a still image of each camera picked in the « Caméras » section of the blueprint, in a mosaic of four squares per page or one camera large ([ADR-0057](decisions/0057-cameras-rooms.md); a swipe, the dots under the frame, a tap to switch), refreshed one image at a time while the popup is open — no video. The `tab5_cameras_ouvrir` script hands `g_cameras_ui` the widgets of `ui_components/cameras_popup.yaml` and four command lambdas on the first opening, then calls `cameras_ouvrir()` (`tab5_cameras.cpp`). `tab5_cameras_demande` sends `esphome.tab5_cameras` (opening, every 4 minutes while open, after a failed image), answered by the blueprint with `tab5_maj_cameras` (each camera's `entity_picture`, area and offline time). From two areas, a room column (`ui_components/cameras_puce.yaml`) filters the cameras the swipe goes through ([ADR-0057](decisions/0057-cameras-rooms.md)). The camera shown is downloaded and decoded off the main loop (`tab5_cameras_charge.cpp`: a FreeRTOS task, `esp_http_client`, the ESP32-P4 hardware JPEG decoder, RGB565 in PSRAM, each decoded buffer given to the screen, which keeps the last image of each camera, 8 MiB at most), every 5 s, its neighbours once in between; `tab5_cameras_attente` (`mode: restart`) polls it and the memory is released when the popup is closed. Opened by « Aller à l'écran → Caméras » or a home-screen gesture (code `cameras`). No `lv_*` here; loaded after `tab5-lvgl.yaml` and `tab5-assist.yaml`.
+
+---
+
+### `tab5-historique.yaml`
+Temperature popup ([ADR-0032](decisions/0032-temperature-history-popup.md)): the `tab5_historique_ouvrir` script (`cle` = `salon` or `serre`) hands `g_historique_ui` the widgets of `ui_components/historique_popup.yaml` on the first opening, then calls `historique_ouvrir()` (`tab5_historique.cpp`); `tab5_historique_demande` sends the `esphome.tab5_historique` event (`cle`, `vue` = `jour`, `semaine` or `mois`) when the popup opens and on each view button. Home Assistant answers with the `tab5_maj_historique` action (the curve, and the forecast for the second temperature). Opened by a long press on one of the two home-screen temperatures (`climate_card.yaml`). No `lv_*` here; loaded after `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-lecteur.yaml`
+Music popup ([ADR-0050](decisions/0050-music-player.md), 2026-10-10): a centred card for any `media_player` — cover art, title, artist, album, a position bar, shuffle / previous / play-pause / next / repeat, volume and mute, one chip per chosen player — the « now playing » bar of the home screen, over the Ok Nabu frame, and the compact player that the zone left of the clock can show ([ADR-0051](decisions/0051-left-zone-choice.md); the bar hides while it is shown) (`ui_components/lecteur_popup.yaml`, `lecteur_mini.yaml`, `lecteur_zone.yaml`). Home Assistant pushes the players and the shown one with the `tab5_maj_lecteur` action (read by `tab5_parse.cpp`, section 9); `tab5_lecteur_lier` hands `g_lecteur_ui` the widgets, `tab5_lecteur_evenement` sends the `esphome.tab5_lecteur` event (`action`, `lecteur`, `valeur`) for every command, and a 1 s `interval` advances the position (`lecteur_tic()`). The cover is an `online_image` (`lecteur_pochette`, RGB565 360 × 360): the `entity_picture` path completed with the address of HA seen when the API connects. Opened by the long press of a `med` tile without option `t`, the « now playing » bar, the `musique` gesture or « Aller à l'écran → Musique ». No `lv_*` here; loaded after `tab5-lvgl.yaml` and `tab5-assist.yaml`.
+
+---
+
+### `tab5-musique.yaml`
+Whole-home music ([ADR-0067](decisions/0067-hifi-music-assistant.md), 2026-10-18): the pages of the Music popup after « Lecture », on its page brick (`tab5_pages.cpp`, a swipe or their names on the title line, each page only when it has something to show). « Pièces » shows one card per player (eight at most): its kind, name, state or track, volume (sent on release), mute, group with the shown player, « send the music here », power; a tap shows that player on « Lecture », a long press opens its wheel (source, mute, ungroup). « Bibliothèque » browses Music Assistant: favourites, playlists, albums, artists, radios, podcasts, recent, a grid of ten items per page with their covers; a tap plays a track or opens a container, a long press offers play now, next, at the end or as a radio. « Lecture » gains « À suivre » and the « + n » chip of a group. Home Assistant pushes the players with the `tab5_maj_musique_pieces` action and answers each browse with `tab5_maj_musique_liste` (read by `tab5_parse.cpp`, section 9 bis; `packages/tab5_musique.yaml`); `tab5_musique_lier` hands `g_musique_ui` the widgets of `ui_components/musique_calques.yaml`, `tab5_musique_evenement` sends the `esphome.tab5_musique` event (`action`, `piece`, `valeur`), the ten covers are `online_image` of the parametrized package `musique_pochette.yaml` (160 × 160, downloaded one at a time), and a 1 s `interval` gives up a browse unanswered after 8 s (`musique_tic()`). Without Music Assistant, only « Pièces » with the players of « Tab5 · music players ». No `lv_*` here; loaded after `tab5-lvgl.yaml` and `tab5-assist.yaml`.
+
+---
+
+### `tab5-suivi.yaml`
+Tracked sensors ([ADR-0054](decisions/0054-tracked-sensors.md), 2026-10-10): the « Suivi » popup — one card per sensor chosen in « Tab5 · tracked sensors » (six at most), with its name, value and unit, change in colour with a trend arrow, and the curve of the last 24 hours — and the card of the first sensor that the zone left of the clock can show (content « capteur », [ADR-0051](decisions/0051-left-zone-choice.md)) (`ui_components/suivi_popup.yaml`, `suivi_carte.yaml`, `suivi_zone.yaml`). Home Assistant pushes them with the `tab5_maj_suivi` action (read by `tab5_parse.cpp`, section 11; `packages/tab5_suivi.yaml`); `tab5_suivi_lier` hands `g_suivi_ui` the widgets (also run at boot by `tab5_zones_apply`), `tab5_suivi_ouvrir` paints and opens the popup. Opened by a tap on the zone's card, the `suivi` gesture or « Aller à l'écran → Suivi ». Nothing is asked of Home Assistant; no `lv_*` here; loaded after `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-froid.yaml`
+Fridges and freezers ([ADR-0055](decisions/0055-fridge-freezer-monitoring.md), 2026-10-10): the « Froid » popup, titled « Frigos et congélateurs » — one card per appliance declared in « Tab5 · fridges » and « Tab5 · freezers » (four at most in all), with its temperature coloured by level, its status (within norm, too warm, door open?, door not closed, sensor silent…), the 24-hour extremes and the norm, the curve of the last 24 hours between the dashed lines of the norm and the last incident (`ui_components/froid_popup.yaml`, `froid_carte.yaml`) — and the `fridge-alert` icon that blinks in the clock's top-right corner while an appliance is at the serious level (`btn_froid_alerte` in `tab5-lvgl.yaml`, a 500 ms `lv_timer` paused while it is hidden). Home Assistant decides the levels (`packages/tab5_froid.yaml`) and pushes them with the `tab5_maj_froid` action (read by `tab5_parse.cpp`, section 12); `tab5_froid_lier` hands `g_froid_ui` the widgets, `tab5_froid_ouvrir` paints and opens the popup. Opened by a tap on the blinking icon, the `froid` gesture, « Aller à l'écran → Froid » or the navigation wheel (Agenda ▸ Frigos). Nothing is asked of Home Assistant; no `lv_*` here; loaded after `tab5-lvgl.yaml`.
+
+### `tab5-serveur-ia.yaml`
+Local AI server ([ADR-0059](decisions/0059-local-llm-server-popup.md), 2026-10-10): the « Serveur IA » popup — a band with the online / offline dot, the state, the server's name and the loaded model; the tokens-per-second card (large number, curve of the last 24 pushes kept by the tablet, requests running and queued); four cards for the VRAM (with a bar), the GPU temperature (coloured by the level Home Assistant decides), the RAM (with a bar) and the power (`ui_components/serveur_ia_popup.yaml`, `serveur_ia_carte.yaml`). Unknown values show « — ». Home Assistant pushes the sensors picked in the « Tab5 · AI server, … » lists (`packages/tab5_serveur_ia.yaml`, two seconds apart at least) with the `tab5_maj_serveur_ia` action (read by `tab5_parse.cpp`, section 14); nothing is painted while the popup is closed. `tab5_serveur_ia_lier` hands `g_serveur_ia_ui` the widgets, `tab5_serveur_ia_ouvrir` paints and opens the popup. Opened by the `serveur_ia` gesture, « Aller à l'écran → Serveur IA » or the navigation wheel (Agenda ▸ Serveur IA, once a server was pushed). No `lv_*` here; loaded after `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-telecommande.yaml`
+Remote popup with several remotes ([ADR-0056](decisions/0056-several-remotes.md), 2026-10-10): `tab5_telecommande_ui`, run by `tab5_tuiles_ui`, hands `g_telecommande_ui` the widgets of `ui_components/tv_remote_popup.yaml` that `tab5_telecommande.cpp` shows or hides for the remote of the page — the names at the top (`pages_onglet.yaml`), Source or Stop, Mute or the volume icon, the app row (TV) or the playback row (set-top box: Apple TV, Freebox Player) — and plugs in the left / right swipe (`tab5_pages.cpp`, [ADR-0046](decisions/0046-popups-a-pages.md)). The list comes from the « telecommandes » key of `tab5_maj_emplacements` (`tab5_parse.cpp`, section 13); every key sends an `esphome.tab5_action` event whose slot (« tv », « tv1 »…) is the page shown, and the « Tab5 — emplacements » blueprint translates it for that remote. Nothing is asked of Home Assistant; no `lv_*` here; loaded after `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-zones.yaml`
+Optional zones ([ADR-0018](decisions/0018-optional-zones-confirmed-by-ha.md)): a zone whose slot is not chosen in the « Tab5 — emplacements » blueprint, or whose entity does not exist, disappears from the screen with its buttons. `tab5_zones_demande` asks Home Assistant once per connection (`esphome.tab5_zones` event), the blueprint answers with the `tab5_maj_zones` action, and `tab5_zones_apply` hands the widgets to `zones_apply_ui()` (`tab5_zones.cpp`, where the decision lives) and publishes the « Zones masquées » diagnostic sensor. It is run at the end of setup, after each HA answer, and when data brings a zone back. Loaded after `tab5-lvgl.yaml`.
+
+### `tab5-reglages.yaml`
+Settings popup (2026-10-06, four pages since 2026-10-08): the settings one may want to change without Home Assistant — on the Screen page brightness, auto screen off, waking on « Okay Nabu » and with a tap; on the Appearance page theme, light or dark, the night switch of Auto mode, language; on the Battery page charge limit, power saving and battery fitted, with the battery's state, level, voltage and consumption (painted by `reglages_batterie_peindre()` only while that page is shown) — and the System page, the former system console (`console_sys.yaml`, refreshed only while that page is shown: `reglages_page_visible(REGLAGES_PAGE_SYSTEME)`). The page changes with a tap on its name at the top or a left / right slide in the popup (`LV_EVENT_GESTURE` caught by the popup, which does not let it bubble to `page_main`; a slide that starts on a slider does not change the page), instantly. Opened by a tap on the gear button (`btn_control_console`) on the Screen page, by its long press on the System page, by « Aller à l'écran → Réglages » (Screen page) or « Aller à l'écran → Console système » (System page). `tab5_reglages_ouvrir(page)` hands `g_reglages_ui` the widgets of `ui_components/reglages_popup.yaml` on the first opening; `tab5_reglages_sync_ui` reads the entities and calls `reglages_peindre()` (`tab5_reglages.cpp`), and every entity set there runs it from its own `on_value` / `on_state`, so the popup shows what Home Assistant sees, whoever made the change; `tab5_reglages_choisir` writes an entity, and the language first asks for a confirmation (`tab5_reglages_langue_confirmer`), since it restarts the tablet. Nothing is stored here: the settings remain the entities (`restore_value` / `restore_mode`). No `lv_*` here; loaded after `tab5-lvgl.yaml` and before `tab5-themes.yaml`.
+
+### `tab5-economie.yaml`
+Energy saving (2026-10-06): the « Tab5 Économie d'énergie » select (Jamais, Sur batterie — the default —, Toujours) and the « Tab5 Sur batterie » diagnostic state. Its `tab5_economie_appliquer` script runs every second and right away on a touch, when the screen comes on, and on the battery's current, level and charge; it feeds `economie_decider()` (`tab5_economie.h`, pure, tested on a PC) and applies the decision: the backlight cap (the light writes through the `backlight_plafonne` template output of `tab5-hardware.yaml`, so Home Assistant keeps the chosen brightness), the animation level `animations_niveau()` (`tab5_anim.cpp`; the « Tab5 Animations » select, « Aucune » while energy saving is on, ADR-0045) and the LVGL refresh period (33 ms outside games). « On battery » is decided from the INA226 current in `tab5-sensors-diagnostics.yaml`; what keeps the screen as it is (alarm, voice, game, update) is the list of the screen auto-off, stored in `ecran_veille_permise`. Loaded by the off-device render too, where nothing turns it on.
+
+### `tab5-themes.yaml`
+Themes ([ADR-0029](decisions/0029-themes-palette.md)): the « Thème » select (one option per file of `Tab5/themes/`), the « Clair ou sombre » select (Dark, Light, Auto) and the « Nuit (thème auto) » switch that Home Assistant turns on at sunset (`tab5_push.yaml`, automation « Tab5 — day/night theme »). `tab5_theme_choisir` picks the palette (`theme_selectionner()`, `tab5_theme.cpp`); `tab5_theme_repeindre` repaints without a reboot: the shared styles first (block generated by `tools/gen_themes.py`), then, once setup is complete, every colour set at runtime (`theme_rejouer_ui()`, one replay function per C++ unit, plus the sensor icons). A theme may also change the shapes of nine shared styles, keep the banner and the clock dark in light mode, and set the fonts of the time, the date and the titles (lot 3). The games keep the dark palette ([ADR-0014](decisions/0014-game-common-helpers-local-palettes.md)). Loaded LAST: its repaint reads the widgets, sensors and scripts of every package above.
+
+---
+
+## 3. C++ layer: `tab5_custom.h` + the `tab5_*.cpp` units
+
+Since 2026-09-08 the former single `tab5_custom.cpp` (3 169 lines) is split into nine units, one per responsibility — `tab5_text.cpp`, `tab5_forecast.cpp`, `tab5_central.cpp`, `tab5_services.cpp`, `tab5_assist.cpp`, `tab5_cards.cpp`, `tab5_console.cpp`, `tab5_anim.cpp`, `tab5_calendar.cpp` — with `tab5_custom.h` unchanged as the single public header and `tab5_internal.h` for the few helpers shared between units. `tab5_custom.cpp` only keeps the shared globals. Other units have been split off since (the climate left `tab5_cards.cpp` for `tab5_clim.cpp` on 2026-10-08, lot L7); `CARTOGRAPHIE_TAB5.md` lists them all. Since 2026-10-08 these files live in `Tab5/ecran/`, the pure C++ they call (`tab5_core`, `tab5_champs`, `tab5_tokens.h`…) in `Tab5/socle/`; each unit also has its own header (`tab5_forecast.h`…), and `tab5_custom.h` is the umbrella that includes them all, so the lambdas still include only it.
+
+The `.h` file declares all functions used from YAML lambdas. The `.cpp` file implements them.
+
+Main responsibilities:
+- **String tokenizer** — splits semicolon-delimited payload strings in place (`strtok_r`). Used for the bulk weather pushes (`parse_and_update_heures_bulk()` / `parse_and_update_jours_bulk()`).
+- **LVGL helpers** — null-guarded update functions (`update_*_ui()`, `refresh_*_forecast()`) so a push arriving before LVGL is initialized can't crash the UI.
+- **Color logic** — maps temperatures and plant moisture levels to continuous color gradients (`get_temperature_color()` / `get_humidity_color()`).
+- **Gestures & central card** — `handle_swipe_gesture()` (forecast pagination), `transition_widgets()` (panel animations), `show_temporary_planning()` (6 s override then restore), `update_info_text_ui()` (info panel), `normalize_text_utf8()` (accent fixing for dynamic HA strings).
+
+(The microphone icon, its colour and the status label follow the pipeline through `assist_set_pipeline_state()` (`tab5_assist.cpp`), called by the five `voice_assistant:` callbacks of `tab5-assist.yaml`.)
+
+---
+
+## 4. The Push paradigm
+
+The device never initiates a network request. All data flow goes in one direction:
+
+```
+Home Assistant                       Tab5 (ESP32-P4)
+──────────────                       ───────────────
+State change detected
+  → automation triggered
+    → service call: esphome.tab5_maj_previsions_jours_bulk(payload)
+      → API handler receives payload ──────────────────────→
+                                       parse_and_update_jours_bulk() runs
+                                       LVGL labels updated
+```
+
+**No pauses on the HA side (2026-10-01):** the push automation sends its service blocks one after the other; the sequence keeps them in order. The 1-second pauses it used to insert dated from a time when a push made about twenty calls in loops, and only delayed the screen by 6 s after each reboot. Bulk payloads stay split in blocks: the device rejects one larger than 2048 bytes.
+
+---
+
+## 5. Data packing
+
+For the 15-day daily forecast, 15 × 4+ data points (day, condition, max temp, min temp…) would be dozens of separate service calls. Instead, HA builds one string:
+
+```
+"0;Soleil;27;14;1;Nuageux;24;12;2;Pluie;19;11;..."
+```
+
+The C++ tokenizer splits on `;` in a single pass — O(n) on string length, not O(n) on call count. The LVGL update then happens once, atomically, without intermediate redraws.
+
+Same pattern applies to the hourly forecast (`tab5_maj_previsions_heures_bulk`) and the Météo-France vigilance payload (`tab5_maj_alerte_meteo_france`, 11 to 13 `|`-delimited fields: fog and forest fire at the end are optional).
+
+---
+
+## 6. Game layer (Arcade — experimental)
+
+The 8 game consoles are **isolated sub-modules** that share no state with the HMI dashboard. They follow a strict architecture:
+
+- **One dedicated fullscreen LVGL page per game** 1280×720 (`page_marble`, `page_chess`… declared `skip: true` so swipe navigation cannot reach them) — not an overlay stacked on `page_main`. The only documented exception to the modal chrome rule (ADR-0009)
+- **YAML = empty containers** — each `*_game.yaml` declares only 2–4 `lv_obj` containers; all visual content is built in C++
+- **`lv_timer` lifecycle** — created on open, destroyed on close → zero CPU cost when no game is running
+- **Pre-allocated LVGL pool** — all sprites/labels created once at first open, then recycled via `show/hide` + `set_pos` → zero heap allocation in the game loop
+- **NVS persistence** — each game has its own save struct via `esphome::global_preferences` (magic-validated)
+- **Zero HA/network dependency** — games work fully offline
+- **Adaptive IMU polling** — `tab5-imu.yaml` switches from 100 ms (10 Hz) at rest to 33 ms (30 Hz) when a tilt-controlled game is open
+
+Navigation goes through `lvgl.page.show:` (YAML) or `lv_scr_load()` (C++); the selector page `page_arcade` is the single entry point, opened by the `tab5_arcade_open` script (the gamepad button's tap, « Jeux » in the navigation wheel; the greenhouse temperature's tap switches the area left of the clock since [ADR-0051](decisions/0051-left-zone-choice.md)). The C++ files are included via `esphome: includes:` in the games' module, `tab5-arcade.yaml` (ADR-0065; a build without games compiles none of them). Each game lives in its own namespace (`Marble`, `Arkanoid`, `Pinball`, `Lode`, `Go`, `Trivia`, `Draughts`, `Chess`) with a uniform API: `open()`, `close()`, `is_open()`, `on_imu(ax, ay, az)`. Those entry points are listed **once**, in `Tab5/ecran/tab5_registry.cpp` (`GameRegistry::kGames`, with an `imu_fast` flag per console): the global close, the adaptive IMU poll, the IMU dispatch and the HA "current screen" sensor all read that table instead of naming the games (ADR-0013). The same file hosts `ModalRegistry`, the single list of modal windows, filled once by the `tab5_modal_registry_init` script.
+
+> **Status: early prototypes.** These are first-pass AI-generated games to test embedded code generation capabilities — functional but not visually polished.
+
+---
+
+---
+
+## Version Française
+
+---
+
+## Vue d'ensemble
+
+La configuration ESPHome est découpée en packages YAML importés par un fichier d'entrée unique (la liste : bloc `packages:` de `tab5-ha-hmi.yaml`). Cela évite un fichier monolithique qui devient impossible à naviguer au-delà de 1000 lignes. Chaque package a une responsabilité clairement définie et peut être édité, testé, ou remplacé de façon isolée.
+
+### Flux de données : HA pousse, la tablette émet des événements
+
+Le Tab5 n'interroge jamais l'état de Home Assistant ([ADR-0001](decisions/0001-push-only-zero-polling.md)). Le blueprint « emplacements » et les packages `tab5_*` détectent les changements et appellent les actions ESPHome du firmware (`tab5_maj_*`, déclarées dans `Tab5/paquets/tab5-api-logic.yaml`) ; le firmware parse le payload et met à jour LVGL en une passe. Dans l'autre sens, la tablette n'appelle aucune action de Home Assistant : une tuile touchée, une demande (mois du calendrier, annonce, bouton de la console) ou sa (re)connexion devient un événement `esphome.tab5_*`, que le blueprint ou `packages/tab5_evenements.yaml` traduit en une action d'une liste blanche fixe ([ADR-0025](decisions/0025-events-only.md)).
+
+![Comment Home Assistant et la Tab5 se parlent : HA pousse les données par les actions tab5_maj_*, la tablette répond par des événements esphome.tab5_*](images/flux_ha_tab5.svg)
+
+---
+
+## Choix de conception
+
+- **Push uniquement, zéro polling.** L'appareil ne demande jamais son état à Home Assistant. Les automations côté HA détectent les changements et poussent les données vers l'écran via des appels de service ESPHome natifs. Dans l'autre sens, la tablette émet des événements, jamais des actions Home Assistant ([ADR-0025](decisions/0025-events-only.md)). Le CPU reste proche de zéro quand rien ne change.
+- **YAML modulaire.** La configuration ESPHome est découpée en trente-sept fichiers par domaine (tokens, carte (hardware, révision d'écran, taille de l'écran), canal de publication, capteurs diagnostics, capteurs domotique, logique API, styles, globales, scripts, UI, arcade, calendrier, assistant vocal, IMU, navigation, entités HA, réveil, pièces et tuiles, roue d'actions rapides, rangée sous l'horloge, popup Énergie, zones, popup Réglages, popup Température, popup Alertes, popup Maison, popup Météo, popup Musique, musique de toute la maison, capteurs suivis, frigos, popup Serveur IA, popup télécommande, économie d'énergie, thèmes), chacun lisible indépendamment. La plupart tiennent sous 500 lignes ; seuls les plus gros (`tab5-alarm.yaml`, `tab5-styles.yaml`, `tab5-lvgl.yaml`, `tab5-api-logic.yaml`, `tab5-sensors-diagnostics.yaml`, `carte-waveshare-7b.yaml`) dépassent, et l'UI est encore découpée en 108 `ui_components/*.yaml` réutilisables.
+- **LVGL natif, pas de stack web.** LVGL rafraîchit jusqu'à 60 fois par seconde, depuis un framebuffer en PSRAM, et ne redessine que ce qui a changé. Mesuré sur la tablette (firmware 3.2.0, 28/09/2026) : une valeur ou la minute de l'horloge se redessine en moins de 10 ms, le panneau tournant du centre en 15 à 21 ms par image, l'écran entier en 133 ms, et un popup s'ouvre en 126 à 197 ms. Les polices vectorielles (Material Design Icons) remplacent complètement les fichiers image.
+- **Compression de données.** Les payloads complexes (prévisions 15 jours, prévisions horaires, alertes météo) sont sérialisés en chaînes délimitées côté HA et parsés en C++ sur l'appareil — un seul appel réseau, zéro requête suivante.
+- **Résilience hors-ligne.** Toutes les lambdas C++ vérifient `api.connected()` et `has_state()` avant de toucher l'UI. Si HA redémarre, le dernier état connu reste affiché — et l'appareil reste utilisable seul (horloge, arcade, console diag). Il ne se redémarre de lui-même qu'après une heure entière sans aucun client API (`api: reboot_timeout: 60min`), un filet anti-« zombie » assumé, pas une réaction à une coupure HA passagère.
+
+---
+
+## 1. Point d'entrée : `tab5-ha-hmi.yaml`
+
+Le fichier racine fait trois choses :
+
+1. **Charge les substitutions d'entités** — `substitutions: !include Tab5/user_entities.yaml` (fichier local gitignoré). Copier `Tab5/user_entities.example.yaml` vers `user_entities.yaml` et éditer vos entity IDs HA. Depuis la 3.0, aucun secret n'est compilé : le Wi-Fi vient d'Improv ou de l'AP de secours, la clé API de Home Assistant, et les compilations sont signées par `tab5_signature.pem` ([ADR-0020](decisions/0020-no-secret-firmware-signed-ota.md)).
+
+2. **Définit la séquence de boot** — le bloc `on_boot` gère l'ordre de démarrage soigneusement : rétroéclairage → volume media player → activation ampli (dans cet ordre, pour éviter le pop ES8388) → envoi d'un événement `tab5_connected` sur le bus HA, à Home Assistant lui-même dès qu'il écoute les actions (`ha_evenement_envoyer()`, `Tab5/ecran/tab5_journal.cpp`, depuis le 17/10/2026 : avant, n'importe quel client abonné aux états en premier, un outil aioesphomeapi par exemple, laissait partir l'événement sans personne pour l'entendre) → démarrage de la détection wake-word si activée.
+
+3. **Importe tous les packages** via `!include`.
+
+---
+
+## 2. Rôles des packages
+
+### `tab5-ui-tokens.yaml`
+Tokens dimensionnels partagés, chargés en premier pour que tous les autres packages puissent y faire référence : taille de la carte modale (`modal_card_w`/`modal_card_h`), décalage de la barre de titre de 52 px (`modal_body_y`), marge basse (`modal_bottom_y`), origine de la grille calendrier (`cal_grid_y`) et, sur l'accueil, la hauteur d'une ligne de la rangée sous l'horloge (`ligne_zone_h`) et des cadres Ok Nabu et − / + qui en entourent une (`cadre_bas_h`). Changer la géométrie d'un popup = changer un token ici, pas 8 nombres en dur dispersés dans `ui_components/`.
+
+---
+
+### `carte-*.yaml`
+La carte, choisie à la compilation par `tab5_carte:` dans `Tab5/user_entities.yaml` ([ADR-0061](decisions/0061-board-and-screen-size.md)) : `tab5` (par défaut, le M5Stack Tab5) ou `waveshare-7b` (Waveshare ESP32-P4 7B, 1024×600, prise en charge : elle tourne sur la carte de l'auteur depuis le 14/10/2026, l'accueil et les popups suivent la taille de son écran, pas les jeux, absents par défaut, voir [Waveshare ESP32-P4 7B](waveshare-7b.md#version-française)). `carte-tab5.yaml` charge `geometrie-tab5.yaml`, `tab5-hardware.yaml` et la révision d'écran `ecran-*.yaml` ci-dessous ; `carte-waveshare-7b.yaml` porte tout le matériel de cette carte et remplace par des bouchons les id du matériel du Tab5 qu'elle n'a pas (alimentations, batterie, RTC), pour que les autres packages compilent sans changer. Le `geometrie-*.yaml` de chaque carte donne la taille de l'écran (`carte_ecran_l`/`carte_ecran_h`, dont dérivent les jetons et les `kEcranL`/`kEcranH` du C++), la taille de la dalle, la rotation de LVGL et l'échelle des grosses polices. Le fichier racine choisit aussi `tab5-imu.yaml` (BMI270) sur le Tab5 et `tab5-imu-absente.yaml` ailleurs. Voir [`docs/hardware.md`](hardware.md#carte-waveshare-esp32-p4-7b).
+
+---
+
+### `tab5-hardware.yaml`
+Configuration matérielle bas niveau du Tab5 (chargée par `carte-tab5.yaml`) :
+- Réglages écran et tactile communs aux trois révisions du Tab5 (MIPI-DSI, broches, calibration) ; le modèle d'écran et la plateforme tactile viennent de `Tab5/paquets/ecran-<révision>.yaml` (par défaut : `M5STACK-TAB5-ST7123` et la plateforme I2C officielle `st7123`, depuis ESPHome 2026.7.0 ; l'ancien shim `external_components` a disparu) — voir [`docs/hardware.md`](hardware.md#révisions-matérielles)
+- Bus I2C, expanders GPIO PI4IOE5V6408 (lignes de reset écran/tactile)
+- DAC ES8388 (plateforme `audio_dac:`) et ADC micro ES7210 (`audio_adc:`)
+- `esp32_hosted` — co-processeur Wi-Fi ESP32-C6 via SDIO
+- PWM rétroéclairage (LEDC), bus I2S micro/haut-parleur, media player, `ota:` — la pile vocale (`micro_wake_word`/`voice_assistant`) est dans `tab5-assist.yaml` depuis le 25/09/2026
+
+→ Détails : [`docs/hardware.md`](hardware.md)
+
+---
+
+### `ecran-*.yaml`
+Écran et tactile d'une révision du Tab5, choisie à la compilation par `tab5_ecran:` dans `Tab5/user_entities.yaml` : `st7123` (par défaut, la tablette de l'auteur), `st7121` (tourne chez un utilisateur depuis octobre 2026) ou `ili9881c` (compilée par la CI, jamais testée sur une tablette). Chaque fichier ne contient que ce qui change d'une révision à l'autre — le modèle `mipi_dsi` et la plateforme tactile (`st7123`, ou `gt911` sur l'ILI9881C d'origine) — et étend les entrées `tab5_display` et `touch` de `tab5-hardware.yaml` par `!extend`. Voir [`docs/hardware.md`](hardware.md#révisions-matérielles).
+
+---
+
+### `publication-*.yaml`
+Canal de publication ([ADR-0022](decisions/0022-published-firmware-pages-channels.md)), choisi par `tab5_publication` (par défaut `locale` ; la CI de publication, `.github/workflows/publication.yml`, lui donne `stable` ou `beta` en substitution). `publication-locale.yaml` est vide : un firmware compilé sur son PC n'a pas d'entité de mise à jour, car les binaires publiés sont signés par la clé du projet, qu'une tablette flashée avec une autre clé refuse. `publication-stable.yaml` et `publication-beta.yaml` incluent `publication-commune.yaml` avec le canal en variable : une plateforme `ota: http_request` et une entité `update:` « Firmware » qui lit le manifeste de la page de flashage (`<canal>/<révision d'écran>/manifest.json`). Une bêta passe à la stable qui la suit.
+
+---
+
+### `tab5-sensors-diagnostics.yaml`
+Entités système et réseau :
+- Bloc `wifi:`, select antenne, switchs d'alimentation GPIO (Wi-Fi/USB/5V externe)
+- Température interne ESP32-P4
+- Uptime, signal Wi-Fi, IP/SSID, statut API HA
+- RAM libre / loop time (`debug`), horloge SNTP, intervals de la console
+
+### `tab5-sensors-domotique.yaml`
+Entités domotique poussées par Home Assistant :
+- Capteurs humidité plantes (jusqu'à 5 moniteurs BLE)
+- Température & humidité des pièces et de la serre
+- Miroirs d'état lumières/PC, batterie téléphone
+- Audio : ampli, détection jack, switch wake word
+- Détails des pots (EC / éclairement / température / batterie) : `pot_sensors.yaml`, un package paramétré inclus cinq fois (`packages:` imbriqué + `vars: {n}`)
+
+Ces fichiers ne déclarent que des entités. Aucune logique UI ici.
+
+---
+
+### `tab5-api-logic.yaml`
+Le package le plus important. Deux choses y vivent :
+
+**Gestionnaires de services API ESPHome** — ce sont les endpoints que Home Assistant appelle pour pousser des données vers l'écran. Chaque gestionnaire reçoit un payload, le valide, puis appelle une fonction C++ de la couche C++ (`tab5_services.cpp`, déclarée dans `tab5_custom.h`) pour le parser et l'appliquer.
+
+Chaque gestionnaire porte ses métadonnées `description` / `example` (ESPHome 2026.9.0 et suivantes) : Home Assistant les affiche dans *Outils de développement → Actions*, seul endroit où le format d'un payload sérialisé à la main se lit sans ouvrir le fichier. Un gestionnaire sans métadonnées fait échouer `pytest` (règle 5 de `tools/check_tab5_code_rules.py`).
+
+**Lambdas C++** — pour la logique qui ne rentre pas proprement en YAML (transitions de machine d'états, parsing de chaînes, mises à jour LVGL conditionnelles).
+
+La règle appliquée partout : avant tout appel `lv_*`, vérifier `boot_complete` et `api.connected()`. Cela empêche les valeurs NaN de crasher l'UI pendant les redémarrages HA.
+
+---
+
+### `tab5-styles.yaml`
+Définitions globales de styles LVGL, déclarées une fois et référencées par ID partout dans `tab5-lvgl.yaml`.
+
+Le rationnel : LVGL alloue un objet style par widget si on définit les styles inline. Avec 80+ widgets à l'écran, ça fait 80+ allocations en PSRAM. Déclarer les styles globalement et les attacher par référence n'utilise qu'une poignée d'allocations pour tout l'écran.
+
+---
+
+### `tab5-globals.yaml`
+Variables globales partagées accessibles depuis tous les packages :
+- `boot_complete` (bool) — verrou pour toutes les mises à jour UI
+- `conversation_mode` (bool) — bascule entre le pipeline Home Assistant et le pipeline chat
+- Snapshots d'état courant (dernières valeurs de température connues, mode clim, etc.)
+
+Les variables ici sont typées et initialisées. Les globales non initialisées sur ESP32 sont un comportement indéfini.
+
+---
+
+### `tab5-lvgl.yaml`
+La mise en page UI. Déclare les pages, panneaux, labels, boutons, arcs et icônes, ainsi que la gestion des gestes swipe. Il `!include` directement 39 fichiers `ui_components/*.yaml` (carte/popup clim, popup lumière, popup du volet, popup d'un appareil, popup télécommande TV, popup Réglages — dont la page Système est l'ancienne console système —, popup Température, popup Alertes, popup Maison, popup Météo, popup et carte des capteurs suivis, popup Serveur IA, popups assistant/calendrier/plantes, fenêtre du réveil et calque de sonnerie, cartes prévisions, rangée sous l'horloge (jauges humidité et lignes de capteurs), liste de la tuile − / +, carte switches, le bandeau d'alerte HA de la carte centrale — un fichier inclus quatre fois avec `vars` —, le sélecteur arcade et les 8 jeux) ; ceux-ci incluent à leur tour les sous-templates paramétrés (`pot_detail_card.yaml`, `modal_header.yaml`…), soit 108 fichiers de composants au total.
+
+**Le dashboard tient sur une seule page LVGL, pas une navigation multi-pages par onglets** ([ADR-0002](decisions/0002-single-page-swipe-navigation.md)) — toute la domotique vit sur un `page_main` unique en 1280×720, accessible au tap, à l'appui long ou au swipe. Les seules autres pages sont les 9 pages gaming (`page_arcade` + une par console), toutes en `skip: true` pour que le swipe ne puisse jamais y atterrir ; elles ne font pas partie du parcours dashboard.
+
+`page_main` (1280×720) :
+```
+page_main (1280×720, tout le dashboard)
+├── contenu accueil toujours visible   (horloge, temp/humidité intérieure,
+│                                        actions rapides, carte clim, carte
+│                                        humidité)
+├── carte centrale rotative            (planning / pluie / alertes / info —
+│                                        cycle auto toutes les 8s, `interval:`
+│                                        de tab5-globals.yaml ; en pause hors
+│                                        de la fenêtre prévisions par défaut)
+├── zone carte du bas — l'une des deux, basculée par `btn_control_ha` (icône maison, en haut à droite) :
+│   ├── cartes du mode HA (`layer_switches` — jusqu'à 20 éléments de la pièce courante sur cinq places, ADR-0023 / ADR-0066)
+│   └── carte prévisions (`layer_forecast_daily` / `layer_forecast_hourly` — météo, 5 onglets)
+├── climate_popup   (modale quasi plein écran, ouverte au tap sur la carte clim)
+├── light_popup     (modale quasi plein écran, ouverte au tap sur une carte switch lumière)
+├── tv_remote_popup (télécommande Samsung, ouverte par un appui long sur le bouton
+│                    manette ou sur la carte PC — services `remote.*` via HA)
+├── assistant_popup (transcription STT + réponse LLM en Markdown, appui long micro)
+├── calendar_popup  (grille mensuelle 7×6, appui long sur la date)
+├── pots_popup      (5 cartes détail plantes, appui long sur les slots humidité)
+└── reglages_popup  (réglages en 4 pages : écran, apparence, batterie, système — la
+                     page système est `console_sys` : diagnostics + volume + gestion HA
+                     avec overlays de confirmation ; tap sur `btn_control_console` =
+                     page écran, appui long = page système)
+
+pages séparées, hors parcours dashboard (toutes en `skip: true` — voir §6) :
+├── page_arcade   (sélecteur 4×2, ouvert par le bouton manette ou la roue de navigation)
+└── page_marble / page_arkanoid / page_pinball / page_lode / page_go /
+    page_trivia / page_chess / page_draughts      (une par console)
+```
+
+La navigation se fait au tactile (ouverture/fermeture des popups clim/lumière et du bouton console, et bascule de la zone du bas entre le mode météo et le mode HA) et par geste swipe, géré en C++ (`handle_swipe_gesture()` dans `tab5_central.cpp`) :
+- swipe gauche/droite sur la bande basse de l'écran (`y ≥ 333`) → cycle les 5 pages de prévisions (2 fenêtres horaires + 3 fenêtres journalières, avec le bouclage volontaire documenté dans `forecast_page_suivante()`) en mode météo, puis, vers la gauche, les pages des pièces 5 … N − 1 quand Home Assistant envoie plus de cinq pièces (`pn|N`, [ADR-0066](decisions/0066-rooms-count-cut-tiles.md), avec « Tab5 Appareils sur la météo » allumé) ; en mode HA, le même geste va à la **pièce** suivante (gauche) / précédente (droite) en rouleau (dernière pièce → pièce 1, pièces vides comprises, `tuiles_swipe_ha()`, 18/10/2026), les pastilles dans l'ordre des pièces, sans jamais réafficher les calques météo sous les cartes
+- depuis la refonte du 14/07/2026 il n'y a **plus** de swipe haut/bas — la console s'ouvre uniquement par un appui long sur le bouton engrenage
+
+Depuis la 3.2 ([ADR-0023](decisions/0023-rooms-generic-tiles.md)), chaque page de prévisions est aussi une pièce de cinq appareils au plus, décrite par Home Assistant (`tab5_tuiles.cpp`). Le drapeau du mode HA est `g_central_ctx.ha_mode` (l'ancien global `show_switches` a disparu) ; `tuiles_mode_ha()` fait le fondu entre le calque météo et `layer_switches` (cachés via `LV_OBJ_FLAG_HIDDEN`, jamais retirés), peint les cinq cartes de la pièce courante, met le titre de la pièce dans la carte centrale et met en valeur le bouton « HA » (`tab5-lvgl.yaml`, `btn_control_ha`) — voir les blocs `[AI-CONTEXT]` de `Tab5/ecran/tab5_tuiles.cpp` et de `ui_components/switches_card.yaml`.
+
+Toutes les références de style pointent vers des IDs définis dans `tab5-styles.yaml`. Aucune propriété de style inline.
+
+→ Inventaire fichier par fichier et graphe de dépendances complet : [`../CARTOGRAPHIE_TAB5.md`](../CARTOGRAPHIE_TAB5.md)
+
+---
+
+### `tab5-scripts.yaml`
+*Depuis le 25/09/2026 (audit, lot 8c), les scripts des jeux, du calendrier et de la voix/assistant vivent dans leurs packages : `tab5-arcade.yaml`, `tab5-calendar.yaml`, `tab5-assist.yaml`.* Blocs `script:` ESPHome réutilisables pour les actions multi-étapes appelées depuis les lambdas ou depuis HA. Évite que `tab5-api-logic.yaml` se remplisse de motifs répétés. Regroupés par famille : init du registre des modales, debounces (volume 150 ms, luminosité 200 ms, clim 250 ms — un appel HA par geste au lieu d'un par tick), volume (point d'entrée unique `tab5_volume_apply`), widgets de la clim (`tab5_clim_ui` ; la recoloration est en C++, `clim_recolorer()`), rotateur central + dismiss, volet, popup lumière, touches de la télécommande TV, et un `interval:` de 1 s qui ramène à l'accueil.
+
+---
+
+### `tab5-arcade*.yaml`
+Les jeux sont un module ([ADR-0065](decisions/0065-games-optional-module.md)), choisi par `tab5_jeux` (`oui` / `non` ; `oui` par défaut sur le Tab5, `non` sur une carte sans IMU comme la Waveshare 7B). `tab5-arcade.yaml` est le module : les fichiers C++ des jeux (`esphome: includes:`, dont la table des consoles `Tab5/jeux/jeux_registre.cpp`, `GameRegistry::kGames`, [ADR-0013](decisions/0013-single-registry-consoles-modals.md)), leurs couleurs et la police d'échecs, leurs 9 pages LVGL (`page_arcade` et une par console), un `tab5_<jeu>_open` par console (il passe au jeu ses pointeurs LVGL et ses polices, que seule une lambda atteint par `id()`), `tab5_arcade_open` pour la page du sélecteur et `tab5_jeux_traduire` (la traduction de ses pages au démarrage). `tab5-arcade-absente.yaml` le remplace sans jeux : les deux mêmes scripts, vides, et une table de consoles vide (`Tab5/jeux/jeux_absents.cpp`) ; l'Arcade n'est alors plus un écran de la tablette. `tab5_games_close_all` vit dans `tab5-navigation.yaml` (le socle l'appelle). Chargé après `tab5-lvgl.yaml` : ses pages suivent `page_main`. Voir §6 et [`docs/arcade.md`](arcade.md).
+
+---
+
+### `tab5-calendar.yaml`
+Scripts du popup calendrier (`calendar_popup.yaml`) : ouverture (appui long sur la date, « auto »), rendu du mois, mois précédent / suivant / aujourd'hui, préchargement au démarrage et tap sur un jour. La grille est calculée par la tablette (`tab5_calendar.cpp`) ; Home Assistant ne la remplit qu'à la demande : la tablette émet `esphome.tab5_calendrier_mois` (ou `_jour` pour un jour), `packages/tab5_evenements.yaml` lance le script HA, qui répond par les actions `tab5_maj_calendrier_mois` / `_jour`. Une demande de mois passe toujours par `tab5_cal_request`. Chargé après `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-assist.yaml`
+Tout l'assistant vocal : `micro_wake_word` (`okay_nabu`, plus `Stop`), `voice_assistant` et ses callbacks (états visuels par `assist_set_pipeline_state()`), l'image de la réponse (`http_request` + `online_image`), les scripts vocaux (armement du mot « Stop », interruption, `tab5_wake_word_dispatch` — la décision elle-même est `WakeWord::decide()` dans `tab5_assist.cpp` —, réponse dans la carte centrale) et ceux du popup Assistant. Le matériel audio (bus I2S partagé, ES7210, ES8388, media player) reste dans `tab5-hardware.yaml`. Chargé après `tab5-lvgl.yaml`. Voir [`docs/voice_assistant.md`](voice_assistant.md).
+
+---
+
+### `tab5-imu*.yaml`
+`tab5-imu.yaml` sur le Tab5 ; sur une carte sans IMU (ADR-0061), `tab5-imu-absente.yaml` ne garde que l'interrupteur « Tab5 Tap-to-Wake » que lit le popup Réglages, sans nom et sans effet. Accéléromètre BMI270 : les trois axes sont `internal: true` (à 10–30 Hz ils satureraient le recorder HA pour rien). Deux consommateurs — le tap-to-wake du dashboard, et l'entrée à l'inclinaison des jeux. Un `interval:` réajuste la cadence à chaud via `set_update_interval()` : 100 ms (10 Hz) au repos, 33 ms (30 Hz) quand une console pilotée à l'inclinaison est ouverte. Voir §6.
+
+---
+
+### `tab5-navigation.yaml`
+Navigation entre les écrans (08/10/2026, sortie de `tab5-ha-controls.yaml` et de `tab5-scripts.yaml`) : le registre des fenêtres modales (`tab5_modal_registry_init`, [ADR-0013](decisions/0013-single-registry-consoles-modals.md) — chaque fenêtre, son libellé et, pour un écran ouvert par un script, ce script), `tab5_ecran_ouvrir`, la seule routine qui ouvre un écran (le `select` « Aller à l'écran » et les gestes de l'accueil, par le script `tab5_geste`, [ADR-0039](decisions/0039-gestes-accueil.md) ; refusée pendant que le réveil sonne), le `select` lui-même et le `text_sensor` qui nomme l'écran courant (page de jeu ou popup visible). La liste des écrans vit en trois endroits qu'ESPHome ne sait pas réunir — l'enum `Ecran`, les options du `select` lues par HA, le registre —, tenus d'accord par `tests/test_appuis.py` et `tools/check_tab5_registry.py`. Chargé **après** `tab5-lvgl.yaml` : ses lambdas référencent des ids de widgets LVGL.
+
+---
+
+### `tab5-ha-controls.yaml`
+Entités exposées à Home Assistant pour régler l'écran depuis un dashboard sans être devant la dalle : un `number` pour le volume (point d'entrée unique `script.tab5_volume_apply`, partagé avec les deux sliders de l'écran), la langue de l'écran, les interrupteurs et l'extinction automatique du popup Réglages, un `button` de rechargement du calendrier, et un rattrapage toutes les 5 s des changements de volume faits côté `media_player`.
+
+---
+
+### `tab5-alarm.yaml`
+Réveil + annonce des rendez-vous : mélodie `rtttl:` sur `tab5_speaker` (hors media player), ~20 entités de réglage exposées à HA (switches, `datetime type: time`, numbers, selects, text), la machine d'état de sonnerie (un passage de mélodie, puis 3 s de fenêtre d'écoute pour le mot de réveil local « Stop » ; répétition, durée max, crescendo) et un `interval:` de 1 s qui ne compare que deux entiers — toute l'arithmétique de dates vit dans le moteur pur `alarm_clock.cpp` (aucun `id()`, aucun réseau). Le réveil sonne sans Home Assistant ; HA n'ajoute que le briefing parlé, la liste des rendez-vous et une URL de sonnerie optionnelle. Point d'entrée unique `script.tab5_alarm_refresh` (entités → `g_alarm_cfg`, jamais l'inverse). Le relais micro/haut-parleur qu'il doit faire lui-même est l'[ADR-0010](decisions/0010-shared-i2s-bus-mic-speaker.md).
+
+---
+
+### `tab5-tuiles.yaml`
+Pièces et tuiles ([ADR-0023](decisions/0023-rooms-generic-tiles.md)) : le script `tab5_tuiles_ui` pose dans `g_tuiles_ui` les widgets que dessine `tab5_tuiles.cpp` (épaules et boutons des tuiles météo de toutes les pages, cartes du mode HA, lignes et noms des pièces des popups Lumières et Volets, calques, pastilles, titre de la carte centrale, bouton « HA ») et ses deux commandes (événement `esphome.tab5_action`, tap du volet). Le modèle, la NVS et le dessin vivent dans `tab5_tuiles.cpp` ; les définitions arrivent par l'action `tab5_maj_tuiles`. Aucun `lv_*` ici. Lancé en premier par `tab5_zones_apply`, avant la première image ; chargé après `tab5-lvgl.yaml`. Il lance ensuite `tab5_roue_ui` (`tab5-roue.yaml`, sorti le 08/10/2026), qui pose dans `g_roue_ui` les widgets de la roue d'actions rapides ([ADR-0036](decisions/0036-quick-action-wheel.md), `ui_components/roue_actions.yaml`), dessinée par `tab5_roue.cpp` : l'appui long d'une tuile `lum`, `vol` ou `cli` l'ouvre autour de la tuile — un moyeu, un premier anneau (« Maison », commandes, familles, « Détails ») et un second pour les choix de la famille touchée.
+
+### `tab5-roue.yaml`
+Roue d'actions rapides d'une tuile ([ADR-0036](decisions/0036-quick-action-wheel.md)) : le script `tab5_roue_ui` pose dans `g_roue_ui` les widgets de `ui_components/roue_actions.yaml`, dessinés par `tab5_roue.cpp`, la légende de chaque bouton et la carte centrale comme ancre de la roue de navigation ([ADR-0042](decisions/0042-navigation-wheel.md), `tab5_roue_navigation.cpp` : son appui long ouvre la roue sur les écrans de la tablette), puis appelle `roue_brancher()`. `tab5_tuiles_ui` le lance juste après les widgets des tuiles, comme quand ils étaient dans `tab5-tuiles.yaml` (sorti le 08/10/2026). Aucun `lv_*` ici.
+
+### `tab5-rangee.yaml`
+Rangée sous l'horloge ([ADR-0031](decisions/0031-row-under-the-clock.md)) : le script `tab5_rangee_ui` pose dans `g_rangee_ui` les widgets que dessine `tab5_rangee.cpp` (`ui_components/rangee.yaml` : la ligne des plantes, deux panneaux de quatre éléments pour les lignes de capteurs, les pastilles de position). Jusqu'à trois lignes de capteurs de quatre éléments, plus la ligne des plantes, tournent avec la carte centrale : `tab5_central_rotator_auto` appelle `rangee_tour()` 0,2 s avant que la carte centrale change, et une ligne reste N tours de 8 s (« Durée d'une ligne » dans le blueprint). Les définitions (clés `hLI`, `hp`, `hd`) arrivent par `tab5_maj_tuiles`, les états (`hLI`) par `tab5_maj_emplacements` ; le modèle et sa NVS vivent dans `tab5_tuiles.cpp`. Affichage seul : un appui passe à la ligne suivante, un appui long sur la ligne des plantes ouvre Mes Plantes. Aucun `lv_*` ici. Lancé par `tab5_zones_apply`, avant la première image ; chargé après `tab5-lvgl.yaml`.
+
+### `tab5-reglables.yaml`
+Tuile − / + au choix ([ADR-0033](decisions/0033-adjustable-tile.md)) : le script `tab5_reglables_ui` pose dans `g_reglables_ui` les widgets que dessine `tab5_reglables.cpp` — sur la carte clim (`ui_components/climate_card.yaml` : la valeur entre − et +) et dans la liste (`ui_components/reglables_liste.yaml`, dix lignes de `reglables_ligne.yaml`) — et les rappels vers les scripts (`tab5_volume_apply`, `tab5_action`, `tab5_debounce_reglable`). Toucher la température du salon déroule la liste : la clim du blueprint, les appareils de la section « Tuile − / + » du blueprint (clés `rN` de `tab5_maj_tuiles` et `tab5_maj_emplacements`), puis le volume de la tablette. Le choix reste en NVS. Clim choisie : − / + et la valeur gardent leur chemin d'avant. Autre appareil : la valeur change tout de suite, un seul `esphome.tab5_action` (`rN` / `regler`, ou `consigne` pour une clim) part quand le doigt s'arrête. Aucun `lv_*` ici. Lancé par `tab5_zones_apply`, avant la première image ; chargé après `tab5-lvgl.yaml`.
+
+### `tab5-energie.yaml`
+Popup Énergie ([ADR-0028](decisions/0028-solar-energy-popup.md)) : le script `tab5_energie_ouvrir` pose dans `g_energie_ui` les widgets de `ui_components/energie_popup.yaml` à la première ouverture, puis appelle `energie_ouvrir()` (`tab5_energie.cpp`) ; `tab5_energie_demande` émet l'événement `esphome.tab5_energie` (`vue` = `heures`, `jours` ou `mois`) à l'ouverture et à chaque bouton de vue. Home Assistant répond par les actions `tab5_maj_energie` (valeurs en direct) et `tab5_maj_energie_historique` (barres). Ouvert par une tuile `cap` à l'option `e` ou par « Aller à l'écran → Énergie ». Aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml`.
+
+### `tab5-historique.yaml`
+Popup Température ([ADR-0032](decisions/0032-temperature-history-popup.md)) : le script `tab5_historique_ouvrir` (`cle` = `salon` ou `serre`) pose dans `g_historique_ui` les widgets de `ui_components/historique_popup.yaml` à la première ouverture, puis appelle `historique_ouvrir()` (`tab5_historique.cpp`) ; `tab5_historique_demande` émet l'événement `esphome.tab5_historique` (`cle`, `vue` = `jour`, `semaine` ou `mois`) à l'ouverture et à chaque bouton de vue. Home Assistant répond par l'action `tab5_maj_historique` (la courbe, et la prévision pour la seconde température). Ouvert par un appui long sur l'une des deux températures de l'accueil (`climate_card.yaml`). Aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml`.
+
+### `tab5-alertes.yaml`
+Popup Alertes ([ADR-0034](decisions/0034-central-card-alerts.md), lot 4 du plan des alertes, 06/10/2026) : les 20 dernières alertes, une ligne chacune (pastille de la gravité, libellé, « apparue 14 h 02 · lue 14 h 10 · terminée 15 h 30 »), et « Tout marquer comme lu ». Le script `tab5_alertes_ouvrir` pose dans `g_alertes_ui` les widgets de `ui_components/alertes_popup.yaml` à la première ouverture, puis appelle `alertes_ouvrir()` (`tab5_alertes.cpp`) ; `tab5_alertes_demande` émet l'événement `esphome.tab5_alertes_historique` à l'ouverture, et Home Assistant répond par l'action `tab5_maj_alertes_historique` (de nouveau tant que le popup reste ouvert et que l'historique change). `tab5_alertes_tout_lu` lit tout de suite les bandeaux de la carte centrale et émet `esphome.tab5_alerte_lue` avec `alert_id` « * ». Ouvert par un appui long sur la carte centrale de l'accueil ou par « Aller à l'écran → Alertes ». Aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-maison.yaml`
+Popup Maison ([ADR-0037](decisions/0037-house-popup.md), 07/10/2026) : toute la maison, une colonne par pièce du blueprint qui a des appareils (pièce 1 → 10 ; cinq colonnes au plus par page, les pièces partagées également sur des pages ADR-0046, `pages_repartir()`, ADR-0066), une ligne par appareil avec la même icône, le même nom et le même état que la carte du mode HA. Le script `tab5_maison_ouvrir` pose dans `g_maison_ui` les widgets de `ui_components/maison_popup.yaml` (cinq en-têtes de colonne de `maison_entete.yaml`, 25 lignes de `maison_ligne.yaml`, deux noms de page de `pages_onglet.yaml`) à la première ouverture, puis appelle `maison_ouvrir()` (`tab5_maison.cpp`), qui dispose les colonnes et peint les lignes. Une ligne réagit comme sa tuile : le toucher, l'appui long et le bouton « ⋯ » passent par `tuile_appui_piece()` (`tab5_tuiles.cpp`) — l'appui long et « ⋯ » ouvrent d'abord la roue d'actions rapides de la tuile autour de la pastille de la ligne, sans son lien « Maison » (`tuile_roue_ouvrir()` ; `roue_ouvrir()` la met devant ce popup) —, les commandes sont donc celles des tuiles et rien de nouveau n'arrive à Home Assistant ; « Éteindre les lumières » envoie le « tout éteindre » de chaque pièce. `peindre_tuile()` et `tuiles_appliquer_ui()` le préviennent quand un état ou les définitions changent, seulement s'il est affiché. Ouvert par « Aller à l'écran → Maison » ou, en mode HA, par un tap sur le titre de la carte centrale. Aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-meteo.yaml`
+Popup Météo ([ADR-0043](decisions/0043-weather-popup.md), 09/10/2026) : la météo en graphiques, sur trois pages changées d'un glissé ou par leur nom à côté du titre, comme les Réglages — « Aujourd'hui » (le moment : icône, température, condition, minimum et maximum du jour, pluie sur les heures montrées ; puis jusqu'à 15 heures : icônes, courbe lissée des températures, barres de pluie, l'heure en cours marquée), « 10 jours » (une ligne par jour, barre du minimum au maximum sur une échelle commune) et « Détails » (pluie dans l'heure à l'échelle du temps, humidité, indice UV, probabilités de gel et de neige). Le script `tab5_meteo_ouvrir` (`page`) pose dans `g_meteo_ui` les widgets de `ui_components/meteo_popup.yaml` (quatre cartes de `meteo_carte.yaml`) à la première ouverture, puis appelle `meteo_ouvrir()` (`tab5_meteo.cpp`), qui construit les tracés une fois et peint la page. Rien n'est demandé à Home Assistant : le popup lit ce qu'il pousse déjà (prévisions horaires et journalières, barres de pluie, météo actuelle, probabilités). Ouvert par « Aller à l'écran → Météo », un geste de l'accueil (code `meteo`) ou un appui long sur une tuile de prévision sans appareil. Aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-lecteur.yaml`
+Popup Musique ([ADR-0050](decisions/0050-music-player.md), 10/10/2026) : une carte centrée pour n'importe quel `media_player` — pochette, titre, artiste, album, barre de position, aléatoire / précédent / lecture-pause / suivant / répétition, volume et sourdine, une pastille par lecteur choisi — la barre « en lecture » de l'accueil, sur le cadre Ok Nabu, et le lecteur compact que peut montrer la zone à gauche de l'horloge ([ADR-0051](decisions/0051-left-zone-choice.md) ; la barre se masque pendant ce temps) (`ui_components/lecteur_popup.yaml`, `lecteur_mini.yaml`, `lecteur_zone.yaml`). Home Assistant pousse les lecteurs et celui affiché par l'action `tab5_maj_lecteur` (lue par `tab5_parse.cpp`, section 9) ; `tab5_lecteur_lier` pose les widgets dans `g_lecteur_ui`, `tab5_lecteur_evenement` envoie l'événement `esphome.tab5_lecteur` (`action`, `lecteur`, `valeur`) pour chaque commande, et un `interval` de 1 s avance la position (`lecteur_tic()`). La pochette est une `online_image` (`lecteur_pochette`, RGB565 360 × 360) : le chemin `entity_picture` complété par l'adresse de HA vue à la connexion de l'API. Ouvert par l'appui long d'une tuile `med` sans option `t`, la barre « en lecture », le geste `musique` ou « Aller à l'écran → Musique ». Aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml` et `tab5-assist.yaml`.
+
+---
+
+### `tab5-musique.yaml`
+Musique de toute la maison ([ADR-0067](decisions/0067-hifi-music-assistant.md), 18/10/2026) : les pages du popup Musique après « Lecture », sur sa brique de pages (`tab5_pages.cpp`, un glissé ou leur nom sur la ligne du titre, chaque page seulement quand elle a quelque chose à montrer). « Pièces » montre une carte par lecteur (huit au plus) : son genre, son nom, son état ou son morceau, le volume (envoyé au relâcher), la sourdine, le groupe avec le lecteur montré, « la musique ici », la marche ; un toucher montre ce lecteur sur « Lecture », un appui long ouvre sa roue (source, sourdine, séparer). « Bibliothèque » parcourt Music Assistant : favoris, playlists, albums, artistes, radios, podcasts, récents, une grille de dix éléments par page avec leurs pochettes ; un toucher joue un titre ou ouvre un contenant, un appui long propose maintenant, à la suite, en fin de file ou en radio. « Lecture » gagne « À suivre » et la puce « + n » d'un groupe. Home Assistant pousse les lecteurs par l'action `tab5_maj_musique_pieces` et répond à chaque parcours par `tab5_maj_musique_liste` (lues par `tab5_parse.cpp`, section 9 bis ; `packages/tab5_musique.yaml`) ; `tab5_musique_lier` confie à `g_musique_ui` les widgets de `ui_components/musique_calques.yaml`, `tab5_musique_evenement` envoie l'événement `esphome.tab5_musique` (`action`, `piece`, `valeur`), les dix pochettes sont des `online_image` du package paramétré `musique_pochette.yaml` (160 × 160, téléchargées une à une), et un `interval` d'1 s abandonne un parcours resté sans réponse 8 s (`musique_tic()`). Sans Music Assistant, seulement « Pièces » avec les lecteurs de « Tab5 · music players ». Aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml` et `tab5-assist.yaml`.
+
+---
+
+### `tab5-cameras.yaml`
+Popup Caméras ([ADR-0049](decisions/0049-cameras-popup.md), 09/10/2026, discussion #278) : l'image fixe de chaque caméra choisie dans la section « Caméras » du blueprint, en mosaïque de quatre cases par page ou une caméra en grand ([ADR-0057](decisions/0057-cameras-rooms.md) ; un glissé, les pastilles sous le cadre, un tap pour passer de l'une à l'autre), rafraîchie une image à la fois tant que le popup est ouvert — pas de vidéo. Le script `tab5_cameras_ouvrir` pose dans `g_cameras_ui` les widgets de `ui_components/cameras_popup.yaml` et quatre commandes (lambdas) à la première ouverture, puis appelle `cameras_ouvrir()` (`tab5_cameras.cpp`). `tab5_cameras_demande` envoie `esphome.tab5_cameras` (ouverture, toutes les 4 minutes tant qu'il reste ouvert, après un échec), auquel le blueprint répond par `tab5_maj_cameras` (l'`entity_picture`, la pièce et l'heure d'indisponibilité de chaque caméra). À partir de deux pièces, une colonne (`ui_components/cameras_puce.yaml`) filtre les caméras que parcourt le glissé ([ADR-0057](decisions/0057-cameras-rooms.md)). La caméra montrée est téléchargée et décodée hors de la boucle principale (`tab5_cameras_charge.cpp` : une tâche FreeRTOS, `esp_http_client`, le décodeur JPEG matériel de l'ESP32-P4, RGB565 en PSRAM, chaque tampon décodé donné à l'écran, qui garde la dernière image de chaque caméra, 8 Mio au plus), toutes les 5 s, ses voisines une fois entre deux ; `tab5_cameras_attente` (`mode: restart`) le sonde, et la mémoire est rendue quand le popup se ferme. Ouvert par « Aller à l'écran → Caméras » ou un geste de l'accueil (code `cameras`). Aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml` et `tab5-assist.yaml`.
+
+---
+
+### `tab5-suivi.yaml`
+Capteurs suivis ([ADR-0054](decisions/0054-tracked-sensors.md), 10/10/2026) : le popup « Suivi » — une carte par capteur choisi dans « Tab5 · tracked sensors » (six au plus), avec son nom, sa valeur et son unité, sa variation en couleur avec une flèche de tendance et la courbe des 24 dernières heures — et la carte du premier capteur que peut montrer la zone à gauche de l'horloge (contenu « capteur », [ADR-0051](decisions/0051-left-zone-choice.md)) (`ui_components/suivi_popup.yaml`, `suivi_carte.yaml`, `suivi_zone.yaml`). Home Assistant les pousse par l'action `tab5_maj_suivi` (lue par `tab5_parse.cpp`, section 11 ; `packages/tab5_suivi.yaml`) ; `tab5_suivi_lier` pose les widgets dans `g_suivi_ui` (lancé aussi au démarrage par `tab5_zones_apply`), `tab5_suivi_ouvrir` peint et ouvre le popup. Ouvert par un tap sur la carte de la zone, le geste `suivi` ou « Aller à l'écran → Suivi ». Rien n'est demandé à Home Assistant ; aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-froid.yaml`
+Réfrigérateurs et congélateurs ([ADR-0055](decisions/0055-fridge-freezer-monitoring.md), 10/10/2026) : le popup « Froid », titré « Frigos et congélateurs » — une carte par appareil déclaré dans « Tab5 · fridges » et « Tab5 · freezers » (quatre au plus en tout), avec sa température colorée par niveau, son statut (conforme, trop chaud, porte ouverte ?, porte mal fermée, capteur muet…), les extrêmes des 24 h et la norme, la courbe des 24 dernières heures entre les pointillés de la norme et le dernier incident (`ui_components/froid_popup.yaml`, `froid_carte.yaml`) — et l'icône `fridge-alert` qui clignote dans le coin haut droit de l'horloge tant qu'un appareil est au niveau grave (`btn_froid_alerte` dans `tab5-lvgl.yaml`, un `lv_timer` de 500 ms en pause quand elle est cachée). Home Assistant décide des niveaux (`packages/tab5_froid.yaml`) et les pousse par l'action `tab5_maj_froid` (lue par `tab5_parse.cpp`, section 12) ; `tab5_froid_lier` pose les widgets dans `g_froid_ui`, `tab5_froid_ouvrir` peint et ouvre le popup. Ouvert par un tap sur l'icône qui clignote, le geste `froid`, « Aller à l'écran → Froid » ou la roue de navigation (Agenda ▸ Frigos). Rien n'est demandé à Home Assistant ; aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml`.
+
+### `tab5-serveur-ia.yaml`
+Serveur IA local ([ADR-0059](decisions/0059-local-llm-server-popup.md), 10/10/2026) : le popup « Serveur IA » — un bandeau avec la pastille en ligne / hors ligne, l'état, le nom du serveur et le modèle chargé ; la carte des tokens par seconde (grand chiffre, courbe des 24 dernières poussées gardée par la tablette, requêtes en cours et en file) ; quatre cartes pour la VRAM (avec une barre), la température du GPU (colorée selon le niveau que décide Home Assistant), la RAM (avec une barre) et la puissance (`ui_components/serveur_ia_popup.yaml`, `serveur_ia_carte.yaml`). Une valeur inconnue s'écrit « — ». Home Assistant pousse les capteurs choisis dans les listes « Tab5 · AI server, … » (`packages/tab5_serveur_ia.yaml`, deux secondes au moins entre deux poussées) par l'action `tab5_maj_serveur_ia` (lue par `tab5_parse.cpp`, section 14) ; rien n'est peint tant que le popup est fermé. `tab5_serveur_ia_lier` pose les widgets dans `g_serveur_ia_ui`, `tab5_serveur_ia_ouvrir` peint et ouvre le popup. Ouvert par le geste `serveur_ia`, « Aller à l'écran → Serveur IA » ou la roue de navigation (Agenda ▸ Serveur IA, une fois un serveur poussé). Aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-telecommande.yaml`
+Popup télécommande à plusieurs télécommandes ([ADR-0056](decisions/0056-several-remotes.md), 10/10/2026) : `tab5_telecommande_ui`, lancé par `tab5_tuiles_ui`, pose dans `g_telecommande_ui` les widgets de `ui_components/tv_remote_popup.yaml` que `tab5_telecommande.cpp` montre ou cache selon la télécommande de la page — les noms en haut (`pages_onglet.yaml`), Source ou Stop, Muet ou l'icône du volume, la rangée d'applications (TV) ou la rangée de lecture (boîtier : Apple TV, Freebox Player) — et branche le glissement gauche / droite (`tab5_pages.cpp`, [ADR-0046](decisions/0046-popups-a-pages.md)). La liste arrive par la clé « telecommandes » de `tab5_maj_emplacements` (`tab5_parse.cpp`, section 13) ; chaque touche émet un événement `esphome.tab5_action` dont l'emplacement (« tv », « tv1 »…) est la page montrée, et le blueprint « Tab5 — emplacements » le traduit pour cette télécommande. Rien n'est demandé à Home Assistant ; aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml`.
+
+---
+
+### `tab5-zones.yaml`
+Zones optionnelles ([ADR-0018](decisions/0018-optional-zones-confirmed-by-ha.md)) : une zone dont l'emplacement n'est pas choisi dans le blueprint « Tab5 — emplacements », ou dont l'entité n'existe pas, disparaît de l'écran avec ses boutons. `tab5_zones_demande` interroge Home Assistant une fois par connexion (événement `esphome.tab5_zones`), le blueprint répond par l'action `tab5_maj_zones`, et `tab5_zones_apply` passe les widgets à `zones_apply_ui()` (`tab5_zones.cpp`, où vit la décision) et publie le capteur de diagnostic « Zones masquées ». Il est lancé à la fin du setup, après chaque réponse de HA, et quand une donnée fait revenir une zone. Chargé après `tab5-lvgl.yaml`.
+
+### `tab5-reglages.yaml`
+Popup Réglages (06/10/2026, quatre pages depuis le 08/10/2026) : les réglages qu'on veut changer sans Home Assistant — page Écran : luminosité, extinction auto, rallumage à « Okay Nabu » et d'une tape ; page Apparence : thème, clair ou sombre, interrupteur de nuit du mode Auto, langue ; page Batterie : limite de charge, économie d'énergie et batterie montée, avec l'état, le niveau, la tension et la consommation de la batterie (peints par `reglages_batterie_peindre()` seulement pendant que la page est montrée) — et la page Système, l'ancienne console système (`console_sys.yaml`, rafraîchie seulement pendant que la page est montrée : `reglages_page_visible(REGLAGES_PAGE_SYSTEME)`). On change de page d'une tape sur son nom en haut ou en glissant à gauche ou à droite dans le popup (`LV_EVENT_GESTURE` pris par le popup, qui ne le laisse pas remonter à `page_main` ; un glissement parti d'un curseur ne change pas de page), sans transition. Ouvert d'un tap sur le bouton engrenage (`btn_control_console`) sur la page Écran, par son appui long sur la page Système, par « Aller à l'écran → Réglages » (page Écran) ou « Aller à l'écran → Console système » (page Système). `tab5_reglages_ouvrir(page)` pose dans `g_reglages_ui` les widgets de `ui_components/reglages_popup.yaml` à la première ouverture ; `tab5_reglages_sync_ui` lit les entités et appelle `reglages_peindre()` (`tab5_reglages.cpp`), et chaque entité réglée là le lance depuis son propre `on_value` / `on_state` : le popup montre ce que voit Home Assistant, qui que ce soit qui ait changé le réglage ; `tab5_reglages_choisir` écrit une entité, et la langue demande d'abord une confirmation (`tab5_reglages_langue_confirmer`), puisqu'elle redémarre la tablette. Rien n'est gardé ici : les réglages restent les entités (`restore_value` / `restore_mode`). Aucun `lv_*` ici ; chargé après `tab5-lvgl.yaml` et avant `tab5-themes.yaml`.
+
+### `tab5-economie.yaml`
+Économie d'énergie (06/10/2026) : le select « Tab5 Économie d'énergie » (Never, On battery — le défaut —, Always) et l'état de diagnostic « Tab5 Sur batterie ». Son script `tab5_economie_appliquer` tourne chaque seconde et tout de suite au toucher, à l'allumage de l'écran et sur le courant, le niveau et la charge de la batterie ; il nourrit `economie_decider()` (`tab5_economie.h`, pur, testé sur PC) et applique la décision : le plafond du rétroéclairage (la lumière écrit dans l'output template `backlight_plafonne` de `tab5-hardware.yaml`, Home Assistant garde donc la luminosité choisie), le niveau des animations `animations_niveau()` (`tab5_anim.cpp` ; le select « Tab5 Animations », « Aucune » quand l'économie est active, ADR-0045) et la période de LVGL (33 ms hors des jeux). « Sur batterie » se décide au courant de l'INA226 dans `tab5-sensors-diagnostics.yaml` ; ce qui retient l'écran (réveil, voix, jeu, mise à jour) est la liste de l'extinction auto, rangée dans `ecran_veille_permise`. Chargé aussi par le rendu hors tablette, où rien ne l'enclenche.
+
+### `tab5-themes.yaml`
+Thèmes ([ADR-0029](decisions/0029-themes-palette.md)) : le select « Thème » (une option par fichier de `Tab5/themes/`), le select « Clair ou sombre » (Dark, Light, Auto) et l'interrupteur « Nuit (thème auto) » que Home Assistant allume au coucher du soleil (`tab5_push.yaml`, automatisation « Tab5 — day/night theme »). `tab5_theme_choisir` choisit la palette (`theme_selectionner()`, `tab5_theme.cpp`) ; `tab5_theme_repeindre` repeint sans redémarrer : d'abord les styles partagés (bloc généré par `tools/gen_themes.py`), puis, le setup fini, chaque couleur posée à l'exécution (`theme_rejouer_ui()`, une fonction de rejeu par unité C++, plus les icônes des capteurs). Un thème peut aussi changer les formes de neuf styles partagés, garder le bandeau et l'horloge sombres en mode clair, et choisir les polices de l'heure, de la date et des titres (lot 3). Les jeux gardent la palette sombre ([ADR-0014](decisions/0014-game-common-helpers-local-palettes.md)). Chargé EN DERNIER : sa repeinture lit les widgets, capteurs et scripts de tous les packages ci-dessus.
+
+---
+
+## 3. Couche C++ : `tab5_custom.h` + les unités `tab5_*.cpp`
+
+Depuis le 08/09/2026, l'ancien `tab5_custom.cpp` unique (3 169 lignes) est scindé en neuf unités, une par responsabilité — `tab5_text.cpp`, `tab5_forecast.cpp`, `tab5_central.cpp`, `tab5_services.cpp`, `tab5_assist.cpp`, `tab5_cards.cpp`, `tab5_console.cpp`, `tab5_anim.cpp`, `tab5_calendar.cpp` — `tab5_custom.h` restant l'unique en-tête public et `tab5_internal.h` déclarant les rares helpers partagés entre unités. `tab5_custom.cpp` ne garde que les globals partagés. D'autres unités en sont sorties depuis (la clim a quitté `tab5_cards.cpp` pour `tab5_clim.cpp` le 08/10/2026, lot L7) ; `CARTOGRAPHIE_TAB5.md` les liste toutes. Depuis le 08/10/2026, ces fichiers sont dans `Tab5/ecran/`, le C++ pur qu'ils appellent (`tab5_core`, `tab5_champs`, `tab5_tokens.h`…) dans `Tab5/socle/` ; chaque unité a aussi son en-tête (`tab5_forecast.h`…), et `tab5_custom.h` est l'en-tête parapluie qui les inclut tous : les lambdas n'incluent toujours que lui.
+
+Le `.h` déclare toutes les fonctions utilisées depuis les lambdas YAML. Le `.cpp` les implémente.
+
+Responsabilités principales :
+- **Tokenizer de chaînes** — découpe in-place (`strtok_r`) des payloads délimités par des points-virgules. Utilisé pour les push bulk météo (`parse_and_update_heures_bulk()` / `parse_and_update_jours_bulk()`).
+- **Helpers LVGL** — fonctions de mise à jour gardées contre les pointeurs nuls (`update_*_ui()`, `refresh_*_forecast()`) pour qu'un push arrivant avant l'init LVGL ne crashe pas l'UI.
+- **Logique couleur** — mappe températures et humidité des plantes sur des gradients continus (`get_temperature_color()` / `get_humidity_color()`).
+- **Gestes & carte centrale** — `handle_swipe_gesture()` (pagination prévisions), `transition_widgets()` (animations de panneaux), `show_temporary_planning()` (affichage 6 s puis restauration), `update_info_text_ui()` (panneau info), `normalize_text_utf8()` (correction d'accents des textes HA dynamiques).
+
+(L'icône du micro, sa couleur et le libellé d'état suivent le pipeline via `assist_set_pipeline_state()` (`tab5_assist.cpp`), appelée par les cinq callbacks `voice_assistant:` de `tab5-assist.yaml`.)
+
+---
+
+## 4. Le paradigme Push
+
+L'appareil n'initie jamais de requête réseau. Tout le flux de données va dans un seul sens :
+
+```
+Home Assistant                       Tab5 (ESP32-P4)
+──────────────                       ───────────────
+Changement d'état détecté
+  → automatisation déclenchée
+    → appel service : esphome.tab5_maj_previsions_jours_bulk(payload)
+      → gestionnaire API reçoit payload ────────────────────→
+                                           parse_and_update_jours_bulk() s'exécute
+                                           labels LVGL mis à jour
+```
+
+**Pas de pause côté HA (01/10/2026) :** l'automatisation de push envoie ses blocs de service à la suite ; la séquence garde leur ordre. Les pauses d'une seconde qu'elle insérait dataient de l'époque où une poussée faisait une vingtaine d'appels en boucle, et ne faisaient que retarder l'écran de 6 s à chaque redémarrage. Les payloads groupés restent découpés en blocs : la tablette refuse un payload de plus de 2048 octets.
+
+---
+
+## 5. Compression de données
+
+Pour les prévisions journalières sur 15 jours, 15 × 4+ points de données (jour, condition, temp max, temp min…) représenteraient des dizaines d'appels de service séparés. À la place, HA construit une chaîne :
+
+```
+"0;Soleil;27;14;1;Nuageux;24;12;2;Pluie;19;11;..."
+```
+
+Le tokenizer C++ découpe sur `;` en un seul passage — O(n) sur la longueur de chaîne, pas O(n) sur le nombre d'appels. La mise à jour LVGL se fait ensuite une seule fois, de façon atomique, sans redraws intermédiaires.
+
+Même schéma pour les prévisions horaires (`tab5_maj_previsions_heures_bulk`) et le payload de vigilance Météo-France (`tab5_maj_alerte_meteo_france`, 11 à 13 champs délimités par `|` : brouillard et feux de forêt, en fin, sont facultatifs).
+
+---
+
+## 6. Couche jeux (Arcade — expérimental)
+
+Les 8 consoles sont des **sous-modules isolés** qui ne partagent aucun état avec le dashboard HMI. Elles suivent une architecture stricte :
+
+- **Une page LVGL dédiée plein écran 1280×720 par jeu** (`page_marble`, `page_chess`… déclarées `skip: true` pour que le swipe ne puisse pas y naviguer) — et non un overlay empilé sur `page_main`. Seule exception documentée à la règle du chrome modal (ADR-0009)
+- **YAML = conteneurs vides** — chaque `*_game.yaml` ne déclare que 2 à 4 conteneurs `lv_obj` ; tout le contenu visuel est construit en C++
+- **Cycle de vie `lv_timer`** — créé à l'ouverture, détruit à la fermeture → coût CPU nul quand aucun jeu ne tourne
+- **Pool LVGL préalloué** — sprites et labels créés une fois à la première ouverture, puis recyclés par `show/hide` + `set_pos` → zéro allocation dans la boucle de jeu
+- **Persistance NVS** — chaque jeu a sa propre struct de sauvegarde via `esphome::global_preferences` (validée par un magic)
+- **Zéro dépendance HA / réseau** — les jeux fonctionnent entièrement hors ligne
+- **Polling IMU adaptatif** — `tab5-imu.yaml` passe de 100 ms (10 Hz) au repos à 33 ms (30 Hz) quand un jeu à l'inclinaison est ouvert
+
+La navigation passe par `lvgl.page.show:` (YAML) ou `lv_scr_load()` (C++) ; la page sélecteur `page_arcade` est le point d'entrée unique, ouverte par le script `tab5_arcade_open` (tap du bouton manette, « Jeux » dans la roue de navigation ; le tap sur la température de la serre change la zone à gauche de l'horloge depuis l'[ADR-0051](decisions/0051-left-zone-choice.md)). Les fichiers C++ sont inclus via `esphome: includes:` dans le module des jeux, `tab5-arcade.yaml` (ADR-0065 ; un firmware sans jeux n'en compile aucun). Chaque jeu vit dans son propre namespace (`Marble`, `Arkanoid`, `Pinball`, `Lode`, `Go`, `Trivia`, `Draughts`, `Chess`) avec une API uniforme : `open()`, `close()`, `is_open()`, `on_imu(ax, ay, az)`. Ces points d'entrée sont listés **une seule fois**, dans `Tab5/ecran/tab5_registry.cpp` (`GameRegistry::kGames`, avec un drapeau `imu_fast` par console) : la fermeture globale, le poll IMU adaptatif, le dispatch IMU et le capteur HA « Écran courant » lisent cette table au lieu de nommer les jeux (ADR-0013). Le même fichier porte `ModalRegistry`, la liste unique des fenêtres modales, remplie une fois par le script `tab5_modal_registry_init`.
+
+**Une exception à l'orientation** : `Pinball::open()` bascule LVGL en portrait 720×1280 et `Pinball::close()` restaure `rotation: 270`. C'est la seule console qui touche à l'orientation — voir le bloc `[AI-CONTEXT]` « ORIENTATION » en tête de `pinball_game.cpp`.
+
+> **Statut : prototypes précoces.** Premiers jets générés par IA pour tester les capacités de génération de code embarqué — fonctionnels mais non finalisés visuellement.

@@ -1,0 +1,516 @@
+# Troubleshooting — incidents already diagnosed
+
+## English · [Français](#version-française)
+
+---
+
+This is a log of real symptoms hit on this exact device/firmware, with the confirmed root cause and fix. Check here **before** re-diagnosing something that looks familiar — several of these took hours of live debugging with the device on a desk. If you're an AI agent auditing this code, several of these look like bugs at first glance; they are documented here precisely because they were already investigated and closed.
+
+Format: **Symptom → Root cause → Fix**. Entries are chronological, most recent last within each topic isn't guaranteed — read the whole thing, it's short.
+
+---
+
+### Black screen after a software reboot (not a power cycle)
+
+**Symptom:** device reboots (OTA, crash, `api.reboot`), display stays black afterward. A power cycle (unplug/replug) fixes it; a soft reboot alone does not, or does so unreliably.
+
+**Root cause:** the display's `reset_pin` is wired through the `PI4IOE5V6408` I2C GPIO expander, not a native ESP32 GPIO. Right after boot, the expander itself needs a short settle time before it reliably drives its output pins — toggling `reset_pin` too early is a no-op from the display's point of view.
+
+**Fix:** a blocking `delay(1000)` was added in `on_boot: priority: 700` in `tab5-hardware.yaml`, right before the display reset sequence. Confirmed root cause on 2026-07-06 after 5 live reboot tests with the developer watching the screen. This is marked `[AI-WARNING]` in the file — **do not remove this delay** to "optimize boot time" without re-testing across several reboots; a previous permissive `logger: level: VERY_VERBOSE` workaround (kept for weeks as a correlation-only mitigation) was replaced by this confirmed fix. Since 2026-10-17 the length comes from the board (`carte_attente_ecran_ms`, [ADR-0005](decisions/0005-boot-delay-gpio-expander-reset.md)): 1 s on the Tab5, none on the Waveshare 7B, whose display reset is a pin of the P4 itself.
+
+---
+
+### Weather / planning / climate data missing, but the device is online
+
+**Symptom:** the device shows a healthy Wi-Fi/API connection (diagnostics entities look fine, uptime climbing), but the weather, planning, and forecast cards never update — while the clock and a couple of directly-mirrored sensors keep working, which makes the failure look partial and confusing.
+
+**Root cause:** the push automations on the Home Assistant side are all gated behind one shared `condition: state` on a boolean helper (a "which HA instance is the active one" flag, relevant only in a dual-instance setup). That helper was stuck `off`; a guard automation meant to force it back `on` at every HA boot was itself disabled, so even a full HA restart didn't self-heal.
+
+**Fix:** turn the helper back on, re-enable the guard automation, manually trigger the push automation once. **If your setup pushes conditionally on a shared state flag, make sure the automation that's supposed to re-arm it on boot is actually enabled** — an automation that silently no-ops because its own guard is off is easy to miss for a long time (in this case, ~3 hours before being noticed).
+
+**Since 3.8** the flag (`input_boolean.is_primary_active`), the automation that re-armed it and its health guard are gone: no push depends on a shared flag any more. This incident can no longer happen with the current packages; if the screen still looks frozen, use « MAJ Écran » and check that the push automations are on.
+
+---
+
+### STT/TTS broken, dozens of "entity already exists — ignoring" log lines
+
+**Symptom:** voice pipeline reports a missing/broken speech-to-text provider despite the underlying service responding correctly when tested directly. Home Assistant logs show many `does not generate unique IDs ... already exists - ignoring` warnings across automation/sensor/climate/calendar entities.
+
+**Root cause:** a `remote_homeassistant`-style integration was mirroring an entire second Home Assistant instance's entities into this one. ID collisions silently shadowed the real STT/TTS entities the voice pipeline depended on. This only reproduces in a **dual Home Assistant instance** setup — not relevant if you run a single HA instance.
+
+**Fix:** disable the mirroring integration, full HA restart. If you don't run two HA instances feeding into each other, this can't happen to you.
+
+---
+
+### Touch "not working" but the touchscreen is actually detecting presses fine
+
+**Symptom:** tapping the screen does nothing; looks like a dead touch controller.
+
+**Root cause:** Home Assistant was rejecting the device's service calls (`Service call ... rejected; ... enable this functionality in the options flow`) — the touch events were reaching HA, HA just refused to act on them.
+
+**Fix:** enable "Allow service calls" in the ESPHome integration's options flow for this device in Home Assistant. Check this before assuming a hardware/firmware touch bug.
+
+**Since [ADR-0025](decisions/0025-events-only.md) (after 3.1)** the firmware calls no action at all, so this rejection cannot happen any more: the screen's commands and requests are events. The same symptom on a recent firmware means their consumer is missing — the blueprint « Tab5 — emplacements » for the tiles, `packages/tab5_evenements.yaml` for the calendar, announcements and system console.
+
+---
+
+### A calendar/weather push silently breaks the rest of the same automation
+
+**Symptom:** after fixing the two issues above, planning/weather/climate were *still* not showing up on screen — a distinct bug from the ones above.
+
+**Root cause:** the automation called `calendar.get_events` with `start_date_time: "{{ now() }}"` — a raw Jinja `now()` datetime object including microseconds, which Home Assistant's schema silently rejected. Because the calendar call was one step among several sequential actions in the same automation, the validation failure aborted everything after it — including unrelated weather and forecast pushes further down the same automation.
+
+**Fix:** format the datetime explicitly: `"{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"`. More broadly: add `continue_on_error: true` on individual push actions (calendar, each `weather.get_forecasts` call, each screen-push service call) so one bad payload doesn't take down unrelated pushes later in the same automation, plus `is defined` guards on any template variable consumed downstream.
+
+---
+
+### Daily weather icons gone, hourly forecast fine, automation reports success (2026-09-18)
+
+**Symptom:** the five daily forecast cards lost their weather icons (and kept stale data after a reboot) while the hourly cards kept updating. Home Assistant had all the data: the weather entity was fine and `weather.get_forecasts` returned 15 daily and 67 hourly entries. The push automation showed no error.
+
+**Root cause:** the `tab5_maj_previsions_jours_bulk` payload template looped over `range(15)` and read `fcasts[i].templow` directly. Météo-France stopped sending `templow` for the 15th day (D+14): the key is simply absent from that dict. In Jinja, `dict.missing_key` raises `UndefinedError` **before** `| float(0)` can apply, so the payload was never rendered and the service never called. The hourly cards use another call (`previsions_heures_bulk`), which is why they kept working. `continue_on_error: true` on the action is what hid it: HA only logged `Error rendering data template: UndefinedError: 'dict object' has no attribute 'templow'`.
+
+**Fix:** guarded access everywhere a forecast attribute is read: `fcasts[i].get('templow') | float(0)`, same for `condition`, `temperature` and (hourly) `precipitation`. Applied to production on 2026-09-18 and mirrored into the public example on 2026-09-25 (now `packages/tab5_push.yaml`, the single source since 2026-09-26).
+
+**How to spot the next one:**
+- Read the automation **trace** and compare the list of services actually called with the expected ones. A missing `…_bulk` call stands out even though the run is "successful".
+- Guard (d) of `HomeAssistant_Config/packages/tab5_health.yaml` (`tab5_health_template_error`) raises an alert on `Error rendering data template`. It needs `system_log: fire_event: true` in `configuration.yaml`, otherwise it loads but never fires.
+- To force a full push after a fix, use the **MAJ Écran** button of the device's system console (`automation.trigger` skips the conditions) or *Run actions* in HA. Firing `esphome.tab5_connected` by hand no longer works since 2026-09-25: that trigger only pushes when the API link came up less than 3 min ago.
+
+---
+
+### ESPHome `pressed:` style rejected when placed in a shared `style_definitions`
+
+**Symptom:** `esphome compile` fails with `[pressed] is an invalid option for [style_definitions]` after trying to centralize a button's pressed-state styling.
+
+**Root cause:** confirmed by reading ESPHome's own LVGL component source (`defines.py` / `widgets/__init__.py` / `styles.py`) rather than guessing — the `pressed:` state key is only valid on the widget itself, not inside a reusable `style_definitions:` block.
+
+**Fix:** keep the pressed properties out of `style_definitions`, but share them anyway: put them in a normal style and reference it from the widget with `pressed: { styles: style_x }`. ESPHome accepts that form on a widget and generates `lv_obj_add_style(obj, style_x, LV_STATE_PRESSED)` (verified in `schemas.py` / `widgets/__init__.py` of ESPHome 2026.9, 2026-09-26). The earlier advice "repeat the block on every button, it cannot be shared" was wrong.
+
+**Related:** press/release no longer animate. The default LVGL theme used to fade every button over 80 ms, plus a 70 ms delay on release. `-DLV_THEME_DEFAULT_TRANSITION_TIME=0` (`build_flags` in `tab5-ha-hmi.yaml`) removes those transitions (a `CONFIG_LV_*` line in the sdkconfig has no effect: ESPHome builds LVGL with `LV_KCONFIG_IGNORE`; the first attempt, on 2026-09-26, went there and never applied), and the project's own pressed style (`tab5_anim.cpp`, 94 % scale) is applied instantly.
+
+---
+
+### ESPHome API connections exhausted (device drops connections under otherwise normal use)
+
+**Symptom:** device intermittently fails to accept new API connections (from HA, from `esphome logs`, from OTA) for no obvious reason.
+
+**Root cause:** the ESPHome native API only allows a small, fixed number of simultaneous connections (8). Leftover `esphome` CLI processes from earlier debugging sessions (e.g. `esphome logs` left running in a forgotten terminal) each hold one connection open indefinitely.
+
+**Fix:** close CLI sessions when you're done with them; if connections seem exhausted, check for and kill orphaned local `esphome` processes before assuming a device-side bug.
+
+---
+
+### Device reboots on its own every ~15–20 min while Home Assistant is unreachable
+
+**Symptom:** Home Assistant is down (or slow to start), the Tab5 is still on Wi-Fi and shows its last known state, yet it reboots by itself roughly every 15–20 minutes. Nothing in the logs looks like a crash: each boot is clean and `safe_mode` reports `Boot seems successful`.
+
+**Root cause:** not a crash — `api: reboot_timeout:` in `tab5-api-logic.yaml`. ESPHome reboots the device when **no API client has been connected** for that long, and the counter restarts on every connection, even a brief one. With the original 15 min, an HA server that takes a while to come up produces a reboot cycle slightly longer than the timeout itself (timeout + boot + reconnection attempts). The `wifi:` component has its own separate `reboot_timeout`, which is *not* involved here since Wi-Fi was fine.
+
+**Fix:** raised to `60min` on 2026-08-01 — an hour-long HA outage or maintenance window no longer cycles the tablet, which stays useful without HA (clock, arcade, diagnostics console, last known weather), while the anti-"zombie" safety net from audit F-04 is kept. Do **not** set it to `0s` without re-reading that audit: a frozen API stack would then leave the device online but mute until someone power-cycles it.
+
+---
+
+### Black screen + device off the network after an OTA — the Wi-Fi co-processor never came up
+
+**Symptom:** an OTA reports `OTA successful`, the device reboots, and then: black screen, no Home Assistant entities, no API (`esphome logs --device <ip>` times out on port 6053). Rebooting it again changes nothing. Confusingly, the IP still answers `ping` — that is a *different* device that picked up the lease, exactly like the 2026-08-01 DHCP mix-up.
+
+**Root cause:** the ESP32-P4 has no radio of its own; Wi-Fi comes from the ESP32-C6 co-processor over SDIO (`esp32_hosted`). That link failed to come up after the OTA's *software* reboot. The P4 does reset the C6 through GPIO 15 (`esp32_hosted` · `reset_pin`) on every boot, software reboots included: that is ESP-Hosted's default setting (`CONFIG_ESP_HOSTED_SLAVE_RESET_ON_EVERY_HOST_BOOTUP=y`, active-high reset, 1,500 ms, read on 2026-10-07 in the `sdkconfig` of an ESPHome 2026.9 build). Cause reviewed on 2026-10-07: this page used to say that a software reboot does not reset the C6, which is very probably wrong for the 2026-08-05 build too. That build came from ESPHome 2026.7 (exact release not recorded); releases 2026.7.0 to 2026.7.3 ask for esp_hosted 2.12.9 without choosing when to reset the C6, and esp_hosted 2.12.9 has the same default. `reset_pin: GPIO15` has been in `Tab5/paquets/tab5-hardware.yaml` since the first commit. So the OTA reboot very probably did send its reset pulse to the C6, and that did not clear the fault; only cutting the power did. The exact cause is unknown. Serial console (USB, COM port) makes it unambiguous in seconds:
+
+```
+[I][esp-idf:000]: E (93883) H_API: ESP-Hosted link not yet up
+[W][wifi_esp32:300]: esp_wifi_set_mode failed: ESP_FAIL
+[I][wifi:852]: Starting fallback AP
+```
+
+Those three lines repeat ~50 times per second. The black screen is a *consequence*, not the fault: that hot retry loop starves the rest of the firmware, LVGL included. Do not go looking at the display stack.
+
+**Fix:** a **full power cycle** — unplug USB-C for ~15 s, then plug it back in: without a battery, the tablet starts again by itself. On the author's tablet, which has no battery, unplugging was enough: the long-press was not needed. With a battery fitted, unplugging does not cut the power: also switch the tablet off with a long-press. A soft reboot will not do it. Confirmed on 2026-08-05: same binary, black screen after the OTA reboot, then Wi-Fi + API + display all healthy after the power cycle, `safe_mode: Boot seems successful`. The firmware was not at fault (that OTA only changed audio settings).
+
+**How often:** a single documented occurrence (2026-08-05). Since 2026-09-30, when the history kept by Home Assistant begins, the author's tablet has restarted about fifty times, most of them OTAs, and Wi-Fi came back every time (count of 2026-10-07). The line `ESP-Hosted link not yet up` shows up once on every normal boot and is harmless: at 9,984 ms in a serial capture of 2026-10-07 (Wi-Fi connected ~17 s after the reset), at +6.9 s and +11.9 s in Home Assistant's log. The fault was that line repeated ~50 times per second.
+
+**Firmware change since 2026-10-16, not tested on a Tab5:** the Waveshare 7B, wired to its C6 the same way, showed a fault of the same family that a reset of the CPU cores did not clear and a reset of the whole digital core did ([below](#waveshare-7b-boot-loop-after-a-software-reboot-wi-fi-link-down-2026-10-16)). Every software reboot of the Tab5 (OTA, button, Home Assistant, safe mode, ESP-Hosted) now ends with that reset too (`esp_rom_software_reset_system()`, `Tab5/ecran/tab5_lien_c6.cpp`, loaded by `Tab5/paquets/tab5-hardware.yaml`): the boot line reads `rst:0x3 (SW_SYS_RESET)` instead of `rst:0xc (SW_CPU_RESET)`, and « Raison du redémarrage » does not change. Whether it would have avoided the 2026-08-05 outage is not known: built only, the author's tablet being away for repair. If it happens again, a power cut is still the fix.
+
+**Not tried (a guess):** since a reset pulse was very probably not enough, cutting the C6's power in software and restoring it (`wifi_power`, PI4IOE 0x44, P0, which the firmware only switches on at boot) might recover from the fault without pulling the cable. Nothing proves it.
+
+**Diagnostic trap, learned the same day:** opening *and closing* the USB serial port to read logs can reset the chip. An unexplained reboot right at the end of an `esphome logs --device COM<n>` session is the log session itself, not an instability. Once the device is back on Wi-Fi, watch it through its Home Assistant diagnostic entities instead.
+
+---
+
+### Waveshare 7B: boot loop after a software reboot, Wi-Fi link down (2026-10-16)
+
+**Symptom:** after a reboot from Home Assistant (« Restart »), an OTA or any software reboot, the board restarts every ~17 s, never reaches Wi-Fi, and after 10 boots ESPHome enters safe mode (frozen screen). Rebooting again does not help.
+
+**What the serial console shows** (COM port of the board, `tools/capture_serie.py --mac …`, no reset): each boot gets past `ESP-Hosted link not yet up` (harmless, printed on every boot), then the SDIO reads from the C6 time out and the P4 restarts by itself, `rst:0xc (SW_CPU_RESET)`, with no panic:
+
+```
+[I][esp-idf:000]: E (2513) H_API: ESP-Hosted link not yet up
+[I][esp-idf:000][sdio_read]: E (11640) sdmmc_req: sdmmc_host_wait_for_event returned 0x107
+[I][esp-idf:000][sdio_read]: E (14146) H_SDIO_DRV: sdio_read_task: Failed to read data - -1 838860 838860
+...
+rst:0xc (SW_CPU_RESET),boot:0xf (SPI_FAST_FLASH_BOOT)
+```
+
+**Cause:** the faulty state is on the **P4** side and survives `esp_restart()`, which on the ESP32-P4 only resets the two CPU cores (`rst:0xc`): GPIO, peripherals and their configuration keep their state. Reproduced on 2026-10-16 on the author's board: the loop came back on the 8th reboot of a series through the API (and on the 3rd of an earlier series); a reset over USB, which is a reset of the whole digital core (« USB peripheral ») and does not touch the C6, brought Wi-Fi back at once; so does a power cut. The C6 does not look at fault: it is reset by GPIO 54 on every boot and the current curve (USB meter, 100 samples/s) shows it restarting each time, and the board cannot cut its power in software (the C6 shares the 3.3 V rail of the P4). Which part of the P4 keeps the bad state is not established.
+
+**Fix (firmware):** every software reboot of the 7B ends with a reset of the whole digital core (`esp_rom_software_reset_system()`, the reset ESP-IDF's bootloader uses) instead of a CPU reset: `Tab5/ecran/tab5_lien_c6.cpp`. ESP-IDF still reports it as a software reboot, so « Raison du redémarrage » and the boot journal do not change. Checked on the author's board on 2026-10-16: 20 reboots in a row through the API, every one `rst:0x3 (SW_SYS_RESET)`, API back in 13.0 to 13.1 s, no SDIO error, reported as « Reboot request from api »; the same series had looped on the 8th reboot before the fix. The Tab5 gets the same reset since the same day, not tested there ([above](#black-screen--device-off-the-network-after-an-ota--the-wi-fi-co-processor-never-came-up)).
+
+**If it happens anyway:** a reset over USB from a PC (`esptool --port COM<n> --before default-reset --after hard-reset chip-id`), or unplugging the board for a few seconds.
+
+### `Tab5 Uptime` stuck at `unavailable` after the update to the boot-time firmware (2026-09-26)
+
+**Symptom:** after flashing a firmware from 2026-09-26 or later over an older one, every entity comes back except `Tab5 Uptime`, which stays `unavailable`. The Home Assistant log shows `ValueError: Sensor sensor.…_tab5_uptime has a unit of measurement and thus indicating it has a numeric value; however, it has the non-numeric device class: timestamp`.
+
+**Root cause:** Home Assistant, not the firmware. `Tab5 Uptime` changed from seconds (`s`) to a boot timestamp without a unit, under the same name, so the same entity. On reconnection, HA's ESPHome integration updates the existing entity in place and only copies the unit when the new one is not empty (`homeassistant/components/esphome/sensor.py`, `_on_static_info_update`): the old `s` sticks, and HA refuses to write a timestamp state that carries a unit.
+
+**Fix:** reload the ESPHome integration of the device once (Settings → Devices & services → ESPHome → the device → ⋮ → Reload), or restart Home Assistant. The entity is rebuilt from the device's description, without a unit. Done on 2026-09-26 at 21:39.
+
+---
+
+### Crash alert after a press on the power button (2026-10-06)
+
+**Symptom:** a short press on the power button reboots the tablet in about 10 s, then Home Assistant sends « Tab5 : journal du démarrage (plantage (chien de garde)) » to the phone. The journal has only the usual boot lines (ESP-Hosted « not yet up », touch polling, Wi-Fi associating), no `esp32.crash` line. Meanwhile `Restart reason` shows `Reboot request from esphome.ota`, although the last update was hours earlier. Reported in discussion #278 (tablet with a battery, 3.7.0-rc.2), reproduced the same day on a tablet powered by USB.
+
+**Root cause:** not a crash. The firmware does not handle the power button: the hardware resets the chip, and `esp_reset_reason()` reads `ESP_RST_WDT`, a reason the journal counted as a crash. ESPHome's `debug` component, for that reason, shows the source stored by the last *requested* reboot (`components/debug/debug_esp32.cpp`), which it never clears: a stale text.
+
+**Fix (firmware after 3.7.0-rc.3, and `packages/tab5_health.yaml`):** a watchdog reset with no crash report is now a normal boot: « bouton d'alimentation ou chien de garde RTC (rst 0x..) » in the journal, no event sent; `Power button or RTC watchdog (rst 0x..)` in the entity, which the « reboot inattendu » guard lets through. Update both the firmware and the HA files: with only the new firmware, the old guard would alert on the new text. A watchdog reset with a crash report still alerts. Details in [`debugging.md`](debugging.md).
+
+---
+
+### Adding Tab5 to HACS: « Repository not found », or an empty box (2026-10-07)
+
+**Symptom:** adding the repository to HACS, by the « Open Tab5 in HACS » link or by *Custom repositories*, fails with « Repository not found » (« Dépôt introuvable » in French). Or the box that HACS opens through the link shows a title only (« Confirm? »), with no text.
+
+**Root cause:** HACS checks a repository on its latest full release, even with beta versions switched on, and only the releases from 3.7.0 on carry the integration: before 3.7.0 was published (7 October 2026), HACS refused this repository (tried that day with 3.6.0 as the latest full release). The empty box comes from HACS: on a first load through the link, its texts are not loaded yet (seen with HACS 2.0.5).
+
+**Fix:** « Repository not found »: check on the [releases page](https://github.com/Axellum/M5-Tab5-ESPHome-LVGL/releases) that the release marked *Latest* is 3.7.0 or later, and, when adding it by hand, that the type is **Integration**; then try again. Empty box: reload the page, the box comes back with its texts, *Add* on the right. Without HACS, the archive copied by hand works as before ([parts A to C](installation/home-assistant-files.md#a-download-and-unzip)).
+
+---
+
+### HACS: « Download failed - 400 », « Got more than 8190 bytes when reading » (2026-10-24)
+
+**Symptom:** on the Tab5 page of HACS, *Download* (or an update) fails; the Home Assistant log shows « Download failed - 400 » and « Got more than 8190 bytes when reading ». Reported on the Home Assistant forum on 24 October 2026.
+
+**Root cause:** neither the tablet nor this repository. Since 23 October 2026, GitHub answers a release download with a redirect that carries a Content-Security-Policy header of about 9 KB (9,242 bytes measured on `tab5_hacs.zip` on 24 October), and HACS 2.0.5 refuses any header line over 8,190 bytes. Every integration that HACS installs from a release archive is hit. Tracked by HACS: [hacs/integration#5643](https://github.com/hacs/integration/issues/5643), fix proposed in [hacs/integration#5644](https://github.com/hacs/integration/pull/5644) (not released on 24 October).
+
+**Fix:** wait for a HACS release that fixes it, then *Download* again. Meanwhile, the files go in by hand, without HACS: [parts A to C](installation/home-assistant-files.md#a-download-and-unzip). Do not copy the integration from the repository: it holds the code but not the files (« no Home Assistant files in the integration », below).
+
+---
+
+### Tab5 integration (HACS): a message in Repairs
+
+**Symptom:** after an update of the « Tab5 — fichiers HA · HA files » integration and a restart, *Settings → System → Repairs* shows a message whose title starts with « Tab5 ».
+
+**Root cause:** at start, the integration puts the files of its version in place, checks the configuration, reloads the YAML, then checks that the sensor « Tab5 · HA files version » shows the new version ([updates](installation/updates.md#home-assistant-files)). When a step does not end as expected, it says so in Repairs.
+
+**Fix**, by message:
+
+- **« Tab5: no Home Assistant files in the integration »**: the integration was copied from the repository, which holds its code but not the files. Install it through HACS ([with HACS](installation/home-assistant-files.md#with-hacs)), which downloads `tab5_hacs.zip` from the release, then restart.
+- **« Tab5: Home Assistant does not load the packages »**: the files are in `config/packages/`, but `configuration.yaml` has no `packages:` line. Add it ([part B](installation/home-assistant-files.md#b-one-line-in-configurationyaml)), check the configuration, then restart.
+- **« Tab5: restart Home Assistant to finish »**: the files are in place, but a reload was not enough (a part that only loads at start, a reload that failed, or a configuration that already had an error). Open the message and submit: the integration checks the configuration, then restarts Home Assistant. If it answers that the configuration has an error, fix it first (*Developer tools → YAML → Check configuration*). With « Then update the tablet » ticked, the firmware of this version starts after this restart, once the tablet's « Firmware » entity offers it.
+- **« Tab5: the files X were not installed »**: the configuration check found a new error or warning with the new files, or writing them failed. The previous files were put back: nothing changed, and the firmware of this version is not started. The reason is in the log (*Settings → System → Logs*, search « tab5 »). If it is in one of your own files, fix it; otherwise please report it ([issues](https://github.com/Axellum/M5-Tab5-ESPHome-LVGL/issues)). After a configuration error, the same files are not tried again at each start of Home Assistant (the message comes back, nothing else happens): once the cause is fixed, *Settings → Devices & services → Tab5 → Configure*, « Install the files of this version again now ». A write failure (disk full…) is tried again at the next start.
+- **« Tab5: files already there were replaced »**: some Tab5 files were already in `config/` without coming from the integration (copied by hand from an archive, most likely) and differed from those of the release. They were replaced anyway; the message lists them and names the backup folder that holds the old ones. If you had changed one on purpose, copy your change back from there, then submit the message to close it.
+- **« Tab5: the tablet did not update to X »**: with « Then update the tablet » ticked, the integration started the firmware update 3 times, 15 minutes apart, and the tablet still runs another version (an update that failed on the tablet, or a tablet off or disconnected). Install it by hand: *Settings → Updates*, or the tablet's « Firmware » entity → *Install*, tablet on and connected. The message goes away once the tablet runs that version.
+
+To go back to older files by hand: [putting older files back](installation/updates.md#putting-older-files-back-by-hand).
+
+---
+
+### Home Assistant no longer connects after a reinstall with erase (2026-10-19)
+
+**Symptom:** a tablet or a Waveshare 7B that Home Assistant already knew is installed again from the [install page](installation/flash.md) with an erase (« Erase device » ticked after *Install*, or « Erase User Data »). It starts and joins the Wi-Fi once you set it again, but stays unavailable in Home Assistant, even after a restart of the tablet. *Settings → Devices & services* shows it at the top, under « Discovered », with a red border and a *Reconfigure* button; *Settings → System → Repairs* says « Authentication expired for M5Stack Tab5 Home Assistant HMI ». Seen on the author's 7B on 2026-10-19 (3.9.0-rc.6 installed from the page).
+
+**Root cause:** the erase empties the tablet's memory (NVS): the API key Home Assistant gave it, its Wi-Fi and its screen settings (theme, alarm clock, brightness…). Home Assistant still holds the key and tries it; the tablet, without a key, refuses it. Home Assistant then opens a re-authentication at the step `reauth_encryption_removed_confirm` (the tablet answers without encryption while its entry has a key: `homeassistant/components/esphome/config_flow.py`, `async_step_reauth`) and stops reconnecting while it waits. The install page offers the erase on every *Install*: its manifest sets `new_install_prompt_erase: true`, and ESP Web Tools 10.4.0 then asks « Erase device » (box unticked); *Update* never erases. Until now, the installation guide said that a tablet Home Assistant knows gets a new key by itself (one try, on 2026-09-28): the fresh-install test shows that Home Assistant waits for a confirmation, the same with Home Assistant 2026.8.3, 2026.9.4 and 2026.10.2.
+
+**Fix, in Home Assistant** (what the fresh-install test does, `tools/installation_ha/verifier_installation.py`):
+
+1. Within 30 minutes of the tablet's start (its pairing window): *Settings → Devices & services*, the tablet's card under « Discovered » → *Reconfigure*. The box says the device « disabled transport encryption » and asks to confirm that you want to « remove the encryption key and allow unencrypted connections »: *Submit*. Despite these words, the tablet does not stay unencrypted. Closing the box without *Submit* changes nothing: the card stays.
+2. Home Assistant gives the tablet back the key it kept, the same one, and reconnects with it, in a few seconds (under 7 s in the test). Entities, automations and history do not change; the repair goes away.
+3. Put the screen settings back from the tablet's device page ([settings](installation/settings.md)): their former values are in the history of each entity.
+
+More than 30 minutes since the tablet's start: restart it first (a short press on reset, or unplug it), then *Reconfigure*.
+
+*Reload* (*Settings → Devices & services → ESPHome* → the tablet → ⋮ → *Reload*) drops the waiting re-authentication, and Home Assistant opens a new one, at the same step, while the window is open (checked by the test). It is the way out if the box asks for an encryption key instead, which happens, from Home Assistant's code (not tried), when Home Assistant opened the re-authentication while the tablet's window was closed: restart the tablet, then *Reload*, then *Reconfigure*.
+
+**Without the interface**, from a PC that reaches Home Assistant's `config` share: within the window, `python tools/tab5_redonner_cle.py --host <tablet IP> --config-ha \\<HA IP>\config` gives the tablet the key Home Assistant keeps (read in `.storage/core.config_entries`, never printed); then *Reload* the tablet's ESPHome entry, and Home Assistant reconnects (under 3 s in the test). That is how the author's 7B was repaired on 2026-10-19.
+
+**To avoid it:** on a tablet Home Assistant knows, *Update*; if the page offers *Install*, leave « Erase device » unticked.
+
+---
+
+### Faint continuous hiss, on a tablet without a battery (2026-10-08)
+
+**Symptom:** a very faint, continuous hiss from the tablet. Muting the microphone or turning the volume down changes nothing. Heard on the author's tablet, which has no battery and runs on a PC's USB port.
+
+**What it is not** (tried one after the other from Home Assistant, on 2026-10-08):
+
+- the speaker amplifier: « Speaker Enable » off, hiss unchanged;
+- the backlight: brightness at 100 %, where its 1 kHz PWM no longer chops, hiss unchanged (that change coincided with a brownout reboot at 09:42, on a PC's USB port; cause not proven);
+- the microphone: muted, hiss unchanged.
+
+**Root cause:** the battery charger. Since 3.6.0 (PR #303, 2026-10-04), the firmware sets CHG_EN (PI4IOE 0x44 P7) to 1 at every boot. Without a battery, the charger charges into nothing: the voltage read by the INA226 swings between 4.2 and 8.39 V, or stays around 5.70–5.76 V, and « Battery charging » says yes. With a trial firmware that exposed CHG_EN, switching the charger off made the hiss go away; the INA226 then read 1.83 to 1.94 V (four readings, 09:55 to 09:58) and the charging status went to « not charging ». One more observation, a single one: during the 2 minutes when the voltage read 8.39 V, the hiss could not be heard; it came back with 5.70 V.
+
+**Fix (next version):** the firmware looks for a battery with the charger switched off, and leaves the charger off when there is none: no more hiss, no more false « charging ». Since 2026-10-10 it does not even switch the charger on while it boots when the previous boot saw no battery. How it decides: [battery](hardware.md#power).
+
+**Workaround from 3.6.0 to the latest published version:** none simple, sorry. These versions have no entity to switch the charger off, and the speaker, the microphone and the volume have nothing to do with it. A fitted battery gives the charger something to charge (whether a tablet with a battery hisses too has not been checked). Otherwise, wait for the next version.
+
+---
+
+### The build fails with ESPHome 2026.10.0: « was not declared in this scope » (2026-10-21)
+
+**Symptom:** you compile the firmware yourself with ESPHome 2026.10.0 and the build stops on `main.cpp` with errors such as `'journal_reset_reason' was not declared in this scope`, `'tr' was not declared in this scope` or `'g_alarm_cfg' was not declared in this scope` (13 errors on `main`, 2026-10-21). The same commit builds with 2026.9.x. The published firmware is not affected: it is built with a fixed ESPHome version (`ESPHOME_PUBLICATION` in `.github/workflows/publication.yml`), not with the latest one.
+
+**Root cause:** an ESPHome 2026.10.0 change, reported as [esphome/esphome#21303](https://github.com/esphome/esphome/issues/21303). Two kinds of `!lambda` values are now written into `main.cpp` *before* the `#include` lines of the files listed under `esphome: includes:`, so they cannot see this firmware's C++ functions, constants and globals:
+
+- the `data:` fields of a `homeassistant.event`, now kept in a table in flash ([esphome/esphome#20237](https://github.com/esphome/esphome/pull/20237));
+- the value of an "apply" action or condition (`select.set_index`, `rtttl.play`, `media_player.volume_set`, `globals.set`…), now a static function.
+
+A plain `lambda:` action is still written inside `setup()`, after the includes, and is not affected. Proof: the same `main.cpp` generated with 2026.9.0 and 2026.10.0 (`esphome compile --only-generate`), on this firmware and on a minimal config outside the repository.
+
+**Fix (next version, [#535](https://github.com/Axellum/M5-Tab5-ESPHome-LVGL/pull/535)):** those values only name parameters, `id(…)` and the standard library. The startup journal and the « Volet arrêté. » announcement send their event from a script with parameters, called from a `lambda:`; the alarm clock picks its melody, plays its ringtone and sets its volume from a `lambda:`. Same events, same fields; the firmware builds with 2026.9 and 2026.10. `tests/test_includes_esphome.py` fails if such a value names our C++ again (code rule 10, [`Tab5/README.md`](../Tab5/README.md)).
+
+**Workaround before that version:** compile with ESPHome 2026.9.x (`pip install esphome==2026.9.1`), or with the Device Builder on 2026.9.x.
+
+---
+
+### False positives worth knowing about (don't "fix" these again)
+
+- **Forecast pagination "wrap-around"**: the 5 forecast pages (indices 0–4) intentionally do **not** wrap from 4 back to 0 on a further right-swipe. This was already "corrected" once by an LLM audit that assumed non-wrapping was a bug, then reverted. See [`docs/decisions/`](decisions/README.md).
+- **A cover entity showing `unknown` in Home Assistant**: this can be real on the HA side while being irrelevant to the Tab5 firmware, if the corresponding UI card drives its own internal state via globals + a script rather than reading that entity's state directly. Check what the specific `ui_components/*.yaml` card actually binds to before assuming the firmware is affected.
+- **`Uptime` about a minute away from the actual reboot**: not a clock problem. An ESPHome sensor state is a 32-bit float, which rounds a Unix timestamp to the nearest multiple of 128 s (±64 s). The health guard in `packages/tab5_health.yaml` allows 5 min for it.
+- **Touch "overlap" between two adjacent buttons flagged by a static audit**: verify the actual pixel geometry (`x`/`y`/`width`/`height`) before trusting a reported overlap — a past report was off by roughly a dozen pixels and wasn't a real overlap.
+
+---
+
+---
+
+## Version Française
+
+---
+
+Journal d'incidents réels rencontrés sur ce firmware précis, avec la cause racine confirmée et le correctif. À consulter **avant** de re-diagnostiquer quelque chose qui semble familier — plusieurs de ces cas ont demandé des heures de debug en direct avec l'appareil sur le bureau.
+
+Format : **Symptôme → Cause racine → Correctif**.
+
+### Écran noir après un reboot logiciel (pas une coupure d'alimentation)
+
+**Symptôme :** après un reboot (OTA, crash, `api.reboot`), l'écran reste noir. Un cycle d'alimentation (débranché/rebranché) corrige le problème ; un reboot logiciel seul non, ou pas de façon fiable.
+
+**Cause racine :** le `reset_pin` de l'écran passe par l'expander GPIO I2C `PI4IOE5V6408`, pas un GPIO natif ESP32. Juste après le boot, l'expander a lui-même besoin d'un court délai de stabilisation avant de piloter ses sorties de façon fiable — actionner `reset_pin` trop tôt est un no-op du point de vue de l'écran.
+
+**Correctif :** un `delay(1000)` bloquant a été ajouté dans `on_boot: priority: 700` (`tab5-hardware.yaml`), juste avant la séquence de reset écran. Cause racine confirmée le 06/07/2026 après 5 tests de reboot en direct. Marqué `[AI-WARNING]` dans le fichier — **ne pas retirer ce délai** sans re-tester sur plusieurs reboots. Depuis le 17/10/2026, sa durée vient de la carte (`carte_attente_ecran_ms`, [ADR-0005](decisions/0005-boot-delay-gpio-expander-reset.md)) : 1 s sur le Tab5, aucune sur la Waveshare 7B, dont le reset de l'écran est une broche du P4 lui-même.
+
+### Météo / planning / clim absents alors que l'appareil est en ligne
+
+**Symptôme :** l'appareil affiche une connexion Wi-Fi/API saine, mais les cartes météo/planning/prévisions ne se mettent jamais à jour.
+
+**Cause racine :** les automations de push côté HA sont toutes conditionnées par un flag booléen partagé (pertinent uniquement dans un setup à double instance HA). Ce flag était bloqué à `off` ; l'automation de garde-fou censée le reforcer à `on` à chaque boot HA était elle-même désactivée.
+
+**Correctif :** réactiver le flag et l'automation de garde-fou, déclencher manuellement le push une fois. **Si votre setup pousse conditionnellement sur un flag d'état partagé, vérifiez que l'automation censée le réarmer au boot est bien active.**
+
+**Depuis la 3.8**, le flag (`input_boolean.is_primary_active`), l'automatisation qui le réarmait et sa garde de santé sont retirés : plus aucune poussée ne dépend d'un flag partagé. Cet incident ne peut plus arriver avec les packages actuels ; si l'écran paraît encore figé, « MAJ Écran », puis vérifier que les automatisations de poussée sont actives.
+
+### STT/TTS cassé, dizaines de logs "entity already exists — ignoring"
+
+**Symptôme :** pipeline vocal en échec malgré un service STT sain testé directement. Logs HA pleins d'avertissements de collision d'ID.
+
+**Cause racine :** une intégration type `remote_homeassistant` dupliquait toute une seconde instance HA dans celle-ci — collisions d'ID masquant les vraies entités STT/TTS. Ne se reproduit que dans un setup à **double instance HA**.
+
+**Correctif :** désactiver l'intégration de duplication, redémarrage HA complet.
+
+### Tactile "mort" alors que le contrôleur détecte bien les appuis
+
+**Symptôme :** taper sur l'écran ne fait rien.
+
+**Cause racine :** HA rejetait les appels de service de l'appareil (`Service call ... rejected`).
+
+**Correctif :** cocher "Autoriser les appels de service" dans l'options flow de l'intégration ESPHome pour cet appareil.
+
+**Depuis l'[ADR-0025](decisions/0025-events-only.md) (après la 3.1)**, le firmware n'appelle plus aucune action : ce refus ne peut plus arriver, les commandes et demandes de l'écran sont des événements. Le même symptôme sur un firmware récent veut dire que leur consommateur manque — le blueprint « Tab5 — emplacements » pour les tuiles, `packages/tab5_evenements.yaml` pour le calendrier, les annonces et la console système.
+
+### Un push calendrier/météo casse silencieusement le reste de la même automation
+
+**Cause racine :** `calendar.get_events` avec `start_date_time: "{{ now() }}"` (datetime brut avec microsecondes) — échec de validation silencieux qui interrompait toute la suite de l'automation.
+
+**Correctif :** `"{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"`, plus `continue_on_error: true` sur chaque action de push + gardes `is defined`.
+
+### Icônes météo des jours disparues, horaire intact, automation « réussie » (18/09/2026)
+
+**Symptôme :** les 5 cartes journalières perdent leurs icônes (et gardent des données périmées après un reboot) alors que l'horaire se met à jour. HA a toutes les données, l'automation de push ne signale aucune erreur.
+
+**Cause racine :** le template du payload `tab5_maj_previsions_jours_bulk` lisait `fcasts[i].templow` en accès direct sur 15 jours. Météo-France ne fournit plus `templow` pour j+14 : en Jinja, `dict.cle_absente` lève `UndefinedError` **avant** que `| float(0)` ne s'applique, le payload n'est jamais rendu et le service jamais appelé. `continue_on_error: true` masquait la panne (seul le journal HA disait « Error rendering data template »).
+
+**Correctif :** accès protégé `fcasts[i].get('templow') | float(0)` (idem `condition`, `temperature`, `precipitation`), en prod le 18/09 et dans l'exemple public le 25/09. Pour repérer la suivante : la **trace** de l'automation (un appel `…_bulk` manquant saute aux yeux), la garde (d) de `packages/tab5_health.yaml` (exige `system_log: fire_event: true`). Pour forcer un push complet : bouton **MAJ Écran** de la console système ou *Exécuter les actions* dans HA — l'événement `esphome.tab5_connected` lancé à la main ne pousse plus rien depuis le 25/09 (réservé à une liaison API de moins de 3 min).
+
+---
+
+### `pressed:` LVGL refusé dans un `style_definitions` partagé
+
+**Cause racine :** limitation confirmée dans le code source du composant LVGL d'ESPHome — `pressed:` n'est valide que sur le widget lui-même.
+
+**Correctif :** le partager sur le widget par `pressed: { styles: style_x }` (version anglaise ci-dessus ; l'ancien conseil « le répéter sur chaque bouton » était faux). Un bouton verre cliquable de rayon 18 n'a besoin de rien : `apply_pressed_scale_to_tree()` (`tab5_anim.cpp`) lui pose l'appui, et les `pressed:` qui le répétaient sont retirés depuis le 01/10/2026.
+
+### Connexions API ESPHome épuisées
+
+**Cause racine :** l'API native n'autorise que 8 connexions simultanées ; des process `esphome` CLI orphelins (sessions de debug oubliées) en occupent chacun une indéfiniment.
+
+**Correctif :** fermer les sessions CLI une fois terminées ; vérifier les process `esphome` orphelins avant de soupçonner l'appareil.
+
+### L'appareil redémarre tout seul toutes les ~15-20 min quand Home Assistant est injoignable
+
+**Symptôme :** HA est tombé (ou met longtemps à démarrer), le Tab5 est toujours sur le WiFi et affiche son dernier état connu, mais il redémarre seul toutes les 15-20 minutes environ. Aucun plantage dans les logs : chaque boot est propre et `safe_mode` annonce `Boot seems successful`.
+
+**Cause racine :** ce n'est pas un crash — c'est `api: reboot_timeout:` dans `tab5-api-logic.yaml`. ESPHome redémarre l'appareil quand **aucun client API n'est connecté** pendant cette durée, et le compteur repart à zéro à chaque connexion, même brève. Avec les 15 min d'origine, un serveur HA long à monter produit un cycle de reboots un peu plus long que le timeout lui-même (timeout + boot + tentatives de reconnexion). Le composant `wifi:` a son propre `reboot_timeout`, qui n'est *pas* en cause ici puisque le WiFi fonctionnait.
+
+**Correctif :** porté à `60min` le 01/08/2026 — une panne ou une maintenance HA d'une heure ne fait plus cycler la tablette, qui reste utile sans HA (horloge, arcade, console diag, dernière météo affichée), tout en gardant le filet anti-« zombie » de l'audit F-04. **Ne pas** mettre `0s` sans relire cet audit : une pile API figée laisserait alors l'appareil en ligne mais muet jusqu'à une coupure d'alimentation manuelle.
+
+### Écran noir + appareil absent du réseau après une OTA — le co-processeur WiFi n'est pas remonté
+
+**Symptôme :** une OTA annonce `OTA successful`, l'appareil redémarre, et ensuite : écran noir, aucune entité côté Home Assistant, pas d'API (`esphome logs --device <ip>` part en timeout sur le port 6053). Le rebooter à nouveau ne change rien. Trompeur : l'IP répond toujours au `ping` — c'est un *autre* appareil qui a récupéré le bail, exactement comme la confusion DHCP du 01/08/2026.
+
+**Cause racine :** l'ESP32-P4 n'a pas de radio à lui ; le WiFi vient du co-processeur ESP32-C6 en SDIO (`esp32_hosted`). Ce lien n'est pas remonté après le reboot *logiciel* de l'OTA. Le P4 réinitialise pourtant le C6 par GPIO 15 (`esp32_hosted` · `reset_pin`) à chaque démarrage, redémarrage logiciel compris : c'est le réglage par défaut d'ESP-Hosted (`CONFIG_ESP_HOSTED_SLAVE_RESET_ON_EVERY_HOST_BOOTUP=y`, reset actif haut, 1 500 ms, lu le 07/10/2026 dans le `sdkconfig` d'un build ESPHome 2026.9). Cause revue le 07/10/2026 : cette page disait qu'un reboot logiciel ne réinitialise pas le C6, ce qui est très probablement faux pour le build du 05/08/2026 aussi. Il venait d'ESPHome 2026.7 (version exacte non notée) ; les versions 2026.7.0 à 2026.7.3 demandent esp_hosted 2.12.9 sans choisir quand réinitialiser le C6, et le réglage par défaut d'esp_hosted 2.12.9 est le même. `reset_pin: GPIO15` est dans `Tab5/paquets/tab5-hardware.yaml` depuis le premier commit. Le reboot de l'OTA a donc très probablement envoyé son impulsion de reset au C6 sans effacer la panne ; seule la coupure d'alimentation l'a fait. La cause exacte est inconnue. La console série (USB, port COM) tranche en quelques secondes :
+
+```
+[I][esp-idf:000]: E (93883) H_API: ESP-Hosted link not yet up
+[W][wifi_esp32:300]: esp_wifi_set_mode failed: ESP_FAIL
+[I][wifi:852]: Starting fallback AP
+```
+
+Ces trois lignes se répètent ~50 fois par seconde. L'écran noir est une *conséquence*, pas la panne : cette boucle chaude de reconnexion affame le reste du firmware, LVGL compris. Ne pas partir fouiller la pile d'affichage.
+
+**Correctif :** une **vraie coupure d'alimentation** — débrancher l'USB-C pendant ~15 s, puis le rebrancher : sans batterie, la tablette redémarre seule. Sur la tablette de l'auteur, qui n'a pas de batterie, débrancher a suffi : l'appui long n'était pas nécessaire. Avec une batterie montée, débrancher ne coupe pas l'alimentation : éteindre aussi la tablette par un appui long. Un reboot logiciel ne suffit pas. Confirmé le 05/08/2026 : même binaire, écran noir après le reboot d'OTA, puis WiFi + API + dalle tous sains après la coupure, `safe_mode: Boot seems successful`. Le firmware n'était pas en cause (cette OTA ne changeait que des réglages audio).
+
+**Fréquence :** une seule occurrence documentée (05/08/2026). Depuis le 30/09/2026, début de l'historique gardé par Home Assistant, la tablette de l'auteur a redémarré une cinquantaine de fois, des OTA pour la plupart, et le WiFi est revenu à chaque fois (relevé du 07/10/2026). La ligne `ESP-Hosted link not yet up` apparaît une fois à chaque démarrage normal et est sans conséquence : à 9 984 ms sur une capture série du 07/10/2026 (WiFi connecté ~17 s après le reset), à +6,9 s et +11,9 s dans le journal de Home Assistant. La panne, c'était cette ligne répétée ~50 fois par seconde.
+
+**Changement du firmware depuis le 16/10/2026, pas essayé sur un Tab5 :** la Waveshare 7B, reliée à son C6 de la même façon, a montré une panne de la même famille, qu'un reset des CPU n'effaçait pas et qu'un reset de tout le cœur numérique effaçait ([plus bas](#waveshare-7b--boucle-de-redémarrages-après-un-redémarrage-logiciel-lien-wi-fi-absent-16102026)). Tout redémarrage logiciel du Tab5 (OTA, bouton, Home Assistant, mode sans échec, ESP-Hosted) finit maintenant par ce reset lui aussi (`esp_rom_software_reset_system()`, `Tab5/ecran/tab5_lien_c6.cpp`, chargé par `Tab5/paquets/tab5-hardware.yaml`) : la ligne du démarrage dit `rst:0x3 (SW_SYS_RESET)` au lieu de `rst:0xc (SW_CPU_RESET)`, et « Raison du redémarrage » ne change pas. On ne sait pas s'il aurait évité la panne du 05/08/2026 : seulement compilé, la tablette de l'auteur étant en réparation. Si elle revient, une coupure reste le remède.
+
+**Pas essayé (une supposition) :** puisqu'une impulsion de reset n'a très probablement pas suffi, couper puis remettre l'alimentation du C6 par logiciel (`wifi_power`, PI4IOE 0x44, P0, que le firmware ne fait qu'allumer au démarrage) pourrait rattraper la panne sans débrancher le câble. Rien ne le prouve.
+
+**Piège de diagnostic, appris le même jour :** ouvrir *et refermer* le port série USB pour lire les logs peut réinitialiser la puce. Un reboot inexpliqué pile à la fin d'une session `esphome logs --device COM<n>`, c'est la session de logs elle-même, pas une instabilité. Une fois l'appareil revenu sur le WiFi, le surveiller via ses entités de diagnostic Home Assistant.
+
+### Waveshare 7B : boucle de redémarrages après un redémarrage logiciel, lien Wi-Fi absent (16/10/2026)
+
+**Symptôme :** après un redémarrage depuis Home Assistant (« Restart » ; « Redémarrage Système » avant la migration des entités), une OTA ou tout redémarrage logiciel, la carte redémarre toutes les ~17 s, n'atteint jamais le Wi-Fi, et au bout de 10 démarrages ESPHome passe en mode sans échec (écran figé). La redémarrer encore n'y change rien.
+
+**Ce que montre la console série** (port COM de la carte, `tools/capture_serie.py --mac …`, sans reset) : chaque démarrage passe `ESP-Hosted link not yet up` (sans conséquence, écrit à chaque démarrage), puis les lectures SDIO du C6 partent en timeout et le P4 redémarre de lui-même, `rst:0xc (SW_CPU_RESET)`, sans panique :
+
+```
+[I][esp-idf:000]: E (2513) H_API: ESP-Hosted link not yet up
+[I][esp-idf:000][sdio_read]: E (11640) sdmmc_req: sdmmc_host_wait_for_event returned 0x107
+[I][esp-idf:000][sdio_read]: E (14146) H_SDIO_DRV: sdio_read_task: Failed to read data - -1 838860 838860
+...
+rst:0xc (SW_CPU_RESET),boot:0xf (SPI_FAST_FLASH_BOOT)
+```
+
+**Cause :** l'état fautif est côté **P4** et survit à `esp_restart()`, qui sur l'ESP32-P4 ne remet à zéro que les deux CPU (`rst:0xc`) : GPIO, périphériques et leurs réglages gardent leur état. Reproduit le 16/10/2026 sur la carte de l'auteur : la boucle est revenue au 8e redémarrage d'une série par l'API (et au 3e d'une série précédente) ; un reset par l'USB, qui remet à zéro tout le cœur numérique (« USB peripheral ») sans toucher au C6, a rendu le Wi-Fi aussitôt ; une coupure de courant aussi. Le C6 ne semble pas en cause : il est réinitialisé par le GPIO 54 à chaque démarrage et la courbe de courant (wattmètre USB, 100 mesures/s) le montre redémarrer à chaque fois, et la carte ne peut pas couper son alimentation par logiciel (le C6 partage le 3,3 V du P4). Quelle partie du P4 garde le mauvais état : pas établi.
+
+**Correctif (firmware) :** tout redémarrage logiciel de la 7B finit par un reset de tout le cœur numérique (`esp_rom_software_reset_system()`, le reset du chargeur d'amorçage d'ESP-IDF) au lieu d'un reset des CPU : `Tab5/ecran/tab5_lien_c6.cpp`. ESP-IDF le rapporte toujours comme un redémarrage logiciel : « Raison du redémarrage » et le journal des démarrages ne changent pas. Vérifié sur la carte de l'auteur le 16/10/2026 : 20 redémarrages d'affilée par l'API, tous en `rst:0x3 (SW_SYS_RESET)`, API revenue en 13,0 à 13,1 s, aucune erreur SDIO, raison « Reboot request from api » ; la même série avait bouclé au 8e redémarrage avant le correctif. Le Tab5 a le même reset depuis le même jour, pas essayé sur lui ([plus haut](#écran-noir--appareil-absent-du-réseau-après-une-ota--le-co-processeur-wifi-nest-pas-remonté)).
+
+**Si ça arrive quand même :** un reset par l'USB depuis un PC (`esptool --port COM<n> --before default-reset --after hard-reset chip-id`), ou débrancher la carte quelques secondes.
+
+### `Tab5 Uptime` bloqué à `unavailable` après la mise à jour vers le firmware à heure de démarrage (26/09/2026)
+
+**Symptôme :** après le flash d'un firmware du 26/09/2026 ou plus récent par-dessus un plus ancien, toutes les entités reviennent sauf `Tab5 Uptime`, qui reste `unavailable`. Le journal de Home Assistant montre `ValueError: Sensor sensor.…_tab5_uptime has a unit of measurement and thus indicating it has a numeric value; however, it has the non-numeric device class: timestamp`.
+
+**Cause racine :** Home Assistant, pas le firmware. `Tab5 Uptime` est passé de secondes (`s`) à une heure de démarrage sans unité, sous le même nom, donc la même entité. À la reconnexion, l'intégration ESPHome de HA met à jour l'entité existante sur place et ne recopie l'unité que si la nouvelle n'est pas vide (`homeassistant/components/esphome/sensor.py`, `_on_static_info_update`) : l'ancien `s` reste, et HA refuse d'écrire un état horodaté qui porte une unité.
+
+**Correctif :** recharger une fois l'intégration ESPHome de l'appareil (Paramètres → Appareils et services → ESPHome → l'appareil → ⋮ → Recharger), ou redémarrer Home Assistant. L'entité est reconstruite depuis la description de l'appareil, sans unité. Fait le 26/09/2026 à 21:39.
+
+### Alerte de plantage après un appui sur le bouton d'alimentation (06/10/2026)
+
+**Symptôme :** un appui court sur le bouton d'alimentation redémarre la tablette en ~10 s, puis Home Assistant envoie « Tab5 : journal du démarrage (plantage (chien de garde)) » sur le téléphone. Le journal ne contient que les lignes habituelles du démarrage (ESP-Hosted « not yet up », tactile, Wi-Fi qui s'associe), aucune ligne `esp32.crash`. En même temps, `Restart reason` affiche `Reboot request from esphome.ota`, alors que la dernière mise à jour date de plusieurs heures. Signalé dans la discussion #278 (tablette avec batterie, 3.7.0-rc.2), reproduit le même jour sur une tablette alimentée par l'USB.
+
+**Cause racine :** pas un plantage. Le firmware ne gère pas le bouton d'alimentation : c'est le matériel qui réinitialise la puce, et `esp_reset_reason()` lit `ESP_RST_WDT`, une raison que le journal comptait comme un plantage. Pour cette raison, le composant `debug` d'ESPHome affiche la source enregistrée par le dernier redémarrage *demandé* (`components/debug/debug_esp32.cpp`), qu'il n'efface jamais : un texte périmé.
+
+**Correctif (firmware après la 3.7.0-rc.3, et `packages/tab5_health.yaml`) :** un reset du chien de garde sans rapport de plantage est un démarrage normal : « bouton d'alimentation ou chien de garde RTC (rst 0x..) » dans le journal, aucun événement envoyé ; `Power button or RTC watchdog (rst 0x..)` dans l'entité, que la garde « reboot inattendu » laisse passer. Mettre à jour le firmware ET les fichiers HA : avec le nouveau firmware seul, l'ancienne garde alerterait sur le nouveau texte. Un chien de garde avec rapport de plantage alerte toujours. Détail dans [`debugging.md`](debugging.md#version-française).
+
+### Ajout de Tab5 dans HACS : « Dépôt introuvable », ou une boîte vide (07/10/2026)
+
+**Symptôme :** l'ajout du dépôt dans HACS, par le lien « Ouvrir Tab5 dans HACS » ou par *Custom repositories*, échoue avec « Dépôt introuvable » (« Repository not found » en anglais). Ou la boîte que HACS ouvre par le lien n'affiche qu'un titre (« Confirmer ? »), sans texte.
+
+**Cause racine :** HACS vérifie un dépôt sur sa dernière release complète, même avec les versions bêta activées, et seules les releases depuis la 3.7.0 portent l'intégration : avant la publication de la 3.7.0 (7 octobre 2026), HACS refusait ce dépôt (essayé ce jour-là, avec la 3.6.0 comme dernière release complète). La boîte vide vient de HACS : au premier chargement par le lien, ses textes ne sont pas encore chargés (vu avec HACS 2.0.5).
+
+**Correctif :** « Dépôt introuvable » : vérifier sur la [page des releases](https://github.com/Axellum/M5-Tab5-ESPHome-LVGL/releases) que la release marquée *Latest* est la 3.7.0 ou plus récente et, pour un ajout à la main, que le type est **Integration** ; puis réessayer. Boîte vide : recharger la page, la boîte revient avec ses textes, *Ajouter* à droite. Sans HACS, l'archive copiée à la main marche comme avant ([parties A à C](installation/home-assistant-files.md#a-télécharger-et-décompresser)).
+
+### HACS : « Download failed - 400 », « Got more than 8190 bytes when reading » (24/10/2026)
+
+**Symptôme :** sur la page de Tab5 dans HACS, *Download* (ou une mise à jour) échoue ; le journal de Home Assistant montre « Download failed - 400 » et « Got more than 8190 bytes when reading ». Signalé sur le forum Home Assistant le 24 octobre 2026.
+
+**Cause racine :** ni la tablette ni ce dépôt. Depuis le 23 octobre 2026, GitHub répond au téléchargement d'une release par une redirection qui porte un en-tête Content-Security-Policy d'environ 9 Ko (9 242 octets mesurés sur `tab5_hacs.zip` le 24 octobre), et HACS 2.0.5 refuse toute ligne d'en-tête de plus de 8 190 octets. Toutes les intégrations que HACS installe depuis une archive de release sont touchées. Suivi par HACS : [hacs/integration#5643](https://github.com/hacs/integration/issues/5643), correctif proposé dans [hacs/integration#5644](https://github.com/hacs/integration/pull/5644) (pas publié le 24 octobre).
+
+**Correctif :** attendre une version de HACS qui le corrige, puis *Download* de nouveau. En attendant, les fichiers se posent à la main, sans HACS : [parties A à C](installation/home-assistant-files.md#a-télécharger-et-décompresser). Ne pas copier l'intégration depuis le dépôt : elle porte le code mais pas les fichiers (« aucun fichier Home Assistant dans l'intégration », plus bas).
+
+### Intégration Tab5 (HACS) : un message dans Corrections
+
+**Symptôme :** après une mise à jour de l'intégration « Tab5 — fichiers HA · HA files » et un redémarrage, *Paramètres → Système → Corrections* montre un message dont le titre commence par « Tab5 ».
+
+**Cause racine :** au démarrage, l'intégration pose les fichiers de sa version, vérifie la configuration, recharge le YAML, puis vérifie que le capteur « Tab5 · HA files version » donne la nouvelle version ([mises à jour](installation/updates.md#fichiers-home-assistant)). Quand une étape ne finit pas comme prévu, elle le dit dans Corrections.
+
+**Correctif**, selon le message :
+
+- **« Tab5 : aucun fichier Home Assistant dans l'intégration »** : l'intégration a été copiée depuis le dépôt, qui a son code mais pas les fichiers. Installez-la par HACS ([avec HACS](installation/home-assistant-files.md#avec-hacs)), qui télécharge `tab5_hacs.zip` de la release, puis redémarrez.
+- **« Tab5 : Home Assistant ne charge pas les packages »** : les fichiers sont dans `config/packages/`, mais `configuration.yaml` n'a pas de ligne `packages:`. Ajoutez-la ([partie B](installation/home-assistant-files.md#b-une-ligne-dans-configurationyaml)), vérifiez la configuration, puis redémarrez.
+- **« Tab5 : redémarrez Home Assistant pour finir »** : les fichiers sont en place, mais un rechargement n'a pas suffi (une partie qui ne se charge qu'au démarrage, un rechargement qui a échoué, ou une configuration qui avait déjà une erreur). Ouvrez le message et validez : l'intégration vérifie la configuration, puis redémarre Home Assistant. Si elle répond que la configuration a une erreur, corrigez-la d'abord (*Outils de développement → YAML → Vérifier la configuration*). Avec « Mettre ensuite la tablette à jour » coché, le firmware de cette version part après ce redémarrage, dès que l'entité « Firmware » de la tablette le propose.
+- **« Tab5 : les fichiers X n'ont pas été installés »** : la vérification de la configuration a trouvé une nouvelle erreur ou un nouvel avertissement avec les nouveaux fichiers, ou leur écriture a échoué. Les fichiers précédents ont été remis : rien n'a changé, et le firmware de cette version n'est pas lancé. La raison est dans le journal (*Paramètres → Système → Journaux*, cherchez « tab5 »). Si elle est dans un de vos propres fichiers, corrigez-le ; sinon, merci de la signaler ([issues](https://github.com/Axellum/M5-Tab5-ESPHome-LVGL/issues)). Après une erreur de configuration, les mêmes fichiers ne sont pas réessayés à chaque démarrage de Home Assistant (le message revient, rien d'autre ne se passe) : une fois la cause corrigée, *Paramètres → Appareils et services → Tab5 → Configurer*, « Réinstaller maintenant les fichiers de cette version ». Une écriture ratée (disque plein…) est réessayée au démarrage suivant.
+- **« Tab5 : des fichiers déjà là ont été remplacés »** : des fichiers du Tab5 étaient déjà dans `config/` sans venir de l'intégration (copiés à la main depuis une archive, sans doute) et différaient de ceux de la release. Ils ont été remplacés quand même ; le message les liste et nomme le dossier de sauvegarde qui garde les anciens. Si vous en aviez modifié un exprès, recopiez votre changement depuis là, puis validez le message pour le fermer.
+- **« Tab5 : la tablette n'est pas passée en X »** : avec « Mettre ensuite la tablette à jour » coché, l'intégration a lancé la mise à jour du firmware 3 fois, à 15 minutes d'écart, et la tablette tourne toujours une autre version (mise à jour ratée sur la tablette, ou tablette éteinte ou déconnectée). Installez-la à la main : *Paramètres → Mises à jour*, ou l'entité « Firmware » de la tablette → *Installer*, tablette allumée et connectée. Le message disparaît dès que la tablette tourne cette version.
+
+Pour revenir à la main à des fichiers plus anciens : [remettre des fichiers plus anciens](installation/updates.md#remettre-à-la-main-des-fichiers-plus-anciens).
+
+### Home Assistant ne se reconnecte plus après une réinstallation avec effacement (19/10/2026)
+
+**Symptôme :** une tablette ou une Waveshare 7B que Home Assistant connaissait déjà est réinstallée depuis la [page d'installation](installation/flash.md#version-française) avec effacement (« Erase device » coché après *Install*, ou « Erase User Data »). Elle démarre et rejoint le Wi-Fi une fois celui-ci redonné, mais reste indisponible dans Home Assistant, même après un redémarrage de la tablette. *Paramètres → Appareils et services* la montre en haut, sous « Découvertes », cadre rouge et bouton *Reconfigurer* ; *Paramètres → Système → Corrections* dit « L'authentification a expiré pour M5Stack Tab5 Home Assistant HMI ». Vu sur la 7B de l'auteur le 19/10/2026 (3.9.0-rc.6 installée depuis la page).
+
+**Cause racine :** l'effacement vide la mémoire de la tablette (NVS) : la clé API que Home Assistant lui avait donnée, son Wi-Fi et les réglages de l'écran (thème, réveil, luminosité…). Home Assistant garde la clé et l'essaie ; la tablette, sans clé, la refuse. Home Assistant ouvre alors une réauthentification à l'étape `reauth_encryption_removed_confirm` (la tablette répond sans chiffrement alors que son entrée a une clé : `homeassistant/components/esphome/config_flow.py`, `async_step_reauth`) et ne se reconnecte plus tant qu'elle attend. La page d'installation propose l'effacement à toute *Install* : son manifeste porte `new_install_prompt_erase: true`, et ESP Web Tools 10.4.0 demande alors « Erase device » (case décochée) ; *Update* n'efface jamais. Le guide d'installation disait jusqu'ici qu'une tablette que Home Assistant connaît reçoit une nouvelle clé toute seule (un essai, le 28/09/2026) : le test d'installation à neuf montre que Home Assistant attend une confirmation, pareil avec Home Assistant 2026.8.3, 2026.9.4 et 2026.10.2.
+
+**Correctif, dans Home Assistant** (ce que fait le test d'installation à neuf, `tools/installation_ha/verifier_installation.py`) :
+
+1. Dans les 30 minutes qui suivent le démarrage de la tablette (sa fenêtre d'appairage) : *Paramètres → Appareils et services*, la carte de la tablette sous « Découvertes » → *Reconfigurer*. La boîte dit que l'appareil « a désactivé le chiffrement du transport » et demande de confirmer la suppression de « la clé de chiffrement » pour « autoriser les connexions non chiffrées » : *Valider*. Malgré ces mots, la tablette ne reste pas sans chiffrement. Fermer la boîte sans *Valider* ne change rien : la carte reste.
+2. Home Assistant redonne à la tablette la clé qu'il gardait, la même, et se reconnecte avec, en quelques secondes (moins de 7 s dans le test). Entités, automatisations et historique ne changent pas ; la correction disparaît.
+3. Remettez les réglages de l'écran depuis la page de l'appareil de la tablette ([réglages](installation/settings.md#version-française)) : leurs anciennes valeurs sont dans l'historique de chaque entité.
+
+Plus de 30 minutes depuis le démarrage de la tablette : redémarrez-la d'abord (un appui court sur reset, ou débranchez-la), puis *Reconfigurer*.
+
+*Recharger* (*Paramètres → Appareils et services → ESPHome* → la tablette → ⋮ → *Recharger*) abandonne la réauthentification qui attend, et Home Assistant en ouvre une nouvelle, à la même étape, tant que la fenêtre est ouverte (vérifié par le test). C'est le recours si la boîte demande une clé de chiffrement à la place, ce qui arrive, d'après le code de Home Assistant (pas essayé), quand il a ouvert la réauthentification pendant que la fenêtre de la tablette était fermée : redémarrez la tablette, puis *Recharger*, puis *Reconfigurer*.
+
+**Sans l'interface**, depuis un PC qui voit le partage `config` de Home Assistant : dans la fenêtre, `python tools/tab5_redonner_cle.py --host <IP de la tablette> --config-ha \\<IP de HA>\config` redonne à la tablette la clé que garde Home Assistant (lue dans `.storage/core.config_entries`, jamais affichée) ; puis *Recharger* l'entrée ESPHome de la tablette, et Home Assistant se reconnecte (moins de 3 s dans le test). C'est ainsi que la 7B de l'auteur a été réparée le 19/10/2026.
+
+**Pour l'éviter :** sur une tablette que Home Assistant connaît, *Update* ; si la page propose *Install*, laissez « Erase device » décoché.
+
+### Léger souffle continu, sur une tablette sans batterie (08/10/2026)
+
+**Symptôme :** un très léger souffle, continu, sort de la tablette. Couper le micro ou baisser le volume n'y change rien. Entendu sur la tablette de l'auteur, qui n'a pas de batterie et tourne sur un port USB de PC.
+
+**Ce que ce n'est pas** (essayé l'un après l'autre depuis Home Assistant, le 08/10/2026) :
+
+- l'ampli du haut-parleur : « Speaker Enable » coupé, souffle inchangé ;
+- le rétroéclairage : luminosité à 100 %, où sa PWM à 1 kHz ne hache plus, souffle inchangé (ce changement a coïncidé avec un redémarrage par sous-tension à 09:42, sur un port USB de PC ; cause non prouvée) ;
+- le micro : coupé, souffle inchangé.
+
+**Cause racine :** le chargeur de la batterie. Depuis la 3.6.0 (PR #303, 04/10/2026), le firmware met CHG_EN (PI4IOE 0x44 P7) à 1 à chaque démarrage. Sans batterie, le chargeur charge dans le vide : la tension lue par l'INA226 oscille entre 4,2 et 8,39 V, ou reste vers 5,70-5,76 V, et « Battery charging » dit oui. Avec un firmware d'essai qui exposait CHG_EN, couper le chargeur a fait disparaître le souffle ; l'INA226 lisait alors 1,83 à 1,94 V (quatre lectures, de 09:55 à 09:58) et l'état de charge est passé à « pas en charge ». Une observation de plus, une seule : pendant les 2 minutes où la tension lue était à 8,39 V, on n'entendait plus le souffle ; il est revenu avec les 5,70 V.
+
+**Correctif (prochaine version) :** le firmware cherche la batterie chargeur coupé, et laisse le chargeur coupé quand il n'y en a pas : plus de souffle, plus de faux « en charge ». Depuis le 10/10/2026, il ne l'allume même plus pendant le démarrage quand le démarrage précédent n'a vu aucune batterie. Comment il décide : [batterie](hardware.md#alimentation).
+
+**Contournement de la 3.6.0 à la dernière version publiée :** aucun de simple, désolé. Ces versions n'ont pas d'entité pour couper le chargeur, et le haut-parleur, le micro ou le volume n'y sont pour rien. Une batterie montée donne au chargeur quelque chose à charger (on n'a pas vérifié si une tablette avec batterie souffle aussi). Sinon, attendre la prochaine version.
+
+### La compilation échoue avec ESPHome 2026.10.0 : « was not declared in this scope » (21/10/2026)
+
+**Symptôme :** vous compilez le firmware vous-même avec ESPHome 2026.10.0, et la compilation s'arrête sur `main.cpp` avec des erreurs comme `'journal_reset_reason' was not declared in this scope`, `'tr' was not declared in this scope` ou `'g_alarm_cfg' was not declared in this scope` (13 erreurs sur `main`, le 21/10/2026). Le même commit compile avec la 2026.9.x. Le firmware publié n'est pas touché : il est compilé avec une version d'ESPHome figée (`ESPHOME_PUBLICATION` dans `.github/workflows/publication.yml`), pas avec la dernière.
+
+**Cause racine :** un changement d'ESPHome 2026.10.0, signalé dans [esphome/esphome#21303](https://github.com/esphome/esphome/issues/21303). Deux sortes de valeurs `!lambda` sont maintenant écrites dans `main.cpp` *avant* les `#include` des fichiers de `esphome: includes:`, et ne voient donc ni les fonctions, ni les constantes, ni les variables globales C++ du firmware :
+
+- les champs `data:` d'un `homeassistant.event`, rangés désormais dans une table en flash ([esphome/esphome#20237](https://github.com/esphome/esphome/pull/20237)) ;
+- la valeur d'une action ou d'une condition « apply » (`select.set_index`, `rtttl.play`, `media_player.volume_set`, `globals.set`…), devenue une fonction statique.
+
+Une action `lambda:` ordinaire reste écrite dans `setup()`, après les inclusions, et n'est pas touchée. Preuve : le même `main.cpp` généré avec la 2026.9.0 et la 2026.10.0 (`esphome compile --only-generate`), sur ce firmware et sur une config minimale hors du dépôt.
+
+**Correctif (prochaine version, [#535](https://github.com/Axellum/M5-Tab5-ESPHome-LVGL/pull/535)) :** ces valeurs ne nomment plus que des paramètres, des `id(…)` et la bibliothèque standard. Le journal de démarrage et l'annonce « Volet arrêté. » envoient leur événement depuis un script à paramètres, appelé par une `lambda:` ; le réveil choisit sa mélodie, joue sa sonnerie et règle son volume depuis une `lambda:`. Mêmes événements, mêmes champs ; le firmware compile avec la 2026.9 et la 2026.10. `tests/test_includes_esphome.py` échoue si une telle valeur nomme de nouveau notre C++ (règle de code 10, [`Tab5/README.md`](../Tab5/README.md)).
+
+**Contournement avant cette version :** compiler avec ESPHome 2026.9.x (`pip install esphome==2026.9.1`), ou avec le Device Builder en 2026.9.x.
+
+### Faux positifs à connaître (ne pas re-"corriger")
+
+- **Pagination prévisions sans bouclage** : intentionnel (0↔4), déjà "corrigé à tort" une fois par un audit LLM puis reverté. Voir [`docs/decisions/`](decisions/README.md).
+- **Entité `cover` à `unknown` côté HA** : peut être réel côté HA sans affecter le firmware si la carte concernée pilote son propre état via des globals + un script plutôt que de lire cette entité.
+- **`Uptime` décalé d'environ une minute par rapport au vrai reboot** : pas un problème d'horloge. L'état d'un capteur ESPHome est un float 32 bits, qui arrondit un horodatage Unix au multiple de 128 s le plus proche (±64 s). La garde de `packages/tab5_health.yaml` prévoit 5 min de marge pour cela.
+- **"Chevauchement" tactile signalé par un audit statique** : vérifier la géométrie pixel réelle avant de faire confiance au rapport — un cas signalé était décalé d'une douzaine de pixels, pas un vrai chevauchement.

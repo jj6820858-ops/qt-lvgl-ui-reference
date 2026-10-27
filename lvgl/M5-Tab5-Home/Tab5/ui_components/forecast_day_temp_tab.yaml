@@ -1,0 +1,30 @@
+# [AI-CONTEXT] Template paramétré (!include+vars), réutilisé 5x par forecast_daily.yaml
+# (j0..j4). Vars: idx, toggle_width (largeur du bouton toggle, varie car le texte
+# tmax/tmin change de largeur). Tap min/max → planning/horaires du jour dans la
+# carte centrale (6s) via show_temporary_planning(idx, …), qui calcule l'index jour
+# (page - 2) * 5 + idx depuis g_central_ctx.forecast_page (aligné sur refresh_daily_forecast).
+# Texte : "Auj. : 08:30-18:30" (orange recolor si embauche < 9h).
+obj:
+  align: BOTTOM_MID
+  y: 0
+  width: ${acc_t_temp_l}
+  height: ${acc_t_bas_h}
+  styles: style_transparent  # plus d'onglet en saillie (essai 10/10/2026) : le texte s'écrit sur la carte pleine cellule
+  scrollbar_mode: "OFF"
+  widgets:
+    - label: { id: "j${idx}_max", text: "-- / ", align: BOTTOM_MID, x: "${acc_t_max_x}", y: "${acc_t_texte_y}", text_font: roboto_32_b, styles: style_text_temp_max }
+    - label: { id: "j${idx}_min", text: "-- °", align: BOTTOM_MID, x: "${acc_t_min_x}", y: "${acc_t_texte_y}", text_font: roboto_32_b, styles: style_text_temp_min }
+    - button:
+        id: "btn_tj${idx}_toggle"
+        align: CENTER
+        y: 0
+        width: ${toggle_width}
+        height: ${acc_t_bas_h}
+        bg_opa: 0
+        border_width: 0
+        outline_width: 0
+        on_short_click:
+          - lambda: |-
+              show_temporary_planning(${idx}, id(lbl_planning_text),
+                                      id(page_title_wrapper), id(lbl_page_title),
+                                      id(plan_ligne_1), id(plan_ligne_2), g_central_ctx);

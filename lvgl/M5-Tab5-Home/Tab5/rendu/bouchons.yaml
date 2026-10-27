@@ -1,0 +1,360 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file Tab5/rendu/bouchons.yaml
+# @role Bouchons du rendu hors tablette (tab5-rendu-host.yaml, lot 7) : les id du
+#       matériel que l'interface référence, sans matériel derrière. Les packages
+#       tab5-hardware.yaml, ecran-*.yaml, tab5-sensors-diagnostics.yaml et
+#       tab5-imu.yaml ne sont pas chargés ; ce fichier fournit ce que l'interface
+#       y prend. L'assistant vocal (tab5-assist.yaml) est chargé, mais ses composants
+#       matériels sont remplacés par Tab5/rendu/composants/.
+# ============================================================================
+
+# L'écran : un affichage en mémoire (plateforme host), même taille que la dalle de la
+# carte et même rotation côté LVGL (tab5-styles.yaml) : 720×1280 tournée de 270° pour le
+# Tab5, 1024×600 tournée de 180° pour la Waveshare 7B (Tab5/paquets/geometrie-<carte>.yaml,
+# ADR-0061). snapshot.take écrit un BMP de la dalle, remis à l'endroit par
+# tools/rendu/capturer.py (--carte).
+display:
+  - platform: snapshot
+    id: tab5_display
+    dimensions:
+      width: ${carte_dalle_l}
+      height: ${carte_dalle_h}
+    update_interval: never
+
+# Heure de la machine (fuseau de la compilation). sntp_time porte le tick minute de
+# l'horloge, comme sur la tablette (tab5-sensors-diagnostics.yaml).
+time:
+  - platform: host
+    id: sntp_time
+    on_time_sync:
+      then:
+        - lambda: |-
+            auto t_now = id(sntp_time).now();
+            if (t_now.is_valid()) {
+              update_clock_date_ui(id(lbl_date),
+                  t_now.hour, t_now.minute, t_now.day_of_week, t_now.day_of_month, t_now.month);
+            }
+    on_time:
+      - seconds: 0
+        minutes: "*"
+        then:
+          - lambda: |-
+              auto t_now = id(sntp_time).now();
+              if (t_now.is_valid()) {
+                update_clock_date_ui(id(lbl_date),
+                    t_now.hour, t_now.minute, t_now.day_of_week, t_now.day_of_month, t_now.month);
+              }
+              rain_phrase_tick();
+  - platform: host
+    id: rtc_time
+
+# Rétroéclairage : un variateur sans broche (la veille de l'écran le pilote).
+output:
+  - platform: template
+    id: backlight_pwm
+    type: float
+    write_action: []
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    id: backlight
+    restore_mode: ALWAYS_ON
+
+# Audio : muet, mais avec les id et les actions d'ESPHome (media_player.*, speaker.*,
+# microphone.*, rtttl.*) que l'interface et le réveil appellent.
+speaker:
+  - platform: rendu_muet
+    id: tab5_speaker
+
+microphone:
+  - platform: rendu_muet
+    id: tab5_microphone
+
+media_player:
+  - platform: rendu_muet
+    id: speaker_player
+    name: "Tab5 Media Player"
+    internal: true
+
+switch:
+  # Ampli (broche de l'expander sur la tablette) : un interrupteur sans matériel.
+  - id: !extend speaker_enable
+    platform: template
+    pin: !remove
+    optimistic: true
+  # « Tab5 Tap-to-Wake » vit dans tab5-imu.yaml (IMU, absent du rendu) : le popup
+  # Réglages le lit et l'écrit (« Rallumer l'écran d'une tape »).
+  - platform: template
+    id: tab5_tap_to_wake
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_state:
+      - script.execute: tab5_reglages_sync_ui
+
+binary_sensor:
+  # Prise casque (expander) : jamais branchée ici.
+  - id: !extend headphone_detect
+    platform: template
+    pin: !remove
+  # Liaison avec HA : celle de l'API du rendu (le mode démo s'y connecte). Même nom que
+  # sur la tablette (tab5-sensors-diagnostics.yaml) : la poussée complète de
+  # packages/tab5_push.yaml lit binary_sensor.<appareil>_ha_api_status à la connexion,
+  # et sa condition échoue quand l'entité manque (job installation-ha, 28/09/2026).
+  - platform: status
+    name: "HA API Status"
+    id: status_ha
+    # Icône « HA » colorée à la connexion, comme sur la tablette. Sans elle, la repeinte
+    # du thème la peignait selon la liaison du moment : grise au démarrage à froid
+    # (avant le capturer), bleue à chaud (capturer connecté) — tâche « clair », 04/10/2026.
+    on_state:
+      - lambda: 'set_icon_active_ui(id(icon_ha), x, UIColor.INFO, UIColor.INACTIVE);'
+
+# Capteurs lus par la console système : valeurs fixes, sans Wi-Fi ni sonde.
+sensor:
+  # Temps actif figé (1 h 02) : le vrai suivait l'horloge monotone et la capture de la
+  # console changeait d'une minute selon le run (vu le 27/09/2026).
+  - platform: template
+    id: sys_uptime
+    internal: true
+    lambda: 'return 3720.0f;'
+  - platform: template
+    id: sys_wifi_rssi
+    internal: true
+    lambda: 'return -55.0f;'
+  - platform: template
+    id: sys_core_temp
+    internal: true
+    lambda: 'return 45.0f;'
+  - platform: template
+    id: sys_loop_time
+    internal: true
+    lambda: 'return 30.0f;'
+
+text_sensor:
+  - platform: template
+    id: sys_wifi_ssid
+    internal: true
+    lambda: 'return {"Rendu"};'
+  - platform: template
+    id: sys_wifi_ip
+    internal: true
+    lambda: 'return {"127.0.0.1"};'
+  # Mesure de chaque capture (action rendu_capture), lue par tools/rendu/capturer.py.
+  - platform: template
+    id: rendu_mesure
+    name: "Rendu mesure"
+    update_interval: never
+
+button:
+  - platform: template
+    id: btn_restart
+    internal: true
+
+# « Tab5 Limite de charge » vit dans tab5-sensors-diagnostics.yaml (chargeur, absent du
+# rendu) : la page Batterie des Réglages la lit et l'écrit (08/10/2026). Mêmes options,
+# dans le même ordre (LimiteCharge, tab5_batterie.h).
+select:
+  - platform: template
+    id: tab5_limite_charge
+    optimistic: true
+    options:
+      - "100 %"
+      - "80 %"
+    initial_option: "100 %"
+    on_value:
+      - script.execute: tab5_reglages_sync_ui
+  # « Tab5 Mode de charge » et « Tab5 Wi-Fi éco » (09/10/2026, ADR-0045) : même chose
+  # (chargeur et Wi-Fi absents du rendu), mêmes options dans le même ordre.
+  - platform: template
+    id: tab5_mode_charge
+    optimistic: true
+    options:
+      - "Classic"
+      - "Fast"
+    initial_option: "Classic"
+    on_value:
+      - script.execute: tab5_reglages_sync_ui
+  - platform: template
+    id: tab5_wifi_eco
+    optimistic: true
+    options:
+      - "Never"
+      - "On battery"
+      - "Always"
+    initial_option: "Never"
+    on_value:
+      - script.execute: tab5_reglages_sync_ui
+
+# Capture de l'écran, appelée par tools/rendu/capturer.py après chaque scène. S'ajoute
+# aux actions de tab5-api-logic.yaml (les listes `services:` des packages se suivent).
+api:
+  services:
+    - service: rendu_capture
+      description: "Rendu hors tablette (lot 7) : écrit l'écran courant dans un BMP."
+      variables:
+        fichier:
+          type: string
+          description: "Nom du fichier, sans extension (dossier : ESPHOME_SNAPSHOT_DIR)."
+          example: "scene_1"
+      then:
+        - snapshot.take:
+            id: tab5_display
+            filename: !lambda 'return fichier;'
+        # Ce que montre la capture (Tab5/rendu/rendu_mesure.h, lot 2 du portage 1024×600) :
+        # « fichier|écran|coupés|hors écran|barres de défilement » (barres : 18/10/2026).
+        # L'écran est nommé comme « Écran courant »
+        # (tab5-navigation.yaml) ; un popup ouvert est mesuré seul.
+        - lambda: |-
+            if (!ModalRegistry::ready()) id(tab5_modal_registry_init).execute();
+            char ecran[64];
+            lv_obj_t* racine = nullptr;
+            if (!id(page_main)->is_showing()) {
+              const char* jeu = GameRegistry::open_name();
+              if (jeu != nullptr) snprintf(ecran, sizeof ecran, "Game · %s", jeu);
+              else snprintf(ecran, sizeof ecran, "Arcade");
+            } else {
+              const char* modal = ModalRegistry::visible_name();
+              snprintf(ecran, sizeof ecran, "%s", modal != nullptr ? modal : "Home");
+              if (modal != nullptr) racine = ModalRegistry::find(modal);
+            }
+            const RenduCoupes r = rendu_mesurer(racine, fichier.c_str());
+            char texte[160];
+            snprintf(texte, sizeof texte, "%s|%s|%d|%d|%d", fichier.c_str(), ecran, r.coupes, r.hors, r.barres);
+            id(rendu_mesure).publish_state(texte);
+    # La carte centrale change de panneau toutes les 8 s (tab5_central_rotator_auto) :
+    # une capture tombait parfois dans le fondu de 190 ms entre deux panneaux, ou sur
+    # un autre panneau selon le nombre de tours déjà faits (vu le 27/09/2026, scène 2
+    # en anglais). tools/rendu/capturer.py appelle donc cette action avant chaque
+    # capture : le rotateur s'arrête et la carte avance, un pas à la fois comme un
+    # appui, jusqu'au panneau demandé (ordre de central_wraps(), tab5_central.cpp).
+    - service: rendu_panneau
+      description: "Rendu hors tablette (lot 7) : arrête le rotateur de la carte centrale sur un panneau."
+      variables:
+        panneau:
+          type: int
+          description: "0 planning, 1 pluie, 2 vigilance, 3 info, 4-7 alertes HA (un panneau inactif est sauté)."
+          example: "1"
+      then:
+        - script.stop: tab5_central_rotator_auto
+        # La rangée sous l'horloge tourne avec ce rotateur (ADR-0031) : arrêtée avec lui,
+        # sur sa première ligne, compte des tours à zéro (sinon une ligne changerait au
+        # milieu des écrans, selon les tours déjà faits).
+        - lambda: 'rangee_recaler();'
+        - repeat:
+            count: 8
+            then:
+              - if:
+                  condition:
+                    lambda: 'return g_central_ctx.current_panel != panneau;'
+                  then:
+                    - lambda: 'advance_central_panel_rotator(g_central_ctx);'
+                    - delay: 500ms
+    # Doigt virtuel (Tab5/rendu/rendu_doigt.h) : tools/rendu/capturer.py ouvre chaque
+    # fenêtre, jeu et sous-fenêtre en touchant l'écran comme on le ferait sur la dalle,
+    # aux coordonnées des captures (paysage 1280×720). Mêmes gestionnaires que le doigt :
+    # on_click, on_long_press, recherche du widget touché par LVGL.
+    - service: rendu_toucher
+      description: "Rendu hors tablette : appui en (x, y), levé après `duree` ms (1000 et plus : appui long)."
+      variables:
+        x: int
+        y: int
+        duree: int
+      then:
+        - lambda: 'rendu_doigt_poser(x, y);'
+        - delay: !lambda 'return duree;'
+        - lambda: 'rendu_doigt_lever();'
+    # Batterie de la tablette (04/10/2026) : tab5-sensors-diagnostics.yaml n'est pas
+    # chargé ici, l'action passe au C++ ce que lui passeraient l'INA226 et CHG_STAT, et
+    # actionne le vrai interrupteur « Tab5 Batterie montée » (tab5-ha-controls.yaml).
+    # La tension (05/10/2026) passe par la vraie décision « batterie détectée »
+    # (batterie_tension_ui) : chaque appel compte comme une lecture chargeur coupé depuis
+    # longtemps (chargeur_rendu_coupe, tab5_batterie.h, 08/10/2026), la présence suit la
+    # tension de chaque écran (sous 3,0 V : pas de batterie).
+    - service: rendu_batterie
+      description: "Rendu hors tablette : icône de la batterie du bandeau (montée, niveau en %, en charge, tension en V)."
+      variables:
+        montee: bool
+        niveau: float
+        en_charge: bool
+        tension: float
+      then:
+        - lambda: |-
+            chargeur_rendu_coupe(millis());
+            batterie_tension_ui(tension, millis());
+            batterie_niveau_ui(niveau);
+            batterie_charge_ui(en_charge);
+            // Page Batterie des Réglages, si elle est affichée (sur la tablette :
+            // l'interval 2 s de tab5-sensors-diagnostics.yaml).
+            reglages_batterie_peindre();
+        - if:
+            condition:
+              lambda: 'return montee;'
+            then:
+              - switch.turn_on: tab5_batterie_montee
+            else:
+              - switch.turn_off: tab5_batterie_montee
+    # Appareils des pièces sur les prévisions (05/10/2026, discussion #278) : actionne le
+    # vrai interrupteur « Tab5 Appareils sur la météo » (tab5-ha-controls.yaml).
+    - service: rendu_appareils_meteo
+      description: "Rendu hors tablette : appareils des pièces montrés ou non sur les prévisions."
+      variables:
+        montres: bool
+      then:
+        - if:
+            condition:
+              lambda: 'return montres;'
+            then:
+              - switch.turn_on: tab5_appareils_meteo
+            else:
+              - switch.turn_off: tab5_appareils_meteo
+    # Prévisions périmées (08/10/2026) : l'heure du rendu est figée, aucune poussée ne
+    # vieillit. Cette action date la dernière poussée des prévisions de `minutes` plus
+    # tôt, comme si HA s'était tu depuis ; 0 la remet à maintenant (mention masquée).
+    - service: rendu_previsions_recues
+      description: "Rendu hors tablette : dernière poussée des prévisions il y a `minutes` minutes."
+      variables:
+        minutes: int
+      then:
+        - lambda: 'previsions_recues(id(previsions_perimees), id(lbl_previsions_perimees), minutes);'
+    # Thèmes (ADR-0029) : la tablette écrit ses préférences toutes les minutes, le rendu
+    # arrêté par `kill` jamais. tools/rendu/capturer.py (--puis-mode-theme) enregistre
+    # ainsi le mode choisi avant l'arrêt : le lancement suivant démarre dans ce mode.
+    - service: rendu_enregistrer
+      description: "Rendu hors tablette : écrit tout de suite les préférences (choix gardés)."
+      then:
+        - lambda: 'global_preferences->sync();'
+    # Ouverture d'un écran sans le toucher (lot 2 du portage 1024×600, ADR-0061) : le même
+    # chemin que « Aller à l'écran » (tab5_ecran_ouvrir, la valeur de l'enum Ecran), mais
+    # aussi pour l'Arcade, qui n'est pas une option du select. tools/rendu/ecrans.py s'en
+    # sert sur une carte dont l'accueil cache le bouton qui ouvre l'écran (pour_carte).
+    - service: rendu_ecran
+      description: "Rendu hors tablette : ouvre l'écran `ecran` (valeur de l'enum Ecran, Arcade comprise)."
+      variables:
+        ecran: int
+      then:
+        - script.execute:
+            id: tab5_ecran_ouvrir
+            ecran: !lambda 'return ecran;'
+    - service: rendu_glisser
+      description: "Rendu hors tablette : geste de (x1, y1) à (x2, y2), en 10 pas de 30 ms."
+      variables:
+        x1: int
+        y1: int
+        x2: int
+        y2: int
+      then:
+        - repeat:
+            count: 11
+            then:
+              - lambda: |-
+                  rendu_doigt_poser(x1 + (x2 - x1) * (int32_t) iteration / 10,
+                                    y1 + (y2 - y1) * (int32_t) iteration / 10);
+              - delay: 30ms
+        - lambda: 'rendu_doigt_lever();'
+
+script:
+  # Journal des démarrages (tab5_journal.cpp) : rien à envoyer depuis le rendu.
+  - id: tab5_journal_envoi
+    then: []

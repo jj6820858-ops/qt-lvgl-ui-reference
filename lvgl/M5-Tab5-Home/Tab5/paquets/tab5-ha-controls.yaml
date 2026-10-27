@@ -1,0 +1,328 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file tab5-ha-controls.yaml
+# @role Entités ESPHome supplémentaires exposées à Home Assistant pour régler
+#       l'écran depuis un dashboard HA (« Console Tab5 »), sans être devant la
+#       dalle : volume, réglages gardés en mémoire (langue, interrupteurs « Tab5
+#       Batterie montée », « Tab5 Appareils sur la météo » et « Tab5 Rallumer
+#       l'écran à Okay Nabu », lu par tab5-assist.yaml), qui passent chacun par une
+#       fonction C++ nommée (règle 2), rechargement du calendrier, et l'extinction
+#       automatique de l'écran (select « Tab5 Extinction auto de l'écran » + son
+#       interval de 10 s : réveil, assistant vocal, jeu et OTA l'empêchent), et sa nuit
+#       (« Tab5 Nuit (écran éteint) », tenu par HA d'après « Tab5 · extinction de nuit »).
+# @architecture_constraint Ce fichier ne construit AUCUN widget LVGL. La navigation
+#       (« Écran courant », « Aller à l'écran », tab5_ecran_ouvrir, registre des
+#       fenêtres) est dans tab5-navigation.yaml depuis le 08/10/2026.
+# @ai_instruction Le volume ne s'écrit JAMAIS directement ici : tout passe par
+#       `script.tab5_volume_apply` (tab5-scripts.yaml), point d'entrée unique
+#       partagé avec les deux sliders de l'écran.
+# ============================================================================
+
+number:
+  # Volume système exposé à HA. Le getter lit `system_volume` (source de vérité
+  # de l'écran) plutôt que `speaker_player->volume` : quand le son est coupé, le
+  # haut-parleur est à 0 mais le volume mémorisé — celui que le démute va
+  # restaurer, et celui que montrent les sliders — ne l'est pas.
+  - platform: template
+    id: tab5_volume_pct
+    name: "Volume"
+    icon: mdi:volume-high
+    unit_of_measurement: "%"
+    entity_category: config
+    min_value: 0
+    max_value: 100
+    step: 1
+    # Publié par tab5_volume_apply (tab5-scripts.yaml), point d'entrée unique de
+    # tous les changements, rattrapage de 5 s compris : le relire chaque minute
+    # renvoyait la même valeur à HA (1 440 messages/jour ; audit 26/09, lot 3).
+    update_interval: never
+    lambda: 'return id(system_volume) * 100.0f;'
+    set_action:
+      - script.execute:
+          id: tab5_volume_apply
+          vol: !lambda 'return x / 100.0f;'
+          push_device: true
+
+select:
+  # Langue de l'écran (lot 4 de l'audit « ouverture », 27/09/2026). Les options sont
+  # les noms natifs de Tab5/lang/*.yaml, DANS L'ORDRE de leurs `_index` : la tablette
+  # mémorise l'INDEX choisi (restore_value), donc une nouvelle langue s'ajoute
+  # TOUJOURS à la fin (tests/test_i18n.py vérifie l'ordre). Seul l'écran change :
+  # noms d'entités et codes vus par HA ne changent pas, options de select et états
+  # texte vus par HA sont en anglais dans toutes les langues (ADR-0070, 24/10/2026).
+  # Ces options-ci sont l'exception : chaque langue sous son nom natif.
+  # Au démarrage, la valeur restaurée règle la langue AVANT la traduction des textes
+  # du YAML (on_boot -100). Un changement en cours de route redémarre la tablette :
+  # les textes posés par le YAML ne se traduisent qu'au démarrage.
+  - platform: template
+    id: tab5_langue
+    name: "Langue"
+    icon: mdi:translate
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - "Français"
+      - "English"
+      - "Deutsch"
+      - "Nederlands"
+      - "Español"
+      - "Italiano"
+      - "Türkçe"
+    # Défaut d'un premier démarrage : `tab5_langue:` dans Tab5/user_entities.yaml
+    # (nom natif, par ex. « English »), sinon le français.
+    initial_option: "${ tab5_langue | default('Français') }"
+    on_value:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete) && i != i18n_language();'
+          then:
+            - logger.log:
+                format: "Langue de l'ecran : %s -> redemarrage"
+                args: ['x.c_str()']
+            - delay: 1s
+            - lambda: 'App.safe_reboot();'
+          else:
+            - lambda: 'i18n_set_language(i);'
+
+  # Extinction automatique de l'écran (06/10/2026, discussion #278 : « sur batterie ou
+  # sur USB, l'écran ne devrait se réveiller que quand on le touche »). Après ce délai
+  # sans toucher la dalle, l'écran s'éteint comme quand HA l'éteint (light.turn_off de
+  # `backlight`, qui met LVGL en pause) ; le toucher, la tape (« Tab5 Tap-to-Wake »),
+  # HA et le réveil le rallument comme avant. « Jamais » par défaut : rien ne change
+  # pour qui ne choisit rien. Les options sont lues par HA : en anglais (ADR-0070 ;
+  # « Jamais » avant le 24/10/2026), jamais traduites dans la langue de l'écran. La
+  # tablette garde l'INDEX choisi (restore_value) : une option nouvelle s'ajoute à la
+  # fin, et DELAIS_MIN de l'interval en bas de ce fichier suit le même ordre
+  # (tests/test_extinction_auto.py).
+  - platform: template
+    id: tab5_extinction_auto
+    name: "Tab5 Extinction auto de l'écran"
+    icon: mdi:monitor-off
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - "Never"
+      - "1 min"
+      - "2 min"
+      - "5 min"
+      - "10 min"
+      - "30 min"
+    initial_option: "Never"
+    on_value:
+      # Popup Réglages (tab5-reglages.yaml) : repeint s'il a déjà été ouvert.
+      - script.execute: tab5_reglages_sync_ui
+
+switch:
+  # Extinction auto sur batterie seulement (13/10/2026, discussion #278 : la tablette
+  # portée dans la maison, 1,74 W écran allumé contre 1,23 W éteint). Allumé, le délai
+  # du select « Tab5 Extinction auto de l'écran » ne s'applique que quand la tablette
+  # tire sur sa batterie (economie_sur_batterie(), le courant de l'INA226, comme le
+  # mode économie) ; sur secteur, l'écran reste allumé (sauf la nuit, « Tab5 Nuit (écran
+  # éteint) » plus bas). Éteint par défaut : rien ne
+  # change pour qui ne choisit rien (tests/test_extinction_auto.py).
+  - platform: template
+    id: tab5_extinction_sur_batterie
+    name: "Tab5 Extinction auto sur batterie seulement"
+    icon: mdi:battery-clock
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  # Nuit de l'écran (16/10/2026, audit anti-casse : une image fixe 24 h/24 marque une dalle,
+  # les fabricants conseillent de l'éteindre aux heures creuses). Tenu par Home Assistant
+  # d'après la liste « Tab5 · extinction de nuit » (packages/tab5_reglages.yaml et
+  # tab5_push.yaml, « Tab5 — extinction de nuit ») : allumé au début de la plage, éteint à la
+  # fin, et à chaque connexion. Allumé, l'écran s'éteint après 1 min sans toucher, quel que
+  # soit « Tab5 Extinction auto de l'écran » (un délai plus court reste), sur secteur comme
+  # sur batterie, avec les mêmes exceptions (réveil, vocal, jeu, mise à jour) ; un toucher le
+  # rallume comme d'habitude. Éteint par la nuit, il se rallume seul quand elle finit.
+  # Éteint au démarrage (ALWAYS_OFF) : HA le renvoie à la connexion ; sans HA, pas de nuit.
+  - platform: template
+    id: tab5_nuit_ecran
+    name: "Tab5 Nuit (écran éteint)"
+    icon: mdi:weather-night
+    entity_category: config
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      - if:
+          condition:
+            lambda: 'return id(ecran_eteint_par_nuit) && !id(backlight).remote_values.is_on();'
+          then:
+            - logger.log:
+                level: INFO
+                format: "Fin de la nuit : ecran rallume"
+            - light.turn_on: backlight
+      - globals.set: { id: ecran_eteint_par_nuit, value: 'false' }
+
+  # Batterie de la tablette montée (04/10/2026) : montre son icône dans le bandeau
+  # d'état, en dernier (niveau, charge et tension : tab5-sensors-diagnostics.yaml).
+  # Un réglage : montrer l'icône ou pas. Allumé, l'icône devient une prise quand la
+  # tension dit qu'il n'y a pas de batterie (« Tab5 Batterie détectée », 05/10/2026 ;
+  # sans batterie, le chargeur dit pourtant « en charge »). Éteint par défaut, gardé en
+  # mémoire d'un démarrage à l'autre.
+  # Ici avec les autres réglages de l'écran : le rendu hors tablette, qui charge ce
+  # fichier mais pas celui des diagnostics, peut ainsi montrer l'icône.
+  - platform: template
+    id: tab5_batterie_montee
+    name: "Tab5 Batterie montée"
+    icon: mdi:battery
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_state:
+      - lambda: 'batterie_montee_ui(x);'
+      # Page Batterie des Réglages (tab5-reglages.yaml) : repeinte s'il a déjà été ouvert.
+      - script.execute: tab5_reglages_sync_ui
+
+  # Fond de la tuile de l'horloge (10/10/2026, demande d'Axel) : éteint, la tuile n'a ni
+  # dégradé ni fond (la bordure reste). Éteint par défaut, gardé en mémoire, appliqué sans
+  # redémarrage ; réglé depuis Réglages ▸ Apparence (REGLAGE_HORLOGE_FOND).
+  - platform: template
+    id: tab5_horloge_fond
+    name: "Tab5 Fond de l'horloge"
+    icon: mdi:clock-outline
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_state:
+      - lambda: 'horloge_fond_ui(id(clock_tile), x);'
+      - script.execute: tab5_reglages_sync_ui
+
+  # Appareils des pièces sur les prévisions (05/10/2026, discussion #278 : un
+  # utilisateur préfère des cartes météo seules). Éteint, le mode météo ne montre plus
+  # les épaules ni le bouton d'action des tuiles, et le titre d'une tuile de volet ne
+  # bascule plus son sens ; le mode HA (bouton « HA ») montre toujours les pièces.
+  # Allumé par défaut (ADR-0023), gardé en mémoire, appliqué sans redémarrage.
+  - platform: template
+    id: tab5_appareils_meteo
+    name: "Tab5 Appareils sur la météo"
+    icon: mdi:lightbulb-outline
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_state:
+      - lambda: 'tuiles_appareils_meteo(x);'
+
+  # « Okay Nabu » rallume l'écran éteint (06/10/2026, demande d'Axel avec l'extinction
+  # auto, discussion #278). Lu par la branche START_PIPELINE de tab5_wake_word_dispatch
+  # (tab5-assist.yaml) : seulement quand le pipeline démarre vraiment (mot de réveil
+  # actif, HA joignable), jamais sur « Stop ». Allumé par défaut ; éteint, l'écran reste
+  # noir et la réponse n'est que parlée (comme avant), pour qui ne veut le rallumer qu'au
+  # toucher : le mot de réveil se déclenche parfois seul (télé, conversation).
+  - platform: template
+    id: tab5_ecran_okay_nabu
+    name: "Tab5 Rallumer l'écran à Okay Nabu"
+    icon: mdi:account-voice
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_state:
+      - script.execute: tab5_reglages_sync_ui
+
+button:
+  # Recharge le mois courant + M+1 du calendrier (même script que le pré-fetch
+  # de boot). À utiliser quand un RDV ajouté dans HA n'apparaît pas encore.
+  # `force` : redemande même un mois reçu il y a moins de 30 s (tab5-calendar.yaml).
+  - platform: template
+    id: tab5_reload_calendar
+    name: "Recharger le calendrier"
+    icon: mdi:calendar-refresh
+    entity_category: config
+    on_press:
+      - script.execute:
+          id: tab5_cal_prefetch
+          force: true
+
+interval:
+  # Rattrapage du volume changé côté HA directement sur le media_player (slider
+  # du dashboard, app mobile, automatisation). ESPHome n'expose aucun trigger
+  # `on_volume` sur media_player, donc on compare. Sans ça, `system_volume`
+  # resterait sur l'ancienne valeur : les sliders de l'écran afficheraient un %
+  # faux et le prochain démute écraserait le réglage venu de HA.
+  # `!system_muted` est indispensable : quand le son est coupé, le haut-parleur
+  # est à 0 alors que `system_volume` porte la valeur à restaurer — comparer les
+  # deux dans cet état effacerait le volume mémorisé.
+  # La fenêtre de garde de 2 s l'est tout autant : `media_player.volume_set` est
+  # débouncé de 150 ms et, pendant un glissement, ne part qu'une fois le doigt
+  # immobile. Le haut-parleur reste donc en retard sur `system_volume` pendant
+  # tout le geste — un tick tombant dans cette fenêtre recopierait le niveau
+  # périmé par-dessus le réglage en cours et ferait sauter le slider sous le
+  # doigt. `volume_push_ts` est réarmé à CHAQUE tick du glissement, la garde
+  # couvre donc le geste entier, pas seulement son premier instant.
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return !id(system_muted) &&
+                     (millis() - id(volume_push_ts)) > 2000 &&
+                     fabsf(id(speaker_player)->volume - id(system_volume)) > 0.01f;
+          then:
+            - script.execute:
+                id: tab5_volume_apply
+                vol: !lambda 'return id(speaker_player)->volume;'
+                push_device: false
+
+  # Extinction automatique de l'écran (select « Tab5 Extinction auto de l'écran »
+  # plus haut). Vérifiée toutes les 10 s : à « 1 min », l'écran s'éteint entre 60 et
+  # 70 s après le dernier toucher. L'inactivité compte depuis le plus récent de deux
+  # instants : le dernier appui lu par LVGL (ui_idle_ms(), le compteur du retour à
+  # l'accueil, aussi remis à zéro par chaque étape du pipeline vocal) et le dernier
+  # allumage (ecran_allume_ms, posé par on_turn_on de `backlight`, tab5-hardware.yaml) :
+  # LVGL est en pause écran éteint, un rallumage par HA ou par la tape laisserait
+  # sinon une inactivité ancienne et l'écran se rééteindrait aussitôt.
+  # Jamais pendant :
+  #   - le réveil qui sonne (`alarm_ringing`, tab5-alarm.yaml) ;
+  #   - l'assistant vocal : pipeline en cours (`va` is_running/is_continuous, comme la
+  #     condition `voice_assistant.is_running`), ou réponse parlée pas finie
+  #     (`va_stop_armed`, armé à l'écoute, désarmé quand le haut-parleur se tait) ;
+  #   - un jeu de l'Arcade ouvert (GameRegistry::any_open() : une partie en pause,
+  #     c'est zéro toucher pendant des minutes, comme pour le retour à l'accueil) ;
+  #   - une mise à jour du firmware (`ota_en_cours`).
+  # Pas avant la fin du démarrage (`boot_complete`). Avec « Tab5 Extinction auto sur
+  # batterie seulement », pas sur secteur non plus (après la liste : le mode économie
+  # la lit telle quelle). La nuit (« Tab5 Nuit (écran éteint) », tenu par HA), 1 min sans
+  # toucher suffit, même sur « Jamais » ou sur secteur ; les exceptions restent.
+  # Cette liste sert aussi au mode économie (tab5-economie.yaml), qui n'assombrit pas
+  # l'écran pour les mêmes raisons : la condition la range dans `ecran_veille_permise`
+  # avant de regarder le délai, que l'extinction auto soit choisie ou pas.
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              const bool permise =
+                  id(boot_complete) && id(backlight).remote_values.is_on() &&
+                  !id(alarm_ringing) &&
+                  !(id(va)->is_running() || id(va)->is_continuous() || id(va_stop_armed)) &&
+                  !GameRegistry::any_open() &&
+                  !id(ota_en_cours);
+              id(ecran_veille_permise) = permise;
+              // Délai de chaque option du select, dans le même ordre (0 = « Jamais »).
+              constexpr uint32_t DELAIS_MIN[] = {0, 1, 2, 5, 10, 30};
+              constexpr size_t NB_DELAIS = sizeof(DELAIS_MIN) / sizeof(DELAIS_MIN[0]);
+              // Nuit (« Tab5 Nuit (écran éteint) », tenu par HA) : 1 min, ou moins si choisi.
+              constexpr uint32_t NUIT_MIN = 1;
+              if (!permise) return false;
+              const auto choix = id(tab5_extinction_auto).active_index();
+              uint32_t delai_min = 0;
+              if (choix.has_value() && *choix != 0 && *choix < NB_DELAIS) delai_min = DELAIS_MIN[*choix];
+              // « Sur batterie seulement » : sur secteur, pas d'extinction (sauf la nuit).
+              if (id(tab5_extinction_sur_batterie).state && !economie_sur_batterie()) delai_min = 0;
+              if (id(tab5_nuit_ecran).state) delai_min = delai_min != 0 ? std::min(delai_min, NUIT_MIN) : NUIT_MIN;
+              if (delai_min == 0) return false;
+              const uint32_t depuis_allumage = millis() - id(ecran_allume_ms);
+              const uint32_t inactif = std::min(ui_idle_ms(), depuis_allumage);
+              return inactif >= delai_min * 60000u;
+          then:
+            # [AI-DEBUG] « Pourquoi l'écran s'est éteint ? » : cette ligne le dit.
+            - logger.log:
+                level: INFO
+                format: "Extinction auto de l'ecran (inactivite%s)"
+                args: ['id(tab5_nuit_ecran).state ? ", nuit" : ""']
+            # La nuit, l'écran se rallumera quand elle finit (tab5_nuit_ecran).
+            - lambda: 'if (id(tab5_nuit_ecran).state) id(ecran_eteint_par_nuit) = true;'
+            - light.turn_off: backlight

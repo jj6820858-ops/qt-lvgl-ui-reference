@@ -1,0 +1,73 @@
+# ═══════════════════════════════════════════════════════
+# [AI-CONTEXT]
+# @file chess_game.yaml
+# @role Page LVGL dédiée du jeu « Roi Noir » (echiquier FIDE + IA embarquee).
+# @architecture_constraint Page LVGL autonome (page_chess dans tab5-lvgl.yaml,
+#     skip: true). Pas de modal_scrim/modal_header — flux de jeu plein cadre.
+#     La sortie du jeu se fait par le hub (« Quitter ») qui navigue vers
+#     page_arcade via lv_screen_load() en C++.
+# @ai_instruction Ce fichier ne declare QUE 4 conteneurs vides. Tout le contenu
+#     (cases, pieces, coordonnees, HUD, liste des coups, boutons, menus) est
+#     construit par chess_game.cpp via Chess::open(). Ne JAMAIS ajouter de widget
+#     de gameplay ici. Le 5e calque (menus plein ecran) est cree en C++ comme
+#     enfant de chess_root : il n'a aucune raison d'exister dans le YAML puisque
+#     rien de statique n'y est pose.
+#     Aucune couleur n'est posee ici non plus : les fonds sont appliques en C++
+#     depuis Chess::Pal (aucun nouveau token dans tab5-styles.yaml).
+#     ORDRE DES ENFANTS = ordre de dessin : hud < board < panel.
+# ═══════════════════════════════════════════════════════
+obj:
+  id: chess_root
+  align: TOP_LEFT
+  x: 0
+  y: 0
+  width: 1280
+  height: 720
+  scrollable: false
+  pad_all: 0
+  radius: 0
+  border_width: 0
+  widgets:
+    # --- Bandeau HUD (40 px) : trait, niveau, pendules, evaluation, statut ---
+    # Cliquable : un appui pendant la partie ouvre le menu de pause (il n'y a
+    # volontairement pas de croix, le jeu est un flux plein cadre).
+    - obj:
+        id: chess_hud
+        align: TOP_LEFT
+        x: 0
+        y: 0
+        width: 1280
+        height: 40
+        scrollable: false
+        pad_all: 0
+        radius: 0
+        border_width: 0
+
+    # --- Plateau 672x672 : 8 x 8 cases de 84 px ---------------------------
+    # Les 64 cases sont creees en C++ comme enfants de ce conteneur, indexees par
+    # POSITION A L'ECRAN : retourner le plateau (joueur avec les noirs) ne
+    # deplace aucun objet, seule la correspondance case <-> index change.
+    - obj:
+        id: chess_board
+        align: TOP_LEFT
+        x: 20
+        y: 44
+        width: 672
+        height: 672
+        scrollable: false
+        pad_all: 0
+        radius: 0
+        border_width: 0
+
+    # --- Panneau lateral 552x672 : liste des coups + boutons de partie -----
+    - obj:
+        id: chess_panel
+        align: TOP_LEFT
+        x: 708
+        y: 44
+        width: 552
+        height: 672
+        scrollable: false
+        pad_all: 0
+        radius: 0
+        border_width: 0

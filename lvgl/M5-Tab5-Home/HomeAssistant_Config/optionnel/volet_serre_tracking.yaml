@@ -1,0 +1,265 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file optionnel/volet_serre_tracking.yaml
+# @role Suivi d'un volet a moteur « aveugle » (Tuya sans retour de position) :
+#       helpers d'etat, script central appele par le Tab5, synchro de l'ecran,
+#       et suivi des commandes envoyees au volet par d'autres chemins.
+# @install OPTIONNEL (ADR-0024) : seulement pour un volet qui ne signale ni sa
+#       position ni sa course. Copier ce fichier dans config/packages/ (a cote des
+#       autres), recharger, puis choisir le volet dans la liste « Tab5 · volet a
+#       course simulee ». Un volet qui signale opening/closing n'en a pas besoin :
+#       le blueprint « Tab5 — emplacements » le pilote et pousse son etat.
+# @ai_warning Pas dans packages/ : le volet nomme dans la liste « Tab5 · volet a
+#       course simulee » recoit les commandes de ce script au lieu de celles du
+#       blueprint (variables `volet_suivi` et `volet_par_package`). Depuis le
+#       06/10/2026, liste sur « Not set » = aucun effet ; avant, la seule presence du
+#       script rendait muet le volet de l'entree Volet (discussion #278).
+#
+# @architecture_constraint Le moteur ne renvoie NI position NI fin de course. On
+#       maintient donc l'etat cote HA : un input_boolean « en mouvement » arme
+#       pendant la duree de course mesuree (reglage « Tab5 · shutter travel time »,
+#       26 s par defaut — a chronometrer chez vous), et un input_text qui porte le
+#       libelle affiche sur l'ecran. Un seul script tient ce chrono,
+#       `tab5_volet_course` (audit du 07/10/2026, HA-4 : il etait recopie dans le
+#       script de la tablette et dans le suivi des commandes directes).
+#       C'est cet input_text que l'automation push envoie au firmware via
+#       `esphome.<device>_tab5_maj_volet_etat` (variable `etat_physique`), ce qui
+#       arme aussi le wake word local « Stop » cote Tab5.
+#
+# @ai_warning Ce fichier DOIT rester un dictionnaire YAML valide avec des cles
+#       d'integration au premier niveau (`input_boolean:`, `input_text:`,
+#       `script:`, `automation:`). Un fichier de `packages/` reduit a des commentaires fait
+#       echouer HA au demarrage avec « expected a dictionary » — c'est
+#       exactement le piege documente dans HomeAssistant_Config/README.md.
+#
+# @ai_instruction Le volet se choisit dans HA (liste « Tab5 · volet a course
+#       simulee », rien a ecrire ici). Sans choix, le script ne commande rien. La
+#       duree de course se regle dans HA aussi (« Tab5 · shutter travel time », en
+#       secondes, 26 par defaut) : c'est la course complete mesuree. Trop courte,
+#       l'ecran repasse a l'arret avant la fin ; trop longue, il reste bloque sur
+#       « Mouvement ».
+# ============================================================================
+
+template:
+  # Liste « Tab5 · shutter with simulated travel » (même principe que
+  # packages/tab5_reglages.yaml) : les volets (cover.*) présents, ou « Not set ».
+  - triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+      - trigger: event
+        event_type: entity_registry_updated
+      - trigger: state
+        entity_id: input_text.tab5_choix_volet
+    # Audit du 07/10/2026, HA-18 : pas pour une mise à jour du registre qui ne touche que
+    # capabilities / supported_features / options / suggested_object_id (419 des 485
+    # entity_registry_updated chez l'auteur du 01 au 08/10/2026), que la liste ne lit
+    # pas. Une création, une suppression, un renommage, un nom ou une classe passent.
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.platform != 'event' or trigger.event.event_type != 'entity_registry_updated'
+             or trigger.event.data.action != 'update'
+             or (trigger.event.data.changes | default({}, true)).keys()
+                | reject('in', ['capabilities', 'supported_features', 'options', 'suggested_object_id'])
+                | list | count > 0 }}
+    variables:
+      volets: "{{ states.cover | map(attribute='entity_id') | list }}"
+    select:
+      - name: "Tab5 · shutter with simulated travel"
+        unique_id: tab5_volet_a_course_simulee
+        default_entity_id: select.tab5_volet_a_course_simulee
+        icon: mdi:window-shutter
+        options: >-
+          {%- set m = states('input_text.tab5_choix_volet') -%}
+          {{ volets + ([m] if m.startswith('cover.') and m not in volets else []) + ['Not set'] }}
+        state: >-
+          {%- set m = states('input_text.tab5_choix_volet') -%}
+          {{ m if m.startswith('cover.') else 'Not set' }}
+        select_option:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_choix_volet
+            data:
+              value: "{{ option }}"
+  # Réglage « Tab5 · shutter travel time » (audit du 07/10/2026, HA-4) : la durée de la
+  # course complète, en secondes, lue par script.tab5_volet_course. Gardée dans
+  # input_text.tab5_memoire_course_volet ; vide (première installation) = 26 s, la
+  # valeur écrite en dur jusque-là.
+  - number:
+      - name: "Tab5 · shutter travel time"
+        unique_id: tab5_course_du_volet
+        default_entity_id: number.tab5_course_du_volet
+        icon: mdi:timer-outline
+        unit_of_measurement: s
+        min: 5
+        max: 300
+        step: 1
+        state: "{{ states('input_text.tab5_memoire_course_volet') | int(26) }}"
+        set_value:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.tab5_memoire_course_volet
+            data:
+              value: "{{ value | int }}"
+
+input_boolean:
+  volet_serre_mouvement:
+    name: "Greenhouse shutter moving"
+    icon: mdi:arrow-up-down
+
+input_text:
+  volet_serre_etat:
+    name: "Greenhouse shutter state"
+    # Repart sur « Ferme » à chaque démarrage : le moteur ne donne pas sa position.
+    initial: "Ferme"
+  # Mémoire de la liste « Tab5 · shutter with simulated travel » : écrite par la liste.
+  tab5_choix_volet:
+    name: "Tab5 · memory · shutter with simulated travel"
+    icon: mdi:content-save-outline
+    max: 255
+  # Mémoire du réglage « Tab5 · shutter travel time » : écrite par le réglage. Sans
+  # `initial` (il écraserait le réglage à chaque démarrage).
+  tab5_memoire_course_volet:
+    name: "Tab5 · memory · shutter travel time"
+    icon: mdi:content-save-outline
+    max: 8
+
+script:
+  tab5_volet_action:
+    alias: "Tab5 — shutter: command from the tablet"
+    # restart : un nouvel appui pendant la course annule le chrono precedent.
+    mode: restart
+    fields:
+      action:
+        description: "open | close | stop"
+        example: "open"
+        selector:
+          select:
+            options: ["open", "close", "stop"]
+    sequence:
+      - variables:
+          volet: >-
+            {%- set v = states('select.tab5_volet_a_course_simulee') -%}
+            {{ v if v.startswith('cover.') and expand(v) | count > 0 else '' }}
+      # Aucun volet choisi : rien à commander (une cible vide lèverait une erreur).
+      - condition: template
+        value_template: "{{ volet != '' }}"
+      - condition: template
+        value_template: "{{ action in ['open', 'close', 'stop'] }}"
+      - action: "cover.{{ action }}_cover"
+        target:
+          entity_id: "{{ volet }}"
+      # Appel bloquant : ce script reste « on » pendant la course, ce qui fait ignorer
+      # sa propre commande à volet_serre_track_direct_cover (condition plus bas).
+      - action: script.tab5_volet_course
+        data:
+          action: "{{ action }}"
+
+  # Course simulée : les deux helpers, pour la tablette comme pour une commande venue
+  # d'ailleurs (un seul chrono : restart, une commande pendant la course annule le
+  # précédent). Ne commande pas le volet.
+  tab5_volet_course:
+    alias: "Tab5 — shutter: simulated travel"
+    mode: restart
+    fields:
+      action:
+        description: "open | close | stop"
+        example: "open"
+        selector:
+          select:
+            options: ["open", "close", "stop"]
+    sequence:
+      - choose:
+          # ---- STOP : arret immediat, position intermediaire inconnue ----
+          - conditions:
+              - condition: template
+                value_template: "{{ action == 'stop' }}"
+            sequence:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.volet_serre_mouvement
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.volet_serre_etat
+                data:
+                  value: "Partiel"
+          # ---- OPEN / CLOSE : on arme le chrono de course ----
+          - conditions:
+              - condition: template
+                value_template: "{{ action in ['open', 'close'] }}"
+            sequence:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.volet_serre_mouvement
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.volet_serre_etat
+                data:
+                  value: "En_mouvement"
+              # Course complète mesurée : réglage « Tab5 · shutter travel time » (26 s par défaut).
+              - delay:
+                  seconds: "{{ states('number.tab5_course_du_volet') | int(26) }}"
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.volet_serre_mouvement
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.volet_serre_etat
+                data:
+                  value: "{{ 'Ouvert' if action == 'open' else 'Ferme' }}"
+
+automation:
+  # Pousse l'etat du volet vers l'ecran a chaque changement des helpers
+  # (script `tab5_push_volet`, packages/tab5_push.yaml).
+  - id: tab5_volet_updater
+    alias: "Tab5 — shutter: state to the screen"
+    mode: queued
+    triggers:
+      - trigger: state
+        entity_id: input_text.volet_serre_etat
+      - trigger: state
+        entity_id: input_boolean.volet_serre_mouvement
+      # Volet choisi dans la liste : l'écran prend tout de suite l'état tenu ici (le
+      # blueprint ne confie ce volet au package qu'une fois nommé dans la liste).
+      - trigger: state
+        entity_id: select.tab5_volet_a_course_simulee
+        to: ~
+    actions:
+      - action: script.tab5_push_volet
+
+  # Commandes `cover.*` venues d'ailleurs (interface HA, autre integration,
+  # automatisations lever/coucher) : met les helpers a jour comme le ferait
+  # `tab5_volet_action`, pour que l'ecran suive. Ignore ses propres appels
+  # (script `tab5_volet_action` en cours).
+  - id: volet_serre_track_direct_cover
+    alias: "Tab5 — shutter: tracking direct commands"
+    description: "Appels cover.open/close/stop hors script Tab5 (UI HA, intégrations) → helpers + sync Tab5"
+    mode: restart
+    triggers:
+      - trigger: event
+        event_type: call_service
+        event_data:
+          domain: cover
+    conditions:
+      # Le volet choisi dans « Tab5 · shutter with simulated travel » (aucun : jamais vrai).
+      - condition: template
+        value_template: >
+          {% set v = states('select.tab5_volet_a_course_simulee') %}
+          {% set eid = trigger.event.data.service_data.entity_id | default('') %}
+          {{ v.startswith('cover.') and (eid == v or (eid is iterable and eid is not string and v in eid)) }}
+      - condition: template
+        value_template: "{{ trigger.event.data.service in ['open_cover', 'close_cover', 'stop_cover'] }}"
+      - condition: state
+        entity_id: script.tab5_volet_action
+        state: "off"
+    actions:
+      - action: script.tab5_volet_course
+        data:
+          action: "{{ trigger.event.data.service | replace('_cover', '') }}"
+
+# Vos automatisations lever/coucher de soleil peuvent appeler `cover.*`
+# directement : l'automation ci-dessus met l'ecran a jour (meme chrono,
+# `script.tab5_volet_course`). Passer par `script.tab5_volet_action` reste
+# preferable.

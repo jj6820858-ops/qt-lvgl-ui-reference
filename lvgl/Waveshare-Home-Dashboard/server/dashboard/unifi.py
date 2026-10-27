@@ -1,0 +1,46 @@
+"""Query a UniFi controller for currently connected clients"""
+
+import logging
+import urllib3
+import requests
+from .config import CONFIG
+
+logger = logging.getLogger(__name__)
+
+# UniFi controllers use self-signed certs; suppress the resulting warnings globally.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+_API_BASE = f'{CONFIG.unifi_url}/v2/api/site/default/clients'
+
+
+
+def get_connected_macs() -> list[dict]:
+    """Return presence info for watched clients using the UniFi Network API v1."""
+
+    session = requests.Session()
+
+    if (CONFIG.unifi_api_key):
+        # Unifi OS
+        session.headers.update({'X-API-KEY': CONFIG.unifi_api_key})
+    else:
+        # Legacy standalone UniFi controller
+        credentials = {'username': CONFIG.unifi_username, 'password': CONFIG.unifi_password}
+        login_resp = session.post(f'{CONFIG.unifi_url}/api/login', json=credentials, verify=False, timeout=10)
+        login_resp.raise_for_status()
+
+    active_clients = session.get(f'{_API_BASE}/active', verify=False, timeout=10)
+    active_clients.raise_for_status()
+    connected = {client['mac'].lower() for client in active_clients.json() if 'mac' in client}
+
+    client_history = session.get(f'{_API_BASE}/history?withinHours=0', verify=False, timeout=10)
+    client_history.raise_for_status()
+    last_seen = {entry['mac'].lower(): entry.get('last_seen') for entry in client_history.json() if 'mac' in entry}
+
+    return [
+        {
+            'name': name,
+            'connected': mac in connected,
+            'last_seen': last_seen.get(mac),
+        }
+        for mac, name in CONFIG.unifi_client_names.items()
+    ]

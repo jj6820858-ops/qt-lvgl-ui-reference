@@ -1,0 +1,111 @@
+# Install the tablet
+
+## English · [Français](#version-française)
+
+---
+
+Seven steps, in this order: nothing to compile, the firmware installs from the browser. Steps 1 to 6 are needed, step 7 is optional.
+
+> **Just want to see it first?** The [demo mode](../demo_mode.md) shows the full dashboard on a flashed tablet, with no Home Assistant at all.
+
+## What you need
+
+- An **M5Stack Tab5**, and the name of its **display chip**: it is printed on the sticker on the back, above the Espressif logo (ST7123, ST7121 or ILI9881C, see [hardware revisions](../hardware.md#hardware-revisions)). The 7-inch **Waveshare ESP32-P4 7B** also runs it: its firmware installs from the same page from 3.9.0, or you build it on your computer ([Waveshare 7B](../waveshare-7b.md)).
+- A **computer with Chrome or Edge** (the install page talks to the tablet through Web Serial) and a **USB-C cable that carries data**: with a charge-only cable, no port shows up.
+- **Home Assistant 2026.8 or newer**, any installation method, and a way to copy files into its `config/` folder: Samba share, or the File editor or Studio Code Server add-on. With [HACS](home-assistant-files.md#with-hacs), this is only for the one line of `configuration.yaml`: the « Tab5 » integration that HACS installs puts the files in place, then updates them in one click at each release.
+- A **2.4 GHz Wi-Fi network**: the tablet's Wi-Fi 6 chip is listed for 2.4 GHz only ([M5Stack Tab5 page](https://docs.m5stack.com/en/core/Tab5)). A router that merges both bands under one name needs nothing; with separate names, pick the 2.4 GHz one.
+- A **USB-C power source**. M5Stack gives no input rating; a 5 V / 2 A charger is advice, not a requirement, and the author's tablet runs from a PC's USB port ([power](../hardware.md#power)).
+- Optional: a weather integration (Met.no comes with Home Assistant), your calendars, a Home Assistant voice assistant (see [the two voice modes](settings.md#voice-assistant-the-two-modes)).
+
+## The seven steps
+
+| Step | Where | What you do |
+|---|---|---|
+| [1. Home Assistant files](home-assistant-files.md) | Home Assistant | unzip one archive (or let HACS do it), add one line to `configuration.yaml`, restart |
+| [2. Install the firmware](flash.md) | the install page, over USB | pick your display chip, *Connect and install* |
+| [3. Wi-Fi](wifi.md) | the same window, or a phone | give the tablet your network |
+| [4. Add the tablet to Home Assistant](add-to-home-assistant.md) | Home Assistant | *Configure* the discovered device, within 30 minutes |
+| [5. Your sources](sources.md) | Home Assistant | weather, calendars, phone… in the « Tab5 · » lists |
+| [6. Your devices](devices.md) | Home Assistant | one automation from the blueprint: rooms and tiles |
+| [7. A dashboard](dashboard.md) (optional) | Home Assistant | every setting of the tablet in one dashboard |
+
+**Why Home Assistant first:** the tablet gets everything it shows from these files, and asks them for the rest through events. Without them it does not crash, but nothing of your home reaches the screen.
+
+The screenshots of Home Assistant's own pages (device page, entity table, automation and template editors) come from the project's fresh-install test: a new Home Assistant with test devices, where these steps are run for real whenever the Home Assistant files or the tablet's API change.
+
+## After the installation
+
+Everything else is set in Home Assistant, with the mouse: the « Tab5 · » lists for your sources (step 5), **one automation made from the blueprint** for your rooms, tiles, sensors, cameras, what each zone of the home screen shows and what each gesture does (step 6). Each field is optional and explained; a change reaches the screen at once, without a flash.
+
+- [Tablet settings](settings.md): theme, language, alarm clock, sound…
+- [Adapt to your home](adapt-to-your-home.md): rooms, solar energy, what disappears when you don't have it.
+- [Weather providers](weather.md): outside France, or another rain or warning source.
+- [Updates](updates.md): firmware from Home Assistant, Home Assistant files, coming from an older version.
+- [Build your own firmware](build.md), instead of step 2.
+
+## First installation: nothing shows up?
+
+| What you see | What to check |
+|---|---|
+| No « Tab5 · » entity in Home Assistant | The three folders went straight into `config/` (not into a `tab5_home_assistant/` folder), the `packages:` line is in `configuration.yaml`, and Home Assistant was restarted: [step 1](home-assistant-files.md#a-download-and-unzip). |
+| Home Assistant does not find the tablet | The tablet has its Wi-Fi ([step 3](wifi.md)), and it started less than 30 minutes ago: restart it to open the window again ([step 4](add-to-home-assistant.md)). |
+| The screen is in French | That is the default. Change « Language » in the [tablet settings](settings.md); the tablet restarts to apply it. |
+| The clock shows, but no weather, rooms or tiles | Normal until steps 5 and 6 are done: the « Tab5 · forecast source » list ([step 5](sources.md), [weather providers](weather.md)) and the blueprint ([step 6](devices.md)). |
+
+Something went wrong? [Known incidents](../troubleshooting.md).
+
+---
+
+## Version Française
+
+---
+
+Sept étapes, dans cet ordre : rien à compiler, le firmware s'installe depuis le navigateur. Les étapes 1 à 6 sont nécessaires, la 7 est facultative.
+
+> **Envie de voir d'abord ?** Le [mode démo](../demo_mode.md#version-française) montre le tableau de bord complet sur une tablette flashée, sans aucun Home Assistant.
+
+## Ce qu'il faut
+
+- Un **M5Stack Tab5**, et le nom de sa **puce d'écran** : il est écrit sur l'autocollant au dos, au-dessus du logo Espressif (ST7123, ST7121 ou ILI9881C, voir les [révisions matérielles](../hardware.md#révisions-matérielles)). La **Waveshare ESP32-P4 7B** de 7 pouces le fait tourner aussi : son firmware s'installe depuis la même page dès la 3.9.0, ou se compile sur votre ordinateur ([Waveshare 7B](../waveshare-7b.md#version-française)).
+- Un **ordinateur avec Chrome ou Edge** (la page d'installation parle à la tablette par Web Serial) et un **câble USB-C qui transmet les données** : avec un câble de charge seule, aucun port n'apparaît.
+- **Home Assistant 2026.8 ou plus récent**, toute méthode d'installation, et un moyen de copier des fichiers dans son dossier `config/` : partage Samba, ou le module File editor ou Studio Code Server. Avec [HACS](home-assistant-files.md#avec-hacs), seulement pour la ligne de `configuration.yaml` : l'intégration « Tab5 » que HACS installe pose les fichiers, puis les met à jour en un clic à chaque release.
+- Un **réseau Wi-Fi en 2,4 GHz** : la puce Wi-Fi 6 de la tablette est donnée pour le 2,4 GHz seul ([fiche M5Stack du Tab5](https://docs.m5stack.com/en/core/Tab5)). Une box qui réunit les deux bandes sous un même nom n'exige rien ; avec deux noms distincts, choisissez celui du 2,4 GHz.
+- Une **source d'alimentation USB-C**. M5Stack ne donne aucune valeur d'entrée ; un chargeur 5 V / 2 A est un conseil, pas une exigence, et la tablette de l'auteur tourne sur un port USB de PC ([alimentation](../hardware.md#alimentation)).
+- Facultatif : une intégration météo (Met.no vient avec Home Assistant), vos agendas, un assistant vocal Home Assistant (voir [les deux modes vocaux](settings.md#assistant-vocal--les-deux-modes)).
+
+## Les sept étapes
+
+| Étape | Où | Ce que vous faites |
+|---|---|---|
+| [1. Fichiers Home Assistant](home-assistant-files.md#version-française) | Home Assistant | décompresser une archive (ou laisser HACS le faire), ajouter une ligne à `configuration.yaml`, redémarrer |
+| [2. Installer le firmware](flash.md#version-française) | la page d'installation, par l'USB | choisir sa puce d'écran, *Connecter et installer* |
+| [3. Wi-Fi](wifi.md#version-française) | la même fenêtre, ou un téléphone | donner son réseau à la tablette |
+| [4. Ajouter la tablette à Home Assistant](add-to-home-assistant.md#version-française) | Home Assistant | *Configurer* l'appareil découvert, dans les 30 minutes |
+| [5. Vos sources](sources.md#version-française) | Home Assistant | météo, agendas, téléphone… dans les listes « Tab5 · » |
+| [6. Vos appareils](devices.md#version-française) | Home Assistant | une automatisation depuis le blueprint : pièces et tuiles |
+| [7. Un tableau de bord](dashboard.md#version-française) (facultatif) | Home Assistant | tous les réglages de la tablette dans un tableau de bord |
+
+**Pourquoi Home Assistant d'abord :** la tablette reçoit de ces fichiers tout ce qu'elle affiche, et leur demande le reste par des événements. Sans eux elle ne plante pas, mais rien de votre maison n'arrive à l'écran.
+
+Les captures des pages de Home Assistant lui-même (page de l'appareil, table des entités, éditeurs d'automatisation et de modèle) viennent du test d'installation à neuf du projet : un Home Assistant neuf avec des appareils de test, où ces étapes sont rejouées pour de vrai à chaque changement des fichiers Home Assistant ou de l'API de la tablette.
+
+## Après l'installation
+
+Tout le reste se règle dans Home Assistant, à la souris : les listes « Tab5 · » pour vos sources (étape 5), **une automatisation créée depuis le blueprint** pour vos pièces, tuiles, capteurs, caméras, ce que montre chaque zone de l'accueil et ce que fait chaque geste (étape 6). Chaque champ est facultatif et expliqué ; un changement arrive aussitôt à l'écran, sans flash.
+
+- [Réglages de la tablette](settings.md#version-française) : thème, langue, réveil, son…
+- [Adapter à sa maison](adapt-to-your-home.md#version-française) : pièces, énergie solaire, ce qui disparaît quand on ne l'a pas.
+- [Fournisseurs météo](weather.md#version-française) : hors de France, ou une autre source de pluie ou de vigilances.
+- [Mises à jour](updates.md#version-française) : le firmware depuis Home Assistant, les fichiers Home Assistant, depuis une ancienne version.
+- [Compiler son propre firmware](build.md#version-française), à la place de l'étape 2.
+
+## Première installation : rien n'apparaît ?
+
+| Ce que vous voyez | Ce qu'il faut vérifier |
+|---|---|
+| Aucune entité « Tab5 · » dans Home Assistant | Les trois dossiers sont directement dans `config/` (pas dans un dossier `tab5_home_assistant/`), la ligne `packages:` est dans `configuration.yaml`, et Home Assistant a redémarré : [étape 1](home-assistant-files.md#a-télécharger-et-décompresser). |
+| Home Assistant ne trouve pas la tablette | La tablette a son Wi-Fi ([étape 3](wifi.md#version-française)) et elle a démarré il y a moins de 30 minutes : redémarrez-la pour rouvrir la fenêtre ([étape 4](add-to-home-assistant.md#version-française)). |
+| L'écran est en français | C'est le réglage par défaut. Changez « Language » dans les [réglages de la tablette](settings.md#version-française) ; la tablette redémarre pour l'appliquer. |
+| L'horloge s'affiche, mais ni météo, ni pièces, ni tuiles | Normal tant que les étapes 5 et 6 ne sont pas faites : la liste « Tab5 · forecast source » ([étape 5](sources.md#version-française), [fournisseurs météo](weather.md#version-française)) et le blueprint ([étape 6](devices.md#version-française)). |
+
+Un souci ? [Incidents connus](../troubleshooting.md#version-française).

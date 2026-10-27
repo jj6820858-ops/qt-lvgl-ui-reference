@@ -1,0 +1,22 @@
+# German UI strings. Include as a package after the board, or copy the
+# substitutions you want into your own config (top-level always wins).
+substitutions:
+  str_waiting: "warte auf Daten"
+  str_refreshing: "aktualisiere..."
+  str_refresh_btn: "Aktualisieren"
+  str_resets_in: "Reset in"
+  str_net_error: "Netzwerkfehler"
+  str_token_error: "Token abgelaufen"
+  str_status_ok: "ok"
+  str_status_warning: "nahe am Limit"
+  str_status_limit: "Limit erreicht"
+  str_no_data: "keine Daten"
+  str_no_data_short: "k.A."
+  str_setup: "einrichten"
+  str_time: "Zeit"
+  str_time_short: "Z"
+  str_tokens: "Tokens"
+  str_elapsed: "vergangen"
+  str_fast: "zu schnell"
+  str_battery: "Akku"
+  str_tok_day: "Tok/Tag"

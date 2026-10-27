@@ -1,0 +1,516 @@
+# [AI-CONTEXT]
+# @file tab5-hardware.yaml
+# @role Configuration bas niveau (I2C, I2S, DSI Display, Audio, DAC).
+# @ai_instruction FICHIER CRITIQUE. Ne modifier AUCUNE broche GPIO ou fréquence I2C sans l'accord d'Axel.
+# @note Le light `backlight` note l'heure de chaque allumage (`ecran_allume_ms`) et les
+#       deux `ota:` posent `ota_en_cours` : l'extinction auto de l'écran les lit
+#       (tab5-ha-controls.yaml). Ne pas renommer ces globals sans elle.
+# ============================================================================
+# [2026.7.0] st7123 est un composant officiel ESPHome : plus d'external_components ni de
+# dossier Tab5/my_components/ (retire du depot le 06/07/2026, PR #15).
+
+esp32:
+  board: esp32-p4-evboard
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    advanced:
+      enable_idf_experimental_features: true
+      # Performance (audit du 25/09/2026, §3.3), mesurée le 25/09 avec les capteurs
+      # « Tab5 Draw Max » / « Tab5 Loop Time » : code et données constantes (glyphes
+      # compris) copiés au boot en PSRAM hex 200 MHz et exécutés de là, au lieu de la
+      # flash DIO 40 MHz ; -O2 au lieu de -Os. Images −14 à −15 %, boucle au repos
+      # −19 % ; coût : −15,5 Ko de RAM interne libre, firmware +468 Ko. Validé par
+      # 5 redémarrages de contrôle (séquence de l'écran noir, voir on_boot).
+      execute_from_psram: true
+      compiler_optimization: PERF
+      # Pile de la boucle ESPHome (setup() + toute la boucle : LVGL, API, lambdas) :
+      # 16 Ko au lieu des 8 Ko par défaut. Mesuré le 25/09/2026 (capteur « Tab5 Stack
+      # Free Min ») : 8 Ko n'en laissaient que 1,5-1,8 libres, minimum atteint pendant
+      # l'initialisation (premier rendu LVGL + snprintf, 1 152 o à lui seul). Coût :
+      # 8 Ko de RAM interne. Garder une marge d'au moins 4 Ko en cas de nouvelle mesure.
+      loop_task_stack_size: 16384
+      # Firmwares signés (lot 6b, ADR-0020) : la compilation signe l'image avec la clé
+      # privée RSA-3072 `tab5_signature.pem` (racine du dépôt, hors git, comme l'était
+      # secrets.yaml ; autre chemin : substitution `tab5_cle_signature` dans
+      # Tab5/user_entities.yaml). La tablette refuse ensuite toute OTA dont la
+      # signature ne vient pas de la même clé : l'OTA en clair qu'accepte une API sans
+      # clé compilée ne permet donc pas de la reflasher avec n'importe quoi. Aucun eFuse
+      # brûlé (pas de Secure Boot) : un flash USB reste toujours possible.
+      # Clé perdue = plus d'OTA, seulement l'USB : en garder une copie hors du PC.
+      # Créer la clé : python -m espsecure generate-signing-key --version 2 --scheme rsa3072 tab5_signature.pem
+      signed_ota_verification:
+        signing_key: ${ tab5_cle_signature | default('tab5_signature.pem') }
+        signing_scheme: rsa3072
+    sdkconfig_options:
+      # Fenêtre TCP : valeur d'ESPHome (65 534 o), plus de forçage à 16 Ko. Le forçage
+      # datait du correctif OTA d'avril 2026 (sockets coupés côté PC, WinError
+      # 10053/10054), posé en même temps que l'option ci-dessous qui laisse le réseau
+      # répondre pendant l'effacement de la flash, sans essai séparé. Une fenêtre à 64 Ko
+      # a reçu des OTA normalement le 25/09/2026.
+      CONFIG_SPI_FLASH_YIELD_DURING_ERASE: "y"   # AXE7: Evite gel CPU pendant effacement flash OTA
+      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360: "y"
+      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ: "360"
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "15"         # AXE7: WDT 15s (boot long possible si reseau lent)
+      # Autorise EXT_RAM_BSS_ATTR : les tampons froids des jeux (historiques, piles
+      # d'annulation) vivent en PSRAM au lieu de la RAM interne. Vérifié dans le .map le
+      # 26/09/2026 : seuls ces tableaux y passent (.ext_ram.bss = 34 300 o) ; la BSS de
+      # lwIP, que l'aide de l'option cite, reste en RAM interne sur cette configuration.
+      CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY: "y"
+      # Cache L2 256 Ko au lieu de 128 (défaut) : le code et les polices sont lus en PSRAM
+      # (execute_from_psram) à travers ce cache. Mesuré le 26/09/2026, mêmes actions aux
+      # mêmes minutes : images −7 à −9 %, boucle au repos 35 → 31 ms (−12 %). Coût : le
+      # cache est pris sur la RAM interne (SRAM_START = 0x4FF00000 + taille du cache),
+      # RAM libre 356 → 226 Ko. 5 redémarrages de contrôle : écran affiché, API en 16,5-16,8 s.
+      CONFIG_CACHE_L2_CACHE_256KB: "y"
+      # Pas de test des 32 Mo de PSRAM à chaque démarrage (01/10/2026, mesure du
+      # démarrage) : ESP-IDF écrit puis relit toute la PSRAM avant de lancer le
+      # firmware (« Disable this for slightly faster startup », aide de l'option). Une
+      # PSRAM défaillante ne bloquerait plus le démarrage par un abandon : elle
+      # planterait plus tard, et le journal des démarrages le dirait.
+      CONFIG_SPIRAM_MEMTEST: "n"
+      # DHCP : l'adresse donnée par le serveur est prise tout de suite, sans les deux
+      # requêtes ARP de vérification d'ESP-IDF (« This process lasts 1 - 2 seconds »,
+      # lwipopts.h d'ESP-IDF 5.5). Contrepartie : un conflit avec un appareil réglé à
+      # la main sur la même adresse ne serait plus détecté par la tablette.
+      CONFIG_LWIP_DHCP_DOES_ARP_CHECK: "n"
+      CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP: "y"
+      # Statistiques de temps d'exécution de FreeRTOS (06/10/2026, discussion #278) : la
+      # « Charge CPU » de la console système, cœur par cœur, d'après le temps de la tâche
+      # inactive de chaque cœur (update_console_cpu_ui, tab5_console.cpp ; lue seulement
+      # console ouverte). Horloge esp_timer (1 µs, défaut), compteur 32 bits (défaut) :
+      # seules des différences sur 2 s sont calculées, le rebouclage en 71 min ne gêne
+      # pas. Coût (estimé, non mesuré sur la tablette) : une lecture d'esp_timer à chaque
+      # changement de tâche, 12 o par tâche (compteur + numéros de traçage que l'option
+      # active, CONFIG_FREERTOS_USE_TRACE_FACILITY) et quelques octets par file ; les
+      # fonctions de mise en forme (vTaskList…) ne sont pas appelées, donc pas liées.
+      CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS: "y"
+      # Pas de réglage LVGL ici : ESPHome compile LVGL avec -DLV_KCONFIG_IGNORE, les
+      # CONFIG_LV_* du sdkconfig sont ignorés (la transition du thème, posée ici le
+      # 26/09/2026, n'a jamais agi : 80 ms toujours dans le binaire, vu le 28/09). Les
+      # réglages LVGL passent par `build_flags` (tab5-ha-hmi.yaml).
+
+esp32_hosted:
+  variant: esp32c6
+  active_high: true
+  clk_pin: GPIO12
+  cmd_pin: GPIO13
+  d0_pin: GPIO11
+  d1_pin: GPIO10
+  d2_pin: GPIO9
+  d3_pin: GPIO8
+  reset_pin: GPIO15
+  slot: 1
+  sdio_frequency: 20MHz
+  use_psram: true             # [2026.6.0] Buffers SDIO en PSRAM: evite crash mempool + libere SRAM interne
+
+# Tout redémarrage logiciel en reset CORE (rst:0x3) au lieu du reset des seuls CPU
+# (rst:0xc), pour que le lien SDIO du C6 remonte au démarrage suivant : correctif de la
+# boucle de la Waveshare 7B du 16/10/2026 (docs/troubleshooting.md), même lien C6 que le
+# Tab5, dont l'écran noir après OTA du 05/08/2026 ne s'était réglé que par une coupure.
+# Recopié dans carte-waveshare-7b.yaml (tests/test_carte_7b.py) ; le global appelle
+# lien_c6_demarrage() dans setup(), avant les composants, et garde le .cpp dans le binaire.
+esphome:
+  includes:
+    - Tab5/ecran/tab5_lien_c6.h
+    - Tab5/ecran/tab5_lien_c6.cpp
+    # Écran éteint = dalle éteinte (16/10/2026, ADR-0064) : voile noir et commandes DCS, appelés
+    # par la lumière `backlight` et les `ota:` (plus bas). Listés ici et dans
+    # carte-waveshare-7b.yaml, pas à la racine : le rendu hors tablette n'a pas d'écran DSI.
+    - Tab5/ecran/tab5_dalle.h
+    - Tab5/ecran/tab5_dalle.cpp
+
+globals:
+  - id: lien_c6_branche
+    type: bool
+    initial_value: 'lien_c6_demarrage()'
+
+logger:
+  # ═══════════════════════════════════════════════════════════════════════
+  # [06/07/2026] CAUSE RACINE CONFIRMEE — ecran noir apres reboot logiciel.
+  # ═══════════════════════════════════════════════════════════════════════
+  # Bug historique (recurrent, plusieurs sessions) : apres un redemarrage
+  # LOGICIEL (OTA, bouton HA, esp_restart), l'ecran restait NOIR alors que
+  # TOUT le reste fonctionnait parfaitement (WiFi/API/donnees/uptime sains).
+  # Contourne le 05/07/2026 par `level: VERY_VERBOSE` permanent (hasard :
+  # les logs verbeux ajoutaient assez de temps pour masquer le vrai probleme).
+  #
+  # Cause reelle confirmee le 06/07/2026 (Axel present, ecran surveille en
+  # direct a chaque reboot, 5 essais OTA) : le reset_pin de l'ecran
+  # (display: mipi_dsi:) passe par le GPIO expander I2C PI4IOE5V6408 (pas un
+  # GPIO natif) qui a besoin d'un peu de temps pour se stabiliser apres le
+  # boot avant que son reset ait un effet fiable. Preuve par elimination :
+  #   - INFO + action YAML `delay: 300ms`/`1000ms` entre l'init du GPIO
+  #     expander (setup_priority::IO=900) et l'init ecran (DATA=600) ->
+  #     ECRAN NOIR dans les 2 cas. Ces essais etaient en fait invalides :
+  #     l'action `delay:` d'ESPHome n'est PAS bloquante (programme un
+  #     callback via le scheduler et rend la main aussitot), donc l'ecran
+  #     demarrait en realite SANS AUCUN delai reel injecte avant lui.
+  #   - INFO + `lambda: delay(1000);` (delay() C bloquant, meme fonction que
+  #     st7123_touchscreen.cpp utilise pour son propre reset), donc un vrai
+  #     delai qui bloque Application::setup() avant l'init ecran -> ECRAN
+  #     ALLUME, reproduit 3 fois de suite (voir esphome:on_boot:priority:700
+  #     dans tab5-ha-hmi.yaml).
+  # Donc : ce n'est pas la verbosite des logs qui compte, c'est le temps reel
+  # ecoule avant de toucher le reset_pin. level: INFO peut etre garde (plus
+  # rapide, moins de bruit serie) tant que le delai bloquant de 1s reste en
+  # place dans tab5-ha-hmi.yaml. Meme si l'oscilloscope sur le bus I2C n'a
+  # pas ete fait (pas verifiable a distance), la preuve experimentale directe
+  # (delai reel present/absent = ecran OK/noir, teste et reteste) est solide.
+  #
+  # NE PAS retirer le delai bloquant de tab5-ha-hmi.yaml (esphome:on_boot:
+  # priority:700) sans re-tester a fond — c'est lui le vrai garde-fou
+  # desormais, pas le niveau de log.
+  # [05/08/2026] `DEBUG` fonctionne de nouveau (vérifié : build complet, 0 erreur,
+  # 0 warning de format, +0,3 pt de flash pour les corps de ESP_LOGD). Il était
+  # cassé : un `!lambda` dans les `args:` d'un `logger.log` ne compilait pas, et
+  # ça ne pouvait pas se voir à INFO puisque le corps du ESP_LOGD est alors
+  # compilé hors binaire. Piège général à garder en tête : **tout `logger.log`
+  # est du code jamais compilé tant qu'on reste à INFO.**
+  level: INFO
+  baud_rate: 115200
+  hardware_uart: USB_SERIAL_JTAG
+  tx_buffer_size: 2048
+  # Journal des démarrages et des coupures (Tab5/ecran/tab5_journal.cpp, 26/09/2026) : erreurs
+  # toujours, avertissements tant que HA n'est pas connecté, pour analyser après coup un
+  # plantage ou une panne du lien Wi-Fi (C6). `level: INFO` parce que les erreurs
+  # d'ESP-IDF (pilote ESP-Hosted compris) arrivent au niveau du logger, étiquette
+  # « esp-idf » ; le tri se fait dans le C++. Aucun log dans ce lambda (il bouclerait).
+  on_message:
+    level: INFO
+    then:
+      - lambda: 'journal_log_message(level, tag, message);'
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+ota:
+  # En LISTE (lot 6c) : un firmware publié y ajoute `http_request`
+  # (publication-commune.yaml). Écrit en dictionnaire, ce bloc était REMPLACÉ par celui
+  # du package (vérifié sur ESPHome 2026.9.0 : plus d'OTA `esphome` du tout).
+  - platform: esphome
+    # [lot 6b, ADR-0020] Plus de `encryption:` : il héritait de la clé API compilée
+    # (ADR-0015), et la clé vient désormais de HA (un bloc vide avec une API sans clé ne
+    # passe pas la validation). La tablette propose le chiffrement une fois sa clé reçue
+    # mais accepte l'envoi en clair ; ce qui la protège, c'est la signature exigée par
+    # `signed_ota_verification` (bloc esp32 ci-dessus). Pas de `password:` non plus : il
+    # serait le même pour tous, lisible dans le binaire publié.
+    # Migration d'une tablette qui a encore l'ancien firmware (clé compilée) : elle refuse
+    # l'envoi en clair, donc le nouveau binaire part une fois chiffré avec l'ancienne clé
+    # (docs/installation.md, « Passer à la 3.0 »).
+    # Pas de `on_end` ici. ESPHome redémarre lui-même juste après une OTA réussie
+    # (components/esphome/ota/ota_esphome.cpp : notify_state_(OTA_COMPLETED) ->
+    # delay(100) -> App.safe_reboot()). L'ancien `on_end: delay 2s + button.press
+    # btn_restart` (« fix reboot OTA » du 05/07/2026) ne pouvait donc jamais
+    # s'exécuter : l'appareil redémarrait 100 ms après le déclencheur, bien avant la
+    # fin du délai. Retiré le 08/09/2026 (audit du 06/09, §4.1 point 13).
+    # L'écran noir après OTA (lien du C6 pas remonté, malgré son reset par reset_pin
+    # à chaque démarrage, cf. docs/troubleshooting.md) ne s'est réglé par AUCUN
+    # redémarrage, seulement par une coupure d'alimentation : ne pas remettre de on_end.
+    # Mise à jour en cours (06/10/2026) : l'extinction auto de l'écran
+    # (tab5-ha-controls.yaml) attend la fin. Une OTA réussie redémarre (rien à
+    # remettre) ; une OTA ratée ou coupée rend la main. Même bloc dans
+    # publication-commune.yaml pour l'OTA lancée depuis HA.
+    # Dalle éteinte pendant la mise à jour sur la carte qui le demande (script
+    # tab5_dalle_ota plus bas : la 7B seule, rien sur le Tab5).
+    on_begin:
+      - globals.set: { id: ota_en_cours, value: 'true' }
+      - script.execute: { id: tab5_dalle_ota, debut: true }
+    on_abort:
+      - globals.set: { id: ota_en_cours, value: 'false' }
+      - script.execute: { id: tab5_dalle_ota, debut: false }
+    on_error:
+      - globals.set: { id: ota_en_cours, value: 'false' }
+      - script.execute: { id: tab5_dalle_ota, debut: false }
+
+safe_mode:
+  num_attempts: 10
+  boot_is_good_after: 30s
+
+i2c:
+  - id: bsp_bus
+    sda: GPIO31
+    scl: GPIO32
+    frequency: 400kHz
+
+pi4ioe5v6408:
+  - id: pi4ioe1
+    address: 0x43
+  - id: pi4ioe2
+    address: 0x44
+
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3
+
+# Écran et tactile : la partie commune aux trois révisions du Tab5. La plateforme,
+# le modèle d'écran et la puce tactile viennent de Tab5/paquets/ecran-<révision>.yaml, choisi
+# par la substitution `tab5_ecran` (tab5-ha-hmi.yaml, st7123 par défaut) : le fichier
+# de révision étend les deux entrées ci-dessous par `!extend tab5_display` /
+# `!extend touch` — ne pas renommer ces id. Les broches sont les mêmes sur les trois
+# révisions (docs/hardware.md, « Hardware revisions »). Dimensions de la dalle (portrait
+# 720×1280) et calibration du tactile : geometrie-tab5.yaml (ADR-0061), mêmes valeurs.
+display:
+  - id: tab5_display
+    dimensions:
+      height: ${carte_dalle_h}
+      width: ${carte_dalle_l}
+    reset_pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 4
+    pixel_mode: 16bit
+    color_order: RGB
+    update_interval: never
+    auto_clear_enabled: false
+
+touchscreen:
+  - id: touch
+    interrupt_pin: GPIO23
+    reset_pin:
+      pi4ioe5v6408: pi4ioe1
+      number: 5
+    calibration:
+      x_min: 0
+      x_max: ${carte_dalle_l}
+      y_min: 0
+      y_max: ${carte_dalle_h}
+    # Mode économie (tab5-economie.yaml) : un écran assombri faute de toucher reprend sa
+    # luminosité dès le doigt posé. L'activité est notée tout de suite : LVGL ne lit le
+    # toucher qu'à son prochain tour, le script la verrait sinon encore ancienne.
+    on_touch:
+      - lambda: 'ui_mark_activity();'
+      - script.execute: tab5_economie_appliquer
+    on_release:
+      then:
+        - if:
+            condition:
+              light.is_off: backlight
+            then:
+              - light.turn_on: backlight
+
+output:
+  - platform: ledc
+    pin: GPIO22
+    id: backlight_pwm
+    frequency: 1000Hz
+  # Mode économie d'énergie (tab5-economie.yaml) : la lumière écrit ici, et le PWM reçoit
+  # le minimum de sa demande et du plafond du mode (economie_sortie_retro,
+  # tab5_economie.cpp). La lumière, donc HA, le curseur des Réglages et le réveil,
+  # garde la luminosité choisie ; elle revient telle quelle quand le mode s'arrête.
+  - platform: template
+    id: backlight_plafonne
+    type: float
+    # Chronologie du démarrage (10/10/2026, tab5_demarrage.h) : la première écriture non
+    # nulle est l'allumage réel du rétroéclairage. Marquer seulement (une lecture
+    # d'horloge) ; ensuite, un test d'un bit par écriture.
+    write_action:
+      - lambda: |-
+          if (state > 0.0f) demarrage_marquer(EtapeDemarrage::RETRO);
+          id(backlight_pwm).set_level(economie_sortie_retro(state));
+
+light:
+  - platform: monochromatic
+    output: backlight_plafonne
+    name: "Display Backlight"
+    id: backlight
+    restore_mode: RESTORE_DEFAULT_ON
+    # Premier démarrage (rien de gardé en mémoire) : 75 % plutôt que 100 % (audit anti-casse
+    # du 16/10/2026) : moins de courant et de chaleur, des LED qui durent plus, moins de
+    # brownouts sur une alimentation juste (celui du 08/10/2026 était à 100 %). Une
+    # luminosité déjà choisie est gardée telle quelle.
+    initial_state:
+      brightness: 75%
+    default_transition_length: 250ms
+    on_turn_on:
+      # Dalle réveillée et voile noir retiré, puis LVGL reprend (script plus bas).
+      - script.execute: tab5_dalle_rallumer
+      # Nuit de l'écran (tab5-ha-controls.yaml) : un écran rallumé n'est plus « éteint par la
+      # nuit » ; s'il l'est à nouveau, l'extinction auto le redira.
+      - globals.set: { id: ecran_eteint_par_nuit, value: 'false' }
+      # Extinction auto de l'écran (tab5-ha-controls.yaml) : le délai repart de cet
+      # allumage, quelle qu'en soit la source (toucher, tape, HA, réveil, démarrage),
+      # sans toucher à l'horloge d'inactivité de LVGL (voir ecran_allume_ms).
+      - lambda: 'id(ecran_allume_ms) = millis();'
+      # Mode économie : un écran rallumé n'est plus « sans toucher », son plafond suit.
+      - script.execute: tab5_economie_appliquer
+    on_turn_off:
+      # Écran éteint : la roue d'actions rapides se ferme (ADR-0036), comme sous un popup.
+      - lambda: 'roue_actions_fermer();'
+      # Dalle vraiment éteinte (Tab5/ecran/tab5_dalle.cpp) : voile noir dessiné tout de
+      # suite, puis les commandes DCS que tient la dalle, avant que LVGL se fige.
+      - lambda: 'dalle_eteindre(id(tab5_display));'
+      - lvgl.pause:
+
+# Dalle éteinte avec le rétroéclairage (Tab5/ecran/tab5_dalle.cpp, audit anti-casse du
+# 16/10/2026). Recopiés dans carte-waveshare-7b.yaml (tests/test_carte_7b.py).
+script:
+  # Rallumage : « sleep out » si la dalle dormait, 120 ms (norme DCS), « display on » et
+  # voile retiré, puis LVGL reprend et redessine l'écran entier. Rien si la lumière s'est
+  # rééteinte pendant l'attente (remote_values : la lumière demandée, pas sa transition),
+  # ni si une OTA a noirci la dalle entre-temps (7B : elle la rallume si elle échoue).
+  # restart : un rallumage pendant l'attente repart du début.
+  - id: tab5_dalle_rallumer
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return dalle_reveiller(id(tab5_display));'
+          then:
+            - delay: 120ms
+      - if:
+          condition:
+            lambda: 'return id(backlight).remote_values.is_on() && !(dalle_noire_pendant_ota() && id(ota_en_cours));'
+          then:
+            - lambda: 'dalle_rallumer(id(tab5_display));'
+            - lvgl.resume:
+  # Mise à jour du firmware (les deux `ota:`) : la Waveshare 7B éteint sa dalle pendant
+  # l'écriture de la flash, qui la faisait scintiller (carte_dalle_noire_ota), et la
+  # rallume si la mise à jour échoue ; une mise à jour réussie redémarre. Écran déjà éteint :
+  # rien. Le Tab5 n'a pas ce défaut : rien.
+  - id: tab5_dalle_ota
+    parameters:
+      debut: bool
+    then:
+      - if:
+          condition:
+            lambda: 'return dalle_noire_pendant_ota() && id(backlight).remote_values.is_on();'
+          then:
+            - if:
+                condition:
+                  lambda: 'return debut;'
+                then:
+                  - lambda: 'dalle_eteindre(id(tab5_display));'
+                else:
+                  - script.execute: tab5_dalle_rallumer
+
+
+i2s_audio:
+  - id: mic_bus
+    i2s_lrclk_pin: GPIO29
+    i2s_bclk_pin: GPIO27
+    i2s_mclk_pin: GPIO30
+
+audio_adc:
+  - platform: es7210
+    id: es7210_adc
+    bits_per_sample: 16bit
+    sample_rate: 16000
+    # [AUDIO-2026] 24 -> 30 dB : les 6 dB qui etaient pris en NUMERIQUE (gain_factor: 2 sur le
+    # wake word et le vocal) sont deplaces ICI, en ANALOGIQUE, avant le convertisseur.
+    # Meme niveau sonore en sortie, mais un vrai gain de rapport signal/bruit : le gain numerique
+    # d'ESPHome est une multiplication entiere suivie d'un clamp dur (microphone_source.cpp), donc
+    # il amplifie le bruit de fond du convertisseur autant que la voix ET ecrete net les cretes --
+    # une crete ecretee devient un signal carre, poison pour Whisper. Le seuil d'ecretage ne bouge
+    # pas (on a juste deplace les memes 6 dB en amont). Valeurs admises : 0, 3, ... 33, 34.5, 36, 37.5.
+    mic_gain: 30dB
+
+microphone:
+  - platform: i2s_audio
+    id: tab5_microphone
+    i2s_din_pin: GPIO28
+    sample_rate: 16000
+    bits_per_sample: 16bit
+    adc_type: external
+    correct_dc_offset: true   # [AUDIO-2026] Corrige un eventuel decalage DC du signal ES7210
+
+audio_dac:
+  - platform: es8388
+    id: es8388_dac
+
+speaker:
+  - platform: i2s_audio
+    id: tab5_speaker
+    i2s_dout_pin: GPIO26
+    audio_dac: es8388_dac
+    dac_type: external
+    channel: stereo
+    # [AUDIO-2026] 500ms = le defaut ESPHome (le commentaire precedent "100->200ms" datait d'une
+    # version ou le defaut valait 100ms : on tournait donc SOUS le defaut). Quand ce ring buffer se
+    # vide, la tache speaker ne coupe pas le flux : elle remplit le buffer DMA de silence
+    # (i2s_audio_speaker_standard.cpp, "pad the rest of this DMA buffer with silence") -> micro-trous
+    # audibles = gresillements. Le TTS arrive en HTTP streame depuis HA PENDANT sa generation
+    # (voice_assistant.cpp, tts_start_streaming), via le WiFi porte par le co-processeur C6 en SDIO :
+    # les hoquets sont la regle, pas l'exception. Ce buffer est le seul amortisseur en aval du decodeur.
+    buffer_duration: 500ms
+    timeout: 2000ms
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+select:
+  - platform: es8388
+    dac_output:
+      id: es8388_dac_output
+      internal: true
+  - platform: template
+    name: "Tab5 DAC Output"
+    id: tab5_dac_output_template
+    options:
+      - "LINE1"
+      - "LINE2"
+      - "BOTH"
+    restore_value: true
+    optimistic: true
+    on_value:
+      then:
+        - select.set:
+            id: es8388_dac_output
+            option: !lambda "return x;"
+
+media_player:
+  - platform: speaker
+    name: tab5_media_player
+    id: speaker_player
+    announcement_pipeline:
+      speaker: tab5_speaker
+      # [AUDIO-2026] Ce bloc n'est PAS un reglage de sortie : c'est le format PREFERE annonce a HA
+      # (media_player/__init__.py, validate_preferred_format), donc ce que HA transcode et envoie.
+      #   - 16000 Hz bridait la voix a 8 kHz de bande passante alors que le modele Piper reellement
+      #     utilise par les 2 pipelines Assist du Tab5 (fr_FR-upmc-medium) sort du 22050 Hz : HA
+      #     sous-echantillonnait, et toutes les sifflantes (s, ch, f) passaient a la trappe.
+      #     24000 = le taux du plus haut des deux moteurs desormais en service : Piper local
+      #     (fr_FR-upmc-medium, 22050 Hz) reste sur le pipeline "Domotique", et "Discussion LLM" est
+      #     passe sur HA Cloud / AlainNeural (24000 Hz) le 05/08/2026. A 24000, le cloud est natif et
+      #     Piper est simplement surechantillonne -- ce qui ne COUPE aucun contenu ; demander 22050
+      #     ferait l'inverse et raboterait le cloud au-dessus de 11 kHz. Si les deux pipelines
+      #     revenaient un jour sur Piper seul, redescendre a 22050 (zero reechantillonnage).
+      #   - FLAC (defaut ESPHome, et ce qu'utilise le firmware officiel Home Assistant Voice PE) :
+      #     sans perte, ~2x moins de reseau que le WAV brut -> compense la montee en frequence.
+      # Limites du speaker i2s en mode primary : 16000-48000 Hz, 1-2 canaux (i2s_audio/speaker/__init__.py).
+      format: FLAC
+      sample_rate: 24000
+      num_channels: 1
+    on_announcement:
+      - if:
+          condition:
+            - microphone.is_capturing: tab5_microphone
+          then:
+            - micro_wake_word.stop:
+    on_idle:
+      - if:
+          condition:
+            - and:
+                - not:
+                    voice_assistant.is_running:
+                - switch.is_on: tab5_wake_word_active
+                # [I2S-BUS] Pendant une sonnerie de réveil, c'est
+                # `tab5_alarm_ring_loop` et lui seul qui décide quand le micro
+                # écoute : il doit lui laisser le bus I2S le temps de chaque
+                # passage de mélodie (micro et haut-parleur partagent `mic_bus`
+                # et son mutex unique). Sans ce garde, le `media_player.stop` du
+                # démarrage de sonnerie passe le lecteur en IDLE, ce hook
+                # relance microWakeWord dans la foulée, le micro reprend le bus
+                # et la mélodie est muette — constaté sur l'appareil le 05/08.
+                - lambda: 'return !id(alarm_ringing);'
+          then:
+            - micro_wake_word.start:
+
+# Pile vocale (micro_wake_word, voice_assistant) et image de la réponse de
+# l'assistant (http_request, online_image) : Tab5/paquets/tab5-assist.yaml (lot 8c).
+
+button:
+  - platform: restart
+    id: btn_restart
+    name: "Redémarrage Système"
+
+debug:

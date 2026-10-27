@@ -1,0 +1,825 @@
+# Provider-coloured ghosts show usage; grave candles mark elapsed time.
+# One or two providers use full-width tracks, three use paired 5h/7d columns.
+
+substitutions:
+  theme_sprite_base: "https://raw.githubusercontent.com/eldios/tokentide/v${tokentide_version}/assets/sprites"
+  theme_sprite_size: "big"
+  theme_tap_script: "note_activity"
+  theme_long_press_script: "theme_next"
+
+globals:
+  - id: theme_graveyard_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+image:
+  # Track caps, body tiles, and pace candles scale with the panel class.
+  - file: ${theme_sprite_base}/gy-wisp-head-claude-${theme_sprite_size}-r.png
+    id: gy_spr_head_claude
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-wisp-head-codex-${theme_sprite_size}-r.png
+    id: gy_spr_head_codex
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-wisp-head-gemini-${theme_sprite_size}-r.png
+    id: gy_spr_head_gemini
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-wisp-tail-claude-${theme_sprite_size}-r.png
+    id: gy_spr_tail_claude
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-wisp-tail-codex-${theme_sprite_size}-r.png
+    id: gy_spr_tail_codex
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-wisp-tail-gemini-${theme_sprite_size}-r.png
+    id: gy_spr_tail_gemini
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-wisp-body-claude-${theme_sprite_size}.png
+    id: gy_spr_body_claude
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-wisp-body-codex-${theme_sprite_size}.png
+    id: gy_spr_body_codex
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-wisp-body-gemini-${theme_sprite_size}.png
+    id: gy_spr_body_gemini
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-pace-ok-${theme_sprite_size}.png
+    id: gy_spr_pace_ok
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-pace-trouble-${theme_sprite_size}.png
+    id: gy_spr_pace_trouble
+    type: RGB565
+    transparency: alpha_channel
+  # Patrolling sheet ghosts match the panel class (24x32 on big, 14x16 on small).
+  - file: ${theme_sprite_base}/grave-ghost-claude-${theme_sprite_size}-r.png
+    id: gy_spr_ghost_claude
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-ghost-claude-${theme_sprite_size}-l.png
+    id: gy_spr_ghost_claude_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-ghost-codex-${theme_sprite_size}-r.png
+    id: gy_spr_ghost_codex
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-ghost-codex-${theme_sprite_size}-l.png
+    id: gy_spr_ghost_codex_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-ghost-gemini-${theme_sprite_size}-r.png
+    id: gy_spr_ghost_gemini
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-ghost-gemini-${theme_sprite_size}-l.png
+    id: gy_spr_ghost_gemini_l
+    type: RGB565
+    transparency: alpha_channel
+  # Shared cemetery props use the 1x small files.
+  - file: ${theme_sprite_base}/grave-moon-small.png
+    id: gy_spr_moon
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-tree-small.png
+    id: gy_spr_tree
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-crypt-small.png
+    id: gy_spr_crypt
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-crypt-mini-small.png
+    id: gy_spr_crypt_mini
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-zombie-1-small-r.png
+    id: gy_spr_z1r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-zombie-2-small-r.png
+    id: gy_spr_z2r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-zombie-1-small-l.png
+    id: gy_spr_z1l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-zombie-2-small-l.png
+    id: gy_spr_z2l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-vampire-small-r.png
+    id: gy_spr_vamp_r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-vampire-small-l.png
+    id: gy_spr_vamp_l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-bat-1-small-r.png
+    id: gy_spr_b1r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-bat-2-small-r.png
+    id: gy_spr_b2r
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-bat-1-small-l.png
+    id: gy_spr_b1l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-bat-2-small-l.png
+    id: gy_spr_b2l
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-tomb-1-small.png
+    id: gy_spr_tomb1
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-tomb-2-small.png
+    id: gy_spr_tomb2
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-tomb-3-small.png
+    id: gy_spr_tomb3
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-candle-lit-small.png
+    id: gy_spr_candle_lit
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-candle-lit-2-small.png
+    id: gy_spr_candle_lit2
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-candle-out-small.png
+    id: gy_spr_candle_out
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/grave-pumpkin-small.png
+    id: gy_spr_pumpkin
+    type: RGB565
+    transparency: alpha_channel
+  # Legend symbols: 1x copies of the track head and pace candle.
+  - file: ${theme_sprite_base}/gy-wisp-head-claude-small-r.png
+    id: gy_spr_legend_claude
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-wisp-head-codex-small-r.png
+    id: gy_spr_legend_codex
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-wisp-head-gemini-small-r.png
+    id: gy_spr_legend_gemini
+    type: RGB565
+    transparency: alpha_channel
+  - file: ${theme_sprite_base}/gy-pace-ok-small.png
+    id: gy_spr_legend_time
+    type: RGB565
+    transparency: alpha_channel
+
+lvgl:
+  pages:
+    - id: theme_graveyard_page
+      bg_color: 0x0d0d10
+      scrollbar_mode: "off"
+      scrollable: false
+      on_load:
+        - lambda: "id(theme_graveyard_active) = true;"
+        - script.execute: theme_graveyard_redraw
+      on_unload:
+        - lambda: "id(theme_graveyard_active) = false;"
+      widgets:
+        # Full-page gesture target, bottom of the z-order.
+        - obj:
+            id: gy_tap
+            x: 0
+            y: 0
+            width: 100%
+            height: 100%
+            bg_opa: TRANSP
+            border_width: 0
+            on_short_click:
+              - script.execute: ${theme_tap_script}
+            on_long_press:
+              - script.execute: ${theme_long_press_script}
+
+        # --- scene strip: children are clipped to the band and positioned
+        # relative to it by the redraw script ---
+        - obj:
+            id: gy_scene
+            x: 8
+            y: 20
+            width: 304
+            height: 38
+            clickable: false
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollbar_mode: "off"
+            scrollable: false
+            widgets:
+              - obj: { id: gy_ground, x: 0, y: 0, width: 10, height: 3, bg_color: 0x29241f, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+              - image: { id: gy_moon, src: gy_spr_moon }
+              - image: { id: gy_tree, src: gy_spr_tree }
+              - image: { id: gy_crypt, src: gy_spr_crypt }
+              - image: { id: gy_crypt_mini, src: gy_spr_crypt_mini, hidden: true }
+              - image: { id: gy_pumpkin, src: gy_spr_pumpkin }
+              - image: { id: gy_ghost_claude, src: gy_spr_ghost_claude }
+              - image: { id: gy_ghost_codex, src: gy_spr_ghost_codex, hidden: true }
+              - image: { id: gy_ghost_gemini, src: gy_spr_ghost_gemini, hidden: true }
+              - image: { id: gy_tomb1, src: gy_spr_tomb1 }
+              - image: { id: gy_tomb2, src: gy_spr_tomb2 }
+              - image: { id: gy_tomb3, src: gy_spr_tomb3 }
+              - image: { id: gy_roamer, src: gy_spr_z1r, hidden: true }
+              - image: { id: gy_bat, src: gy_spr_b1r, hidden: true }
+              - image: { id: gy_candle_1, src: gy_spr_candle_out }
+              - image: { id: gy_candle_2, src: gy_spr_candle_out }
+              - image: { id: gy_candle_3, src: gy_spr_candle_out }
+              - image: { id: gy_candle_4, src: gy_spr_candle_out }
+              - image: { id: gy_candle_5, src: gy_spr_candle_out }
+
+        # --- 6 window tracks: unelapsed base, elapsed stone fill, overrun tint,
+        # scrolling ghost body, tail cap, head at tip, and grave candle pace pin ---
+        # Window 0
+        - obj: { id: gy_trk_0, x: 0, y: 0, width: 10, height: 16, bg_color: 0x1e2024, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_tfill_0, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x414444, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_ovrun_0, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - image: { id: gy_body_0, src: gy_spr_body_claude, hidden: true }
+        - image: { id: gy_tail_0, src: gy_spr_tail_claude, hidden: true }
+        - image: { id: gy_head_0, src: gy_spr_head_claude, hidden: true }
+        - image: { id: gy_pace_0, src: gy_spr_pace_ok, hidden: true }
+
+        # Window 1
+        - obj: { id: gy_trk_1, x: 0, y: 0, width: 10, height: 16, bg_color: 0x1e2024, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_tfill_1, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x414444, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_ovrun_1, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - image: { id: gy_body_1, src: gy_spr_body_claude, hidden: true }
+        - image: { id: gy_tail_1, src: gy_spr_tail_claude, hidden: true }
+        - image: { id: gy_head_1, src: gy_spr_head_claude, hidden: true }
+        - image: { id: gy_pace_1, src: gy_spr_pace_ok, hidden: true }
+
+        # Window 2
+        - obj: { id: gy_trk_2, hidden: true, x: 0, y: 0, width: 10, height: 16, bg_color: 0x1e2024, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_tfill_2, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x414444, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_ovrun_2, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - image: { id: gy_body_2, src: gy_spr_body_codex, hidden: true }
+        - image: { id: gy_tail_2, src: gy_spr_tail_codex, hidden: true }
+        - image: { id: gy_head_2, src: gy_spr_head_codex, hidden: true }
+        - image: { id: gy_pace_2, src: gy_spr_pace_ok, hidden: true }
+
+        # Window 3
+        - obj: { id: gy_trk_3, hidden: true, x: 0, y: 0, width: 10, height: 16, bg_color: 0x1e2024, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_tfill_3, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x414444, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_ovrun_3, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - image: { id: gy_body_3, src: gy_spr_body_codex, hidden: true }
+        - image: { id: gy_tail_3, src: gy_spr_tail_codex, hidden: true }
+        - image: { id: gy_head_3, src: gy_spr_head_codex, hidden: true }
+        - image: { id: gy_pace_3, src: gy_spr_pace_ok, hidden: true }
+
+        # Window 4 (used only in N = 3 half-width paired columns)
+        - obj: { id: gy_trk_4, hidden: true, x: 0, y: 0, width: 10, height: 16, bg_color: 0x1e2024, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_tfill_4, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x414444, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_ovrun_4, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - image: { id: gy_body_4, src: gy_spr_body_gemini, hidden: true }
+        - image: { id: gy_tail_4, src: gy_spr_tail_gemini, hidden: true }
+        - image: { id: gy_head_4, src: gy_spr_head_gemini, hidden: true }
+        - image: { id: gy_pace_4, src: gy_spr_pace_ok, hidden: true }
+
+        # Window 5 (used only in N = 3 half-width paired columns)
+        - obj: { id: gy_trk_5, hidden: true, x: 0, y: 0, width: 10, height: 16, bg_color: 0x1e2024, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_tfill_5, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x414444, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - obj: { id: gy_ovrun_5, hidden: true, x: 0, y: 0, width: 1, height: 16, bg_color: 0x522426, bg_opa: COVER, border_width: 0, radius: 0, clickable: false }
+        - image: { id: gy_body_5, src: gy_spr_body_gemini, hidden: true }
+        - image: { id: gy_tail_5, src: gy_spr_tail_gemini, hidden: true }
+        - image: { id: gy_head_5, src: gy_spr_head_gemini, hidden: true }
+        - image: { id: gy_pace_5, src: gy_spr_pace_ok, hidden: true }
+
+        # --- written data: legend + status + up to 6 window label triplets ---
+        - obj:
+            id: gy_legend
+            x: 8
+            y: 2
+            width: SIZE_CONTENT
+            height: SIZE_CONTENT
+            clickable: false
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollbar_mode: "off"
+            scrollable: false
+            layout: { type: flex, flex_flow: row, flex_align_cross: center, pad_column: 2 }
+            widgets:
+              - image: { id: gy_legend_tokens_icon, src: gy_spr_legend_claude }
+              - label: { id: gy_legend_tokens, pad_right: 6, text_font: font_small, text_color: 0x9ca38c, text: "${str_tokens}" }
+              - image: { src: gy_spr_legend_time }
+              - label: { id: gy_legend_time, text_font: font_small, text_color: 0x9ca38c, text: "${str_time}" }
+        - label: { id: gy_status, x: 196, y: 2, width: 116, text_align: RIGHT, long_mode: SCROLL_CIRCULAR, text_font: font_small, text_color: 0xeee1b5, text: "${str_waiting}" }
+
+        - label: { id: gy_lbl_0, long_mode: CLIP, text_font: font_small, text_color: 0xeee1b5, text: "${claude_label} 5h" }
+        - label: { id: gy_val_0, width: 68, text_align: RIGHT, text_font: font_mid, text_color: 0xd97757, text: "--%" }
+        - label: { id: gy_eta_0, width: 142, text_align: RIGHT, long_mode: DOT, text_font: font_small, text_color: 0xccc19c, text: "${str_resets_in} --" }
+
+        - label: { id: gy_lbl_1, long_mode: CLIP, text_font: font_small, text_color: 0xeee1b5, text: "${claude_label} 7d" }
+        - label: { id: gy_val_1, width: 68, text_align: RIGHT, text_font: font_mid, text_color: 0xd97757, text: "--%" }
+        - label: { id: gy_eta_1, width: 142, text_align: RIGHT, long_mode: DOT, text_font: font_small, text_color: 0xccc19c, text: "${str_resets_in} --" }
+
+        - label: { id: gy_lbl_2, hidden: true, long_mode: CLIP, text_font: font_small, text_color: 0xeee1b5, text: "${codex_label} 5h" }
+        - label: { id: gy_val_2, hidden: true, width: 68, text_align: RIGHT, text_font: font_mid, text_color: 0xf1f2e8, text: "--%" }
+        - label: { id: gy_eta_2, hidden: true, width: 142, text_align: RIGHT, long_mode: DOT, text_font: font_small, text_color: 0xccc19c, text: "${str_resets_in} --" }
+
+        - label: { id: gy_lbl_3, hidden: true, long_mode: CLIP, text_font: font_small, text_color: 0xeee1b5, text: "${codex_label} 7d" }
+        - label: { id: gy_val_3, hidden: true, width: 68, text_align: RIGHT, text_font: font_mid, text_color: 0xf1f2e8, text: "--%" }
+        - label: { id: gy_eta_3, hidden: true, width: 142, text_align: RIGHT, long_mode: DOT, text_font: font_small, text_color: 0xccc19c, text: "${str_resets_in} --" }
+
+        - label: { id: gy_lbl_4, hidden: true, long_mode: CLIP, text_font: font_meta, text_color: 0xeee1b5, text: "${gemini_label} 5h" }
+        - label: { id: gy_val_4, hidden: true, width: 44, text_align: RIGHT, text_font: font_small, text_color: 0x669df6, text: "--%" }
+        - label: { id: gy_eta_4, hidden: true, width: 44, text_align: RIGHT, long_mode: DOT, text_font: font_meta, text_color: 0xccc19c, text: "--" }
+
+        - label: { id: gy_lbl_5, hidden: true, long_mode: CLIP, text_font: font_meta, text_color: 0xeee1b5, text: "7d" }
+        - label: { id: gy_val_5, hidden: true, width: 68, text_align: RIGHT, text_font: font_small, text_color: 0x669df6, text: "--%" }
+        - label: { id: gy_eta_5, hidden: true, width: 44, text_align: RIGHT, long_mode: DOT, text_font: font_meta, text_color: 0xccc19c, text: "--" }
+
+script:
+  # Full relayout + data refresh, run on page load and by the 500ms interval
+  # below, which also advances the motion clock (ghost bob, candle flicker).
+  - id: theme_graveyard_redraw
+    mode: single
+    then:
+      - lambda: |-
+          if (!id(theme_graveyard_active) || id(is_screen_off)) return;
+          lv_obj_t *scr = lv_scr_act();
+          int W = lv_obj_get_width(scr);
+          if (W <= 0) return;
+          const bool big = W >= 320;
+          auto show = [](lv_obj_t *o, bool on) {
+            if (on) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+            else    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+          };
+          auto pct = [](float v) -> float { return v < 0.0f ? 0.0f : (v > 100.0f ? 100.0f : v); };
+
+          struct ProvData {
+            const char *name;
+            const char *short_name;
+            uint32_t col;
+            int state;
+            bool u5_ok, u7_ok;
+            float u5_raw, u7_raw;
+            float e5, e7;
+            const std::string *eta5, *eta7;
+            const void *head_dsc, *tail_dsc, *body_dsc;
+            const void *ghost_r_dsc, *ghost_l_dsc;
+            const void *legend_dsc;
+          };
+          bool c5k = !isnan(id(usage_5h).state);
+          bool c7k = !isnan(id(usage_7d).state);
+          bool x5k = id(codex_5h_pct) >= 0.0f;
+          bool x7k = id(codex_7d_pct) >= 0.0f;
+          bool g5k = id(gemini_5h_pct) >= 0.0f;
+          bool g7k = id(gemini_7d_pct) >= 0.0f;
+          ProvData all_p[3] = {
+            { "${claude_label}", "Cla", ${claude_color}, id(claude_state),
+              c5k, c7k, c5k ? id(usage_5h).state : 0.0f, c7k ? id(usage_7d).state : 0.0f,
+              id(elapsed_5h), id(elapsed_7d), &id(eta_5h_text), &id(eta_7d_text),
+              id(gy_spr_head_claude)->get_lv_image_dsc(), id(gy_spr_tail_claude)->get_lv_image_dsc(),
+              id(gy_spr_body_claude)->get_lv_image_dsc(),
+              id(gy_spr_ghost_claude)->get_lv_image_dsc(), id(gy_spr_ghost_claude_l)->get_lv_image_dsc(),
+              id(gy_spr_legend_claude)->get_lv_image_dsc() },
+            { "${codex_label}", "Cdx", ${codex_color}, id(codex_state),
+              x5k, x7k, x5k ? id(codex_5h_pct) : 0.0f, x7k ? id(codex_7d_pct) : 0.0f,
+              id(elapsed_codex_5h), id(elapsed_codex_7d), &id(eta_codex_5h_text), &id(eta_codex_7d_text),
+              id(gy_spr_head_codex)->get_lv_image_dsc(), id(gy_spr_tail_codex)->get_lv_image_dsc(),
+              id(gy_spr_body_codex)->get_lv_image_dsc(),
+              id(gy_spr_ghost_codex)->get_lv_image_dsc(), id(gy_spr_ghost_codex_l)->get_lv_image_dsc(),
+              id(gy_spr_legend_codex)->get_lv_image_dsc() },
+            { "${gemini_label}", "Gem", ${gemini_color}, id(gemini_state),
+              g5k, g7k, g5k ? id(gemini_5h_pct) : 0.0f, g7k ? id(gemini_7d_pct) : 0.0f,
+              id(elapsed_gemini_5h), id(elapsed_gemini_7d), &id(eta_gemini_5h_text), &id(eta_gemini_7d_text),
+              id(gy_spr_head_gemini)->get_lv_image_dsc(), id(gy_spr_tail_gemini)->get_lv_image_dsc(),
+              id(gy_spr_body_gemini)->get_lv_image_dsc(),
+              id(gy_spr_ghost_gemini)->get_lv_image_dsc(), id(gy_spr_ghost_gemini_l)->get_lv_image_dsc(),
+              id(gy_spr_legend_gemini)->get_lv_image_dsc() }
+          };
+
+          const bool pres[3] = { id(claude_present), id(codex_present), id(gemini_present) };
+          int act[3] = { 0, 1, 2 };
+          int N = 0;
+          for (int i = 0; i < 3; i++) {
+            if (pres[i]) act[N++] = i;
+          }
+          const bool none_configured = (N == 0);
+          if (none_configured) { act[0] = 0; N = 1; }
+
+          static uint32_t t = 0;
+          t++;
+          const int BOB[4] = { 0, -1, 0, 1 };
+
+          // --- cemetery scene strip (coordinates relative to gy_scene) ---
+          lv_obj_set_pos(id(gy_scene), big ? 8 : 4, big ? 20 : 13);
+          lv_obj_set_size(id(gy_scene), big ? 304 : 232, big ? 38 : 16);
+          lv_obj_set_pos(id(gy_ground), 0, big ? 35 : 15);
+          lv_obj_set_size(id(gy_ground), big ? 304 : 232, big ? 3 : 1);
+          show(id(gy_moon), big);       lv_obj_set_pos(id(gy_moon), 266, 0);
+          show(id(gy_tree), big);       lv_obj_set_pos(id(gy_tree), 0, -6);
+          show(id(gy_crypt), big);      lv_obj_set_pos(id(gy_crypt), 212, 1);
+          show(id(gy_crypt_mini), !big); lv_obj_set_pos(id(gy_crypt_mini), 192, 0);
+          show(id(gy_pumpkin), big);    lv_obj_set_pos(id(gy_pumpkin), 232, 23);
+          show(id(gy_tomb1), big);      lv_obj_set_pos(id(gy_tomb1), 36, 18);
+          show(id(gy_tomb2), big);      lv_obj_set_pos(id(gy_tomb2), 92, 18);
+          show(id(gy_tomb3), big);      lv_obj_set_pos(id(gy_tomb3), 184, 24);
+
+          // Patrolling sheet ghosts: one slot per provider, shown only for enabled providers.
+          const int GSW = big ? 304 : 232;
+          const int GLO = 12, GHI = big ? 268 : 196;
+          const int GSTEP = big ? 2 : 1;
+          static int g_st[3] = { 0, 0, 0 };
+          static int g_x[3], g_tgt[3] = { 0, 0, 0 };
+          static int g_dir[3] = { 1, -1, 1 };
+          static int g_rem[3];
+          static uint32_t g_rng[3] = { 313, 1597, 4219 };
+          static int g_face[3] = { 0, 0, 0 };
+          static bool g_init = false;
+          auto gpick = [&](int sl, int lo, int hi) -> int {
+            g_rng[sl] = (25173u * g_rng[sl] + 13849u) % 65536u;
+            return lo + (int) (g_rng[sl] % (uint32_t) (hi - lo + 1));
+          };
+          if (!g_init) {
+            g_init = true;
+            g_x[0] = big ? 56 : 28;
+            g_x[1] = big ? 114 : 92;
+            g_x[2] = big ? 154 : 148;
+            for (int sl = 0; sl < 3; sl++) g_rem[sl] = gpick(sl, 48, 120);
+          }
+          lv_obj_t *ghosts[3] = { id(gy_ghost_claude), id(gy_ghost_codex), id(gy_ghost_gemini) };
+          for (int sl = 0; sl < 3; sl++) {
+            if (g_st[sl] == 0) {
+              g_x[sl] += g_dir[sl] * GSTEP;
+              if (g_x[sl] <= GLO) { g_x[sl] = GLO; g_dir[sl] = 1; }
+              if (g_x[sl] >= GHI) { g_x[sl] = GHI; g_dir[sl] = -1; }
+              if (--g_rem[sl] <= 0) {
+                if (gpick(sl, 0, 65535) / 16384 == 0) {
+                  g_st[sl] = 1;
+                } else {
+                  g_dir[sl] = -g_dir[sl];
+                  g_rem[sl] = gpick(sl, 48, 120);
+                }
+              }
+            } else if (g_st[sl] == 1) {
+              g_x[sl] += g_dir[sl] * GSTEP;
+              if (g_x[sl] <= -24 || g_x[sl] >= GSW) {
+                g_x[sl] = (g_x[sl] <= -24) ? -24 : GSW;
+                g_st[sl] = 2;
+                g_rem[sl] = gpick(sl, 16, 40);
+              }
+            } else if (g_st[sl] == 2) {
+              if (--g_rem[sl] <= 0) {
+                g_dir[sl] = (gpick(sl, 0, 65535) / 32768 == 0) ? 1 : -1;
+                g_tgt[sl] = gpick(sl, GLO, GHI);
+                g_x[sl] = (g_dir[sl] > 0) ? -24 : GSW;
+                g_st[sl] = 3;
+              }
+            } else {
+              g_x[sl] += g_dir[sl] * GSTEP;
+              if ((g_dir[sl] > 0 && g_x[sl] >= g_tgt[sl]) || (g_dir[sl] < 0 && g_x[sl] <= g_tgt[sl])) {
+                g_x[sl] = g_tgt[sl];
+                g_st[sl] = 0;
+                g_rem[sl] = gpick(sl, 48, 120);
+              }
+            }
+            bool g_en = pres[sl] || (none_configured && sl == 0);
+            bool gvis = (g_st[sl] != 2) && g_en;
+            show(ghosts[sl], gvis);
+            if (gvis) {
+              int gy = big ? (2 + BOB[((t + sl * 3) / 3) % 4]) : 0;
+              lv_obj_set_pos(ghosts[sl], g_x[sl], gy);
+              if (g_face[sl] != g_dir[sl]) {
+                g_face[sl] = g_dir[sl];
+                lv_image_set_src(ghosts[sl], g_dir[sl] > 0 ? all_p[sl].ghost_r_dsc : all_p[sl].ghost_l_dsc);
+              }
+            }
+          }
+
+          // Roaming act: a zombie shambles through, or a vampire walks in,
+          // transforms and a bat flies away; one shared slot with dwells.
+          const int RY = big ? 21 : 7;
+          static int r_st = 0;
+          static int r_act = 0, r_x = 0, r_y = 0, r_tgt = 0, r_dir = 1, r_ph = 0, r_rem = 0;
+          static uint32_t r_rng = 7331;
+          static bool r_init = false;
+          auto rpick = [&](int lo, int hi) -> int {
+            r_rng = (25173u * r_rng + 13849u) % 65536u;
+            return lo + (int) (r_rng % (uint32_t) (hi - lo + 1));
+          };
+          if (!r_init) { r_init = true; r_rem = rpick(24, 48); }
+          const void *z_src[2][2] = { { id(gy_spr_z1r)->get_lv_image_dsc(), id(gy_spr_z2r)->get_lv_image_dsc() },
+                                      { id(gy_spr_z1l)->get_lv_image_dsc(), id(gy_spr_z2l)->get_lv_image_dsc() } };
+          const void *b_src[2][2] = { { id(gy_spr_b1r)->get_lv_image_dsc(), id(gy_spr_b2r)->get_lv_image_dsc() },
+                                      { id(gy_spr_b1l)->get_lv_image_dsc(), id(gy_spr_b2l)->get_lv_image_dsc() } };
+          if (r_st == 0) {
+            if (--r_rem <= 0) {
+              r_act = rpick(0, 65535) / 32768;
+              r_dir = (rpick(0, 65535) / 32768 == 0) ? 1 : -1;
+              r_tgt = rpick(big ? 96 : 72, big ? 192 : 152);
+              r_x = (r_dir > 0) ? -10 : GSW;
+              r_y = RY;
+              r_ph = 0;
+              r_st = r_act ? 2 : 1;
+              show(id(gy_roamer), true);
+              lv_image_set_src(id(gy_roamer), r_act
+                  ? (r_dir > 0 ? id(gy_spr_vamp_r)->get_lv_image_dsc() : id(gy_spr_vamp_l)->get_lv_image_dsc())
+                  : z_src[r_dir > 0 ? 0 : 1][0]);
+            }
+          } else if (r_st == 1) {
+            r_ph = (r_ph + 1) % 4;
+            if (big || (r_ph % 2) == 0) r_x += r_dir;
+            lv_image_set_src(id(gy_roamer), z_src[r_dir > 0 ? 0 : 1][r_ph / 2]);
+            lv_obj_set_pos(id(gy_roamer), r_x, r_y);
+            if (r_x <= -10 || r_x >= GSW) {
+              show(id(gy_roamer), false);
+              r_st = 0;
+              r_rem = rpick(32, 72);
+            }
+          } else if (r_st == 2) {
+            r_x += r_dir * (big ? 2 : 1);
+            if ((r_dir > 0 && r_x >= r_tgt) || (r_dir < 0 && r_x <= r_tgt)) {
+              r_x = r_tgt;
+              r_st = 3;
+              r_rem = rpick(6, 12);
+            }
+            lv_obj_set_pos(id(gy_roamer), r_x, r_y);
+          } else if (r_st == 3) {
+            if (--r_rem <= 0) r_st = 4;
+          } else if (r_st == 4) {
+            show(id(gy_roamer), false);
+            show(id(gy_bat), true);
+            lv_image_set_src(id(gy_bat), b_src[r_dir > 0 ? 0 : 1][0]);
+            lv_obj_set_pos(id(gy_bat), r_x, r_y);
+            r_ph = 0;
+            r_st = 5;
+          } else {
+            r_ph = (r_ph + 1) % 4;
+            r_x += r_dir * (big ? 3 : 2);
+            r_y -= big ? 2 : 1;
+            lv_image_set_src(id(gy_bat), b_src[r_dir > 0 ? 0 : 1][r_ph % 2]);
+            lv_obj_set_pos(id(gy_bat), r_x, r_y);
+            if (r_x <= -10 || r_x >= GSW || r_y <= -6) {
+              show(id(gy_bat), false);
+              r_st = 0;
+              r_rem = rpick(32, 72);
+            }
+          }
+
+          // Grave candles: one lights per 20% of the first active provider's
+          // 5h window; lit flames flicker between two frames every second.
+          const auto &lead_p = all_p[act[0]];
+          bool lead_5k = lead_p.u5_ok;
+          float lead_5 = lead_5k ? pct(lead_p.u5_raw) : 0.0f;
+          lv_obj_t *cnd[5] = { id(gy_candle_1), id(gy_candle_2), id(gy_candle_3), id(gy_candle_4), id(gy_candle_5) };
+          const int cxb[5] = { 80, 108, 142, 260, 280 };
+          const int cxs[5] = { 8, 56, 74, 126, 216 };
+          const int thr[5] = { 20, 40, 60, 80, 100 };
+          bool flick = ((t / 2) % 2) == 1;
+          static int cnd_state[5] = { -1, -1, -1, -1, -1 };
+          for (int i = 0; i < 5; i++) {
+            lv_obj_set_pos(cnd[i], big ? cxb[i] : cxs[i], big ? 26 : 3);
+            int cs = (lead_5k && lead_5 >= thr[i]) ? (flick ? 2 : 1) : 0;
+            if (cs == cnd_state[i]) continue;
+            cnd_state[i] = cs;
+            if (cs == 0)      lv_image_set_src(cnd[i], id(gy_spr_candle_out)->get_lv_image_dsc());
+            else if (cs == 1) lv_image_set_src(cnd[i], id(gy_spr_candle_lit)->get_lv_image_dsc());
+            else              lv_image_set_src(cnd[i], id(gy_spr_candle_lit2)->get_lv_image_dsc());
+          }
+
+          // --- top legend & status bar ---
+          // The legend's usage symbol takes the lead provider's colour, like the candles.
+          lv_obj_set_pos(id(gy_legend), big ? 8 : 4, big ? 2 : 0);
+          lv_obj_set_style_text_font(id(gy_legend_tokens), big ? id(font_small) : id(font_meta), 0);
+          lv_obj_set_style_text_font(id(gy_legend_time), big ? id(font_small) : id(font_meta), 0);
+          static const void *legend_src = nullptr;
+          if (lead_p.legend_dsc != legend_src) {
+            legend_src = lead_p.legend_dsc;
+            lv_image_set_src(id(gy_legend_tokens_icon), legend_src);
+          }
+          lv_obj_set_y(id(gy_status), big ? 2 : 0);
+          lv_obj_set_style_text_font(id(gy_status), big ? id(font_small) : id(font_meta), 0);
+
+          // Device status from the engine. The legend keeps its own width and
+          // the status scrolls in the room right of it.
+          static std::string st_last;
+          const std::string &st = id(status_text);
+          lv_obj_set_style_text_color(id(gy_status), lv_color_hex(id(status_alert) ? 0xff6b6b : 0xeee1b5), 0);
+          if (st != st_last) {
+            st_last = st;
+            lv_label_set_text(id(gy_status), st.c_str());
+            lv_obj_set_width(id(gy_status), LV_SIZE_CONTENT);
+            lv_obj_update_layout(id(gy_status));
+            const int right = big ? 312 : 236, legend_x = (big ? 8 : 4);
+            lv_obj_update_layout(id(gy_legend));
+            int sw = lv_obj_get_width(id(gy_status));
+            int sw_max = right - legend_x - lv_obj_get_width(id(gy_legend)) - 6;
+            if (sw > sw_max) { sw = sw_max; lv_obj_set_width(id(gy_status), sw); }
+            lv_obj_set_x(id(gy_status), right - sw);
+          }
+
+          // --- adaptive 1, 2, or 3 provider windows (0..5) ---
+          lv_obj_t *lbls[6]   = { id(gy_lbl_0), id(gy_lbl_1), id(gy_lbl_2), id(gy_lbl_3), id(gy_lbl_4), id(gy_lbl_5) };
+          lv_obj_t *vals[6]   = { id(gy_val_0), id(gy_val_1), id(gy_val_2), id(gy_val_3), id(gy_val_4), id(gy_val_5) };
+          lv_obj_t *etas[6]   = { id(gy_eta_0), id(gy_eta_1), id(gy_eta_2), id(gy_eta_3), id(gy_eta_4), id(gy_eta_5) };
+          lv_obj_t *trks[6]   = { id(gy_trk_0), id(gy_trk_1), id(gy_trk_2), id(gy_trk_3), id(gy_trk_4), id(gy_trk_5) };
+          lv_obj_t *tfills[6] = { id(gy_tfill_0), id(gy_tfill_1), id(gy_tfill_2), id(gy_tfill_3), id(gy_tfill_4), id(gy_tfill_5) };
+          lv_obj_t *ovruns[6] = { id(gy_ovrun_0), id(gy_ovrun_1), id(gy_ovrun_2), id(gy_ovrun_3), id(gy_ovrun_4), id(gy_ovrun_5) };
+          lv_obj_t *bodies[6] = { id(gy_body_0), id(gy_body_1), id(gy_body_2), id(gy_body_3), id(gy_body_4), id(gy_body_5) };
+          lv_obj_t *tails[6]  = { id(gy_tail_0), id(gy_tail_1), id(gy_tail_2), id(gy_tail_3), id(gy_tail_4), id(gy_tail_5) };
+          lv_obj_t *heads[6]  = { id(gy_head_0), id(gy_head_1), id(gy_head_2), id(gy_head_3), id(gy_head_4), id(gy_head_5) };
+          lv_obj_t *paces[6]  = { id(gy_pace_0), id(gy_pace_1), id(gy_pace_2), id(gy_pace_3), id(gy_pace_4), id(gy_pace_5) };
+
+          static std::string lbl_last[6], val_last[6], eta_last[6];
+          static int slot_prov_last[6] = { -1, -1, -1, -1, -1, -1 };
+          static int slot_trbl_last[6] = { -1, -1, -1, -1, -1, -1 };
+          static int slot_mode_last[6] = { -1, -1, -1, -1, -1, -1 };
+
+          const void *pace_ok_dsc = id(gy_spr_pace_ok)->get_lv_image_dsc();
+          const void *pace_tr_dsc = id(gy_spr_pace_trouble)->get_lv_image_dsc();
+          const int ry1_b[2] = { 76, 154 }, ry1_s[2] = { 40, 86 };
+          const int ry2_b[4] = { 62, 106, 150, 194 }, ry2_s[4] = { 31, 57, 83, 108 };
+          const int ry3_b[3] = { 62, 122, 182 }, ry3_s[3] = { 31, 66, 100 };
+
+          int T = big ? 48 : 24;
+          int shift = (int) ((t / 2) % T);
+
+          for (int i = 0; i < 6; i++) {
+            bool vis = (i < 2 * N);
+            show(lbls[i], vis); show(vals[i], vis); show(etas[i], vis); show(trks[i], vis);
+            if (!vis) {
+              show(tfills[i], false); show(ovruns[i], false); show(bodies[i], false);
+              show(tails[i], false);  show(heads[i], false);  show(paces[i], false);
+              continue;
+            }
+
+            int p_idx = i / 2;
+            int win = i % 2;
+            int prov_id = act[p_idx];
+            const auto &p = all_p[prov_id];
+            bool u_ok = (win == 0) ? p.u5_ok : p.u7_ok;
+            float u_raw = (win == 0) ? p.u5_raw : p.u7_raw;
+            float u_val = u_ok ? pct(u_raw) : 0.0f;
+            float el = (win == 0) ? p.e5 : p.e7;
+            bool t_ok = (el >= 0.0f);
+            float t_val = t_ok ? pct(el * 100.0f) : 0.0f;
+            const std::string &raw_eta = (win == 0) ? *p.eta5 : *p.eta7;
+            bool trouble = tokentide_poller::window_off_pace(u_ok, u_raw, el);
+
+            if (slot_prov_last[i] != prov_id) {
+              slot_prov_last[i] = prov_id;
+              lv_obj_set_style_text_color(vals[i], lv_color_hex(p.col), 0);
+              lv_image_set_src(heads[i], p.head_dsc);
+              lv_image_set_src(tails[i], p.tail_dsc);
+              lv_image_set_src(bodies[i], p.body_dsc);
+              // One widget per body: the sprite repeats at its own width and
+              // the offset scrolls it.
+              lv_image_set_inner_align(bodies[i], LV_IMAGE_ALIGN_TILE);
+            }
+            int trbl_i = trouble ? 1 : 0;
+            if (slot_trbl_last[i] != trbl_i) {
+              slot_trbl_last[i] = trbl_i;
+              lv_obj_set_style_text_color(etas[i], lv_color_hex(trouble ? 0xf2a88d : 0xccc19c), 0);
+              lv_image_set_src(paces[i], trouble ? pace_tr_dsc : pace_ok_dsc);
+            }
+            int mode_i = (N == 3) ? 3 : 2;
+            if (slot_mode_last[i] != mode_i) {
+              slot_mode_last[i] = mode_i;
+              if (N == 3) {
+                lv_obj_set_style_text_font(lbls[i], id(font_meta), 0);
+                lv_obj_set_style_text_font(vals[i], id(font_small), 0);
+                lv_obj_set_style_text_font(etas[i], id(font_meta), 0);
+              } else {
+                lv_obj_set_style_text_font(lbls[i], id(font_small), 0);
+                lv_obj_set_style_text_font(vals[i], id(font_mid), 0);
+                lv_obj_set_style_text_font(etas[i], id(font_meta), 0);
+              }
+            }
+
+            std::string v_str = "--%";
+            if (u_ok) {
+              char vb[8];
+              snprintf(vb, sizeof(vb), "%d%%", (int) lroundf(u_raw < 0.0f ? 0.0f : u_raw));
+              v_str = vb;
+            }
+            if (v_str != val_last[i]) { val_last[i] = v_str; lv_label_set_text(vals[i], v_str.c_str()); }
+
+            int tx = 0, ty = 0, tw = 0, th = big ? 16 : 8, pad = big ? 8 : 4;
+            if (N < 3) {
+              int ly = (N == 1) ? (big ? ry1_b[i] : ry1_s[i]) : (big ? ry2_b[i] : ry2_s[i]);
+              std::string l_str = std::string(none_configured ? "${str_setup}" : p.name) + (win == 0 ? " 5h" : " 7d");
+              if (l_str != lbl_last[i]) { lbl_last[i] = l_str; lv_label_set_text(lbls[i], l_str.c_str()); }
+
+              std::string e_str;
+              if (p.state == tokentide_poller::STATE_NO_DATA) {
+                e_str = "${str_no_data}";
+              } else if (t_ok) {
+                char eb[32];
+                snprintf(eb, sizeof(eb), big ? "${str_time} %d%% | %s" : "${str_time_short}:%d%% | %s",
+                         (int) lroundf(t_val), raw_eta.c_str());
+                e_str = eb;
+              } else {
+                e_str = std::string("${str_resets_in} ") + raw_eta;
+              }
+              if (e_str != eta_last[i]) { eta_last[i] = e_str; lv_label_set_text(etas[i], e_str.c_str()); }
+
+              lv_obj_set_pos(lbls[i], big ? 8 : 4, big ? ly + 4 : ly);
+              lv_obj_set_width(lbls[i], big ? 88 : 64);
+              lv_obj_set_pos(vals[i], big ? 98 : 68, ly - 1);
+              lv_obj_set_width(vals[i], big ? 68 : 48);
+              lv_obj_set_pos(etas[i], big ? 170 : 118, big ? ly + 4 : ly);
+              lv_obj_set_size(etas[i], big ? 142 : 118, big ? 20 : 16);
+
+              tx = big ? 16 : 8;
+              ty = ly + (big ? 28 : 18);
+              tw = big ? 288 : 224;
+            } else {
+              int ly = big ? ry3_b[p_idx] : ry3_s[p_idx];
+              int cx = (win == 0) ? (big ? 8 : 4) : (big ? 164 : 124);
+              int cw = big ? 148 : 112;
+
+              std::string l_str = (win == 0)
+                  ? (std::string(big ? p.name : p.short_name) + " 5h")
+                  : std::string("7d");
+              if (l_str != lbl_last[i]) { lbl_last[i] = l_str; lv_label_set_text(lbls[i], l_str.c_str()); }
+
+              std::string e_str;
+              for (char ch : raw_eta) {
+                // The small paired cells fit the leading countdown unit.
+                if (!big && ch == ' ') break;
+                if (ch != ' ') e_str.push_back(ch);
+              }
+              if (big && e_str.size() > 5) e_str = raw_eta.substr(0, raw_eta.find(' '));
+              if (p.state == tokentide_poller::STATE_NO_DATA) e_str = "${str_no_data}";
+              if (e_str != eta_last[i]) { eta_last[i] = e_str; lv_label_set_text(etas[i], e_str.c_str()); }
+
+              // Label and value on the first line, the reset under them across the cell.
+              lv_obj_set_pos(lbls[i], cx, ly);
+              lv_obj_set_width(lbls[i], big ? 94 : 70);
+              lv_obj_set_pos(vals[i], cx + (big ? 100 : 74), ly - 1);
+              lv_obj_set_width(vals[i], big ? 48 : 38);
+              lv_obj_set_pos(etas[i], cx, ly + (big ? 20 : 13));
+              lv_obj_set_size(etas[i], cw, big ? 16 : 13);
+
+              tx = cx;
+              ty = ly + (big ? 38 : 26);
+              tw = cw;
+            }
+
+            int U = tw - 2 * pad;
+            int L_used = u_ok ? (int) lroundf(U * u_val / 100.0f) : 0;
+            int L_time = t_ok ? (int) lroundf(U * t_val / 100.0f) : 0;
+
+            lv_obj_set_pos(trks[i], tx, ty);
+            lv_obj_set_size(trks[i], tw, th);
+
+            bool tfill_on = t_ok && L_time >= 1;
+            show(tfills[i], tfill_on);
+            if (tfill_on) {
+              lv_obj_set_pos(tfills[i], tx + pad, ty);
+              lv_obj_set_size(tfills[i], L_time, th);
+            }
+
+            bool ovrun_on = u_ok && t_ok && L_used > L_time;
+            show(ovruns[i], ovrun_on);
+            if (ovrun_on) {
+              lv_obj_set_pos(ovruns[i], tx + pad + L_time, ty);
+              lv_obj_set_size(ovruns[i], L_used - L_time, th);
+            }
+
+            if (u_ok && L_used >= 1) {
+              lv_obj_set_pos(bodies[i], tx + pad, ty);
+              lv_obj_set_size(bodies[i], L_used, th);
+              lv_image_set_offset_x(bodies[i], -shift);
+              show(bodies[i], true);
+            } else {
+              show(bodies[i], false);
+            }
+
+            bool tail_on = u_ok && L_used >= (big ? 16 : 8);
+            show(tails[i], tail_on);
+            if (tail_on) lv_obj_set_pos(tails[i], tx, ty);
+
+            show(heads[i], u_ok);
+            if (u_ok) lv_obj_set_pos(heads[i], tx + L_used, ty);
+
+            show(paces[i], t_ok);
+            if (t_ok) lv_obj_set_pos(paces[i], tx + pad + L_time - (big ? 7 : 3), ty - (big ? 2 : 1));
+          }
+
+interval:
+  - interval: 500ms
+    then:
+      - script.execute: theme_graveyard_redraw

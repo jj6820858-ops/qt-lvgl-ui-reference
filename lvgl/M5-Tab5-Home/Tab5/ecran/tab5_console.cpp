@@ -1,0 +1,317 @@
+/**
+ * [AI-CONTEXT]
+ * @file tab5_console.cpp
+ * @role Console système (page « Système » du popup Réglages depuis le 08/10/2026,
+ *       console_sys.yaml) : ligne status (uptime / Wi-Fi / temp CPU), synchro volume et
+ *       icônes mute, diagnostics mémoire/réseau, charge de chaque cœur du processeur
+ *       (update_console_cpu_ui, 06/10/2026 ; la ligne « Batterie » est dans
+ *       tab5_zones.cpp, avec l'état de la batterie).
+ *       Unité de compilation issue de la scission de tab5_custom.cpp (lot (e) de
+ *       l'audit du 06/09/2026, faite le 08/09/2026) : mêmes fonctions, même ordre,
+ *       aucune logique modifiée.
+ * @regle_absolue Seul point de contact avec l'API LVGL, comme avant : les YAML
+ *                n'appellent que des helpers déclarés dans tab5_custom.h. Les
+ *                helpers partagés entre unités sont déclarés dans tab5_internal.h.
+ * @memory_constraint Pas de std::string dans une boucle de parsing : découper un char* en place.
+ *       `split_fields()` (tab5_core.h) garde les champs vides ; `strtok_r` les fusionne.
+ */
+#include "tab5_custom.h"
+#include "tab5_internal.h"
+#include "lvgl.h"
+#include "esphome/components/lvgl/lvgl_esphome.h"
+#include <esp_heap_caps.h>
+#include <esp_hosted.h>
+#include <esp_hosted_host_fw_ver.h>
+#ifdef USE_WIFI  // la vraie tablette ; pas le rendu hors tablette (pas de Wi-Fi)
+#include <esp_wifi.h>
+#include "esphome/components/wifi/wifi_component.h"
+#endif
+#if defined(ESP_PLATFORM)
+#include <esp_ipc.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/idf_additions.h>  // ulTaskGetIdleRunTimeCounterForCore
+#endif
+#include <cinttypes>
+#include <ctime>
+#include <cstring>
+#include <vector>
+#include <map>
+
+// =============================================================================
+// Console diagnostic — ligne status (uptime / Wi-Fi / temp CPU), garde #T222 : les
+// appelants ne remplissent la console que si elle est affichée, page « Système » des
+// Réglages depuis le 08/10/2026 (reglages_page_visible, tab5_reglages.cpp).
+// =============================================================================
+
+void update_console_uptime_label(lv_obj_t* label, float uptime_s) {
+    if (label == nullptr) return;
+    int total = (int)uptime_s;
+    int days = total / 86400;
+    int hours = (total % 86400) / 3600;
+    int mins = (total % 3600) / 60;
+    char buf[32];
+    if (days > 0) {
+        snprintf(buf, sizeof(buf), "%dj %02dh%02d", days, hours, mins);
+    } else {
+        snprintf(buf, sizeof(buf), "%02dh%02d", hours, mins);
+    }
+    ui_text(label, buf);
+}
+
+void update_console_rssi_label(lv_obj_t* label, float rssi_dbm) {
+    if (label == nullptr) return;
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.0f dBm", rssi_dbm);
+    ui_text(label, buf);
+}
+
+void update_console_temp_label(lv_obj_t* label, float core_temp_c) {
+    if (label == nullptr) return;
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.1f \xC2\xB0", core_temp_c);
+    ui_text(label, buf);
+}
+
+void refresh_console_status_row_ui(lv_obj_t* lbl_uptime, lv_obj_t* lbl_rssi, lv_obj_t* lbl_temp,
+    bool has_uptime, float uptime_s, bool has_rssi, float rssi_dbm, bool has_temp, float core_temp_c) {
+    if (has_uptime) update_console_uptime_label(lbl_uptime, uptime_s);
+    if (has_rssi) update_console_rssi_label(lbl_rssi, rssi_dbm);
+    if (has_temp) update_console_temp_label(lbl_temp, core_temp_c);
+}
+
+// Volume : un seul endroit repeint les trois affichages (slider console, label %
+// de la console, slider du popup assistant). Avant, chaque slider ne peignait que
+// le sien et un reglage venu de Home Assistant n'en peignait aucun.
+void ui_sync_volume_widgets(lv_obj_t* slider_console, lv_obj_t* lbl_console_pct,
+    lv_obj_t* slider_assist, float volume) {
+    // Arrondi et borné à 0..100 ; NaN (que les deux bornes laissaient passer avant l'audit
+    // du 07/10/2026, DO-5) : 0, sans conversion indéfinie.
+    const int pct = tab5_float_vers_int(volume * 100.0f + 0.5f, 0, 100, 0);
+    if (slider_console != nullptr) lv_slider_set_value(slider_console, pct, LV_ANIM_OFF);
+    if (slider_assist != nullptr) lv_slider_set_value(slider_assist, pct, LV_ANIM_OFF);
+    if (lbl_console_pct != nullptr) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d%%", pct);
+        ui_text(lbl_console_pct, buf);
+    }
+}
+
+// Muet : l'icone du popup assistant peint `system_muted` (le bouton Muet de
+// l'accueil est retire depuis le 05/10/2026). Un seul endroit la pose.
+void ui_sync_mute_icon(lv_obj_t* icon_assist, bool muted) {
+    // Tuile − / + (ADR-0033) : le son de la tablette y montre aussi le muet.
+    reglables_volume_tablette();
+    if (icon_assist == nullptr) return;
+    ui_text(icon_assist, muted ? "\U000F0581" : "\U000F057E");
+    ui_text_color(icon_assist, muted ? UIColor.ERROR : UIColor.TEXT_SOFT);
+}
+
+// Met a jour les widgets de la console diagnostic (SRAM/PSRAM/frag/loop/IP/SSID).
+// Factorise depuis l'interval 2s de tab5-sensors-diagnostics.yaml (Phase 3, #T164). Le garde
+// "console visible ?" reste dans le YAML (reglages_page_visible(REGLAGES_PAGE_SYSTEME)).
+void update_console_diagnostics_ui(lv_obj_t* lbl_sram, lv_obj_t* bar_sram,
+    lv_obj_t* lbl_psram, lv_obj_t* bar_psram, lv_obj_t* lbl_frag, lv_obj_t* lbl_flash,
+    bool loop_time_has_state, float loop_time, lv_obj_t* lbl_loop,
+    bool wifi_ip_has_state, const char* wifi_ip, lv_obj_t* lbl_ip,
+    bool wifi_ssid_has_state, const char* wifi_ssid, lv_obj_t* lbl_ssid) {
+
+    if (lbl_sram != nullptr) {
+        // heap_caps d'ESP-IDF. L'ancienne branche Arduino (ESP.getFreeHeap()…) est
+        // retirée : le projet est en ESP-IDF seul. Le rendu hors tablette (lot 7) fournit
+        // un esp_heap_caps.h qui renvoie 0 (Tab5/rendu/hote/).
+        float sram_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024.0f;
+        float sram_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL) / 1024.0f;
+        float psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024.0f / 1024.0f;
+        float psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024.0f / 1024.0f;
+        float frag = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024.0f;
+
+        float sram_used = sram_total - sram_free;
+        if (sram_used < 0) sram_used = 0;
+        float psram_used = psram_total - psram_free;
+        if (psram_used < 0) psram_used = 0;
+
+        // Total nul (tablette virtuelle) : 0 %, pas 0/0 = NaN converti en entier (DO-5,
+        // audit du 07/10/2026).
+        const int sram_pct = sram_total > 0.0f ? tab5_float_vers_int(sram_used / sram_total * 100.0f, 0, 100, 0) : 0;
+        const int psram_pct = psram_total > 0.0f ? tab5_float_vers_int(psram_used / psram_total * 100.0f, 0, 100, 0) : 0;
+
+        char b_sram[32]; snprintf(b_sram, sizeof(b_sram), "%d%% (%.1f KB)", sram_pct, sram_used);
+        ui_text(lbl_sram, b_sram);
+        lv_bar_set_value(bar_sram, sram_pct, LV_ANIM_ON);
+
+        char b_psram[32]; snprintf(b_psram, sizeof(b_psram), "%d%% (%.2f MB)", psram_pct, psram_used);
+        ui_text(lbl_psram, b_psram);
+        lv_bar_set_value(bar_psram, psram_pct, LV_ANIM_ON);
+
+        auto set_bar_color = [](lv_obj_t* bar, int pct) {
+            lv_color_t color = lv_color_hex(UIColor.SUCCESS); // Vert (Normal)
+            if (pct > 50) color = lv_color_hex(UIColor.INFO); // Bleu (Bien-Rempli)
+            if (pct > 75) color = lv_color_hex(UIColor.WARNING); // Orange (Attention)
+            if (pct > 90) color = lv_color_hex(UIColor.ERROR); // Rouge (Critique)
+            lv_obj_set_style_bg_color(bar, color, LV_PART_INDICATOR);
+        };
+        set_bar_color(bar_sram, sram_pct);
+        set_bar_color(bar_psram, psram_pct);
+
+        char b_frag[32]; snprintf(b_frag, sizeof(b_frag), "%.1f KB", frag);
+        ui_text(lbl_frag, b_frag);
+        ui_text(lbl_flash, "16.0 MB");
+    }
+
+    if (loop_time_has_state && lbl_loop != nullptr) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.0f ms", loop_time);
+        ui_text(lbl_loop, buf);
+    }
+
+    if (wifi_ip_has_state && lbl_ip != nullptr) {
+        ui_text(lbl_ip, wifi_ip);
+    }
+
+    if (wifi_ssid_has_state && lbl_ssid != nullptr) {
+        ui_text(lbl_ssid, wifi_ssid);
+    }
+}
+
+// Ligne « HA » de la carte RÉSEAU (interval 2 s de tab5-sensors-diagnostics.yaml,
+// console visible seulement) — reprend aussi la main après le « Redémarrage... »
+// affiché par le bouton Redémarrer HA.
+void update_console_ha_status_ui(lv_obj_t* lbl, bool ha_ok) {
+    if (lbl == nullptr) return;
+    ui_text(lbl, tr(ha_ok ? "Connecté" : "Hors ligne"));
+    ui_text_color(lbl, ha_ok ? UIColor.SUCCESS : UIColor.ERROR);
+}
+
+// =============================================================================
+// Charge du processeur, cœur par cœur (discussion #278, 06/10/2026)
+// =============================================================================
+// D'après le temps passé par la tâche inactive de chaque cœur, compté par FreeRTOS
+// (CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS, tab5-hardware.yaml : horloge esp_timer, 1 µs)
+// à chaque changement de tâche. La lecture ne coûte rien hors console : appelée par
+// l'interval de 2 s seulement quand la console est visible, et à son ouverture.
+// Cœur par cœur plutôt qu'une moyenne : la boucle d'ESPHome (LVGL, API, lambdas) est
+// épinglée sur le cœur 1 (esp32/core.cpp d'ESPHome) ; sur le cœur 0, les tâches
+// épinglées d'ESP-IDF (esp_timer, mDNS : sdkconfig), lwIP et les autres sans affinité
+// vont où il y a de la place. Une boucle saturée, l'autre cœur au repos, ferait une
+// moyenne de 50 % : rien ne dirait que l'écran rame.
+// Rendu hors tablette (plateforme host, ni FreeRTOS ni esp_ipc) : « -- ».
+namespace {
+struct EchantillonCpu {
+    bool valide = false;
+    int64_t t_us = 0;
+    uint32_t inactif[2] = {0, 0};
+};
+EchantillonCpu s_cpu;
+
+#if defined(ESP_PLATFORM) && defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && \
+    !defined(CONFIG_FREERTOS_UNICORE) && !defined(CONFIG_FREERTOS_SMP)
+// FreeRTOS n'ajoute le temps de la tâche en cours qu'au moment où elle cède la main :
+// la tâche inactive de l'autre cœur peut tourner depuis longtemps sans que son compteur
+// avance. Un appel inter-cœurs (esp_ipc, tâche de priorité > 0) la fait céder la main,
+// donc compter, juste avant la lecture. Celle du cœur courant ne tourne pas : c'est la
+// boucle d'ESPHome qui lit.
+void cpu_rien(void*) {}
+
+bool cpu_lire(EchantillonCpu& e) {
+    const uint32_t autre = xPortGetCoreID() == 0 ? 1 : 0;
+    if (esp_ipc_call_blocking(autre, cpu_rien, nullptr) != ESP_OK) {
+        e.valide = false;
+        return false;  // compteur de l'autre cœur peut-être en retard : « -- »
+    }
+    e.t_us = esp_timer_get_time();
+    for (int c = 0; c < 2; c++) e.inactif[c] = static_cast<uint32_t>(ulTaskGetIdleRunTimeCounterForCore(c));
+    e.valide = true;
+    return true;
+}
+#else
+bool cpu_lire(EchantillonCpu& e) {
+    e.valide = false;
+    return false;
+}
+#endif
+}  // namespace
+
+void update_console_cpu_ui(lv_obj_t* lbl, bool ouverture) {
+    if (lbl == nullptr) return;
+    EchantillonCpu e;
+    if (!cpu_lire(e)) {
+        ui_text(lbl, "--");
+        return;
+    }
+    // Ouverture, ou échantillon trop vieux (console fermée entre-temps) : point de départ.
+    const int64_t duree = e.t_us - s_cpu.t_us;
+    if (ouverture || !s_cpu.valide || duree > 5000000) {
+        s_cpu = e;
+        ui_text(lbl, "--");
+        return;
+    }
+    // Moins d'une seconde (interval tombé juste après l'ouverture) : fenêtre trop courte,
+    // on garde le point de départ et l'affichage.
+    if (duree < 1000000) return;
+    const int c0 = cpu_charge_pct(s_cpu.inactif[0], e.inactif[0], static_cast<uint32_t>(duree));
+    const int c1 = cpu_charge_pct(s_cpu.inactif[1], e.inactif[1], static_cast<uint32_t>(duree));
+    s_cpu = e;
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%d%% \xC2\xB7 %d%%", c0, c1);
+    ui_text(lbl, buf);
+}
+
+// =============================================================================
+// Co-processeur Wi-Fi (ESP32-C6) — version de son logiciel ESP-Hosted
+// =============================================================================
+
+bool read_c6_firmware_version(char* out, size_t n) {
+    esp_hosted_coprocessor_fwver_t v;
+    if (esp_hosted_get_coprocessor_fwversion(&v) != ESP_OK) {
+        ESP_LOGW("tab5.c6", "Version du C6 : pas de reponse sur le lien SDIO");
+        return false;
+    }
+    snprintf(out, n, "%" PRIu32 ".%" PRIu32 ".%" PRIu32, v.major1, v.minor1, v.patch1);
+    ESP_LOGI("tab5.c6", "ESP-Hosted : C6 en %s, bibliotheque du P4 en %d.%d.%d", out,
+             ESP_HOSTED_VERSION_MAJOR_1, ESP_HOSTED_VERSION_MINOR_1, ESP_HOSTED_VERSION_PATCH_1);
+    return true;
+}
+
+// =============================================================================
+// Wi-Fi éco (09/10/2026, demande d'Axel ; ADR-0045) — économie légère du Wi-Fi à chaud
+// =============================================================================
+// esp_wifi_set_ps() passe par ESP-Hosted : esp_wifi_remote_set_ps → rpc_wifi_set_ps,
+// requête SYNCHRONE au C6, qui appelle esp_wifi_set_ps chez lui (esp_hosted 2.12.12 du
+// build : host/api/src/esp_wifi_weak.c, slave/main/slave_wifi_std.c). Une requête sans
+// réponse bloque la boucle jusqu'à 5 s (DEFAULT_RPC_RSP_TIMEOUT) : on n'en envoie qu'une
+// par décision et par connexion. ESPHome envoie déjà la même requête (mode NONE) à chaque
+// démarrage de la station (WIFI_EVENT_STA_START, wifi_component_esp_idf.cpp).
+// set_power_save_mode() range le mode chez ESPHome, qui le réapplique alors lui-même à
+// ce démarrage : la décision survit à une reconnexion complète.
+namespace {
+// Décision envoyée au C6 (1 éco, 0 normal ; −1 : à renvoyer). 0 au départ : c'est le
+// mode qu'ESPHome pose au démarrage (power_save_mode: NONE).
+int8_t s_wifi_eco_envoye = 0;
+}  // namespace
+
+void wifi_eco_appliquer(bool eco) {
+#ifdef USE_WIFI
+    auto* const w = esphome::wifi::global_wifi_component;
+    if (w == nullptr) return;
+    w->set_power_save_mode(eco ? esphome::wifi::WIFI_POWER_SAVE_LIGHT : esphome::wifi::WIFI_POWER_SAVE_NONE);
+    if (!w->is_connected()) {
+        // Déconnecté en éco : renvoyée une fois reconnecté (le C6 a pu repartir).
+        if (s_wifi_eco_envoye == 1) s_wifi_eco_envoye = -1;
+        return;
+    }
+    const int8_t voulu = eco ? 1 : 0;
+    if (voulu == s_wifi_eco_envoye) return;
+    s_wifi_eco_envoye = voulu;  // une seule tentative, réussie ou non
+    const esp_err_t err = esp_wifi_set_ps(eco ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
+    // [AI-DEBUG] « Le Wi-Fi éco marche-t-il ? » : ces lignes le disent (tag tab5.wifi).
+    if (err == ESP_OK) {
+        ESP_LOGI("tab5.wifi", "Wi-Fi eco %s", eco ? "actif (economie legere, WIFI_PS_MIN_MODEM)" : "coupe");
+    } else {
+        ESP_LOGW("tab5.wifi", "Wi-Fi eco %s refuse par le C6 : %s", eco ? "actif" : "coupe", esp_err_to_name(err));
+    }
+#else
+    (void) eco;  // rendu hors tablette : pas de Wi-Fi
+#endif
+}

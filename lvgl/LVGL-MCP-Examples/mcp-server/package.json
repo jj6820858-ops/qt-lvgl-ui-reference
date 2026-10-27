@@ -1,0 +1,58 @@
+{
+  "name": "lvgl-mcp-server",
+  "version": "2.2.1",
+  "description": "MCP server for LVGL headless simulator - visual feedback loop for ESP32 UI development",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "lvgl-mcp-server": "bin/lvgl-mcp-server.mjs"
+  },
+  "files": [
+    "dist/",
+    "bin/",
+    "scripts/postinstall.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "lint": "eslint .",
+    "test": "node scripts/test.mjs",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "render-examples": "node scripts/render-examples.mjs",
+    "prepack": "node scripts/prepack.mjs && npm run build",
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jaklys/Lvgl-mcp-esp32.git"
+  },
+  "keywords": [
+    "mcp",
+    "lvgl",
+    "esp32",
+    "simulator",
+    "headless",
+    "model-context-protocol"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "pngjs": "^7.0.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^22.0.0",
+    "@types/pngjs": "^6.0.5",
+    "eslint": "^9.39.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.70.1"
+  }
+}

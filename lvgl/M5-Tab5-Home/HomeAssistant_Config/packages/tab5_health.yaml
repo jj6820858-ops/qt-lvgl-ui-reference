@@ -1,0 +1,687 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file packages/tab5_health.yaml
+# @role Package HA de surveillance santé du Tab5 (aucun nom d'entité à adapter
+#       depuis le 28/09/2026 : voir « ENTITÉS DE LA TABLETTE »). Sept gardes : reboot
+#       inattendu (b, nouvel horodatage de démarrage), API ESPHome
+#       déconnectée (c), erreur de rendu d'un template dans une poussée écran (d),
+#       journal des démarrages et coupures envoyé par le Tab5 (e), fichiers HA plus
+#       anciens que le firmware (f, 29/09/2026), batterie faible quand la tablette
+#       tourne sur sa batterie (g, 08/10/2026), coupure de sécurité du chargeur
+#       (h, 16/10/2026). Et trois capteurs à statistiques
+#       longues (lot K, 09/10/2026) : redémarrages, redémarrages inattendus (comptés
+#       par la garde b) et fonctionnement continu en heures.
+# @architecture_constraint L'écran est push-only (cf. docs/decisions/0001) : si
+#       les poussées s'arrêtent, l'écran se fige SILENCIEUSEMENT, sans erreur HA
+#       visible. Ces automations sont le filet de sécurité côté HA — il n'y a
+#       volontairement AUCUN fallback pull côté firmware.
+# @ai_warning Jamais de now() brut dans les templates (cf. l'en-tête
+#       de packages/tab5_push.yaml) : toute la détection repose sur les fenêtres
+#       `for:` des déclencheurs et sur trigger.from_state / trigger.to_state.
+#       La durée de fonctionnement continu lit l'instant de son déclencheur
+#       (trigger.now, trigger.to_state.last_updated), pas now().
+# @ai_instruction Les gardes notifient via le script tab5_health_notify
+#       (notification persistante + notify.notify) : un seul endroit à adapter.
+#       Chaque canal y porte continue_on_error: true : l'échec d'un canal
+#       (téléphone hors ligne, service notify mal nommé) ne doit pas empêcher
+#       l'autre de partir.
+# @install Nécessite l'activation des packages dans configuration.yaml :
+#         homeassistant:
+#           packages: !include_dir_named packages
+#       La garde (d) exige en plus que le journal système émette ses entrées
+#       sur le bus (redémarrage de HA nécessaire), et on évite de les
+#       enregistrer en base :
+#         system_log:
+#           fire_event: true
+#         recorder:
+#           exclude:
+#             event_types:
+#               - system_log_event
+#       Sans `fire_event`, la garde (d) est chargée mais ne se déclenche jamais.
+# ============================================================================
+#
+# ENTITÉS DE LA TABLETTE (piège réel, 06/08/2026) : leurs ids ne dérivent PAS du
+# nom d'appareil ESPHome (`tab5-ha-hmi`) mais du nom que Home Assistant a
+# enregistré, préfixe de pièce compris (`salon_…` chez l'auteur, pour une partie
+# d'entre elles seulement). Une première version visait `sensor.tab5_uptime` /
+# `binary_sensor.tab5_ha_hmi_ha_api_status`, qui N'EXISTAIENT PAS : les gardes
+# (b) et (c) étaient `on` dans HA et ne pouvaient JAMAIS se déclencher — un
+# filet de sécurité muet est pire que pas de filet. Depuis le 28/09/2026
+# (ADR-0024), plus aucun id écrit ici : chaque écran est trouvé par le modèle de
+# son appareil. Depuis le 25/10/2026 (ADR-0071, plusieurs écrans), la garde (b) part
+# de l'événement esphome.tab5_connected de l'écran et lit ses entités par
+# tab5_entite() (custom_templates/tab5_tablette.jinja), la garde (c) suit le registre
+# sensor.tab5_ecrans (packages/tab5_reglages.yaml). Vérification : les attributs de
+# « Tab5 · screens » dans Outils de développement → États. Les statistiques longues
+# (fin de ce fichier) suivent encore un seul écran, celui de sensor.tab5_demarrage.
+#
+# Reste à adapter si vous réutilisez ce package ailleurs :
+#   - notify.notify → votre service réel (ex : notify.mobile_app_votre_telephone)
+#     (ici `notify.notify` existe bien et route vers les mobiles déclarés)
+
+script:
+  # Canal unique des trois gardes : une notification persistante HA (remplacée si
+  # le même notification_id existe déjà) + un push mobile via notify.notify.
+  # mode parallel : deux gardes peuvent tomber en même temps (reboot + API).
+  tab5_health_notify:
+    alias: "Tab5 — health: notify (persistent + mobile)"
+    mode: parallel
+    max: 3
+    fields:
+      notification_id:
+        description: "Clé de la notification persistante (une par garde)"
+        required: true
+        selector:
+          text:
+      title:
+        description: "Titre de la notification persistante (et du mobile, sauf titre_court)"
+        required: true
+        selector:
+          text:
+      message:
+        description: "Message détaillé (notification persistante)"
+        required: true
+        selector:
+          text:
+            multiline: true
+      titre_court:
+        description: "Titre du push mobile (défaut : title)"
+        required: false
+        selector:
+          text:
+      message_court:
+        description: "Message du push mobile (défaut : message)"
+        required: false
+        selector:
+          text:
+            multiline: true
+    sequence:
+      - action: persistent_notification.create
+        continue_on_error: true
+        data:
+          notification_id: "{{ notification_id }}"
+          title: "{{ title }}"
+          message: "{{ message }}"
+      - action: notify.notify
+        continue_on_error: true
+        data:
+          title: "{{ titre_court | default(title, true) }}"
+          message: "{{ message_court | default(message, true) }}"
+
+automation:
+  # (a) Retirée en 3.8 (audit du 07/10/2026) avec le garde-fou
+  # input_boolean.is_primary_active qu'elle surveillait (packages/tab5_push.yaml) :
+  # plus aucune poussée n'en dépend. Les lettres des autres gardes restent.
+
+  # ==========================================================================
+  # (b) Reboot inattendu — nouvel horodatage de démarrage du Tab5
+  # --------------------------------------------------------------------------
+  # « Tab5 Uptime » est l'heure du dernier démarrage (capteur `uptime` de type
+  # `timestamp`), publiée UNE fois par démarrage, dès que l'heure est valide.
+  # Depuis le 26/09/2026 ; avant, des secondes publiées chaque minute, qui
+  # faisaient tourner cette garde 1 440 fois par jour.
+  # PRÉCISION ±64 s : l'état d'un capteur ESPHome est un float 32 bits, et un
+  # horodatage Unix (≈ 1,79 × 10⁹) y est arrondi au multiple de 128 s le plus
+  # proche. Mesuré le 26/09/2026 : reboot à 19:36:29 UTC, publié 19:35:28.
+  # Détection sans now() ni polling, via trigger.from_state / to_state :
+  #   1. un horodatage valide remplace un autre plus ancien (redémarrage sans
+  #      passage par `unavailable`, rare) ;
+  #   2. retour d'`unavailable`/`unknown` avec un démarrage postérieur (à 5 min
+  #      près : arrondi de 64 s + retard de HA à voir la coupure) au moment où
+  #      HA a perdu l'appareil. Une coupure Wi-Fi SANS reboot revient avec
+  #      l'ancien démarrage et ne déclenche donc pas, sauf dans les 5 min qui
+  #      suivent un démarrage (comme l'ancienne règle « uptime < 300 s ») ; un
+  #      NTP en retard ne fait rien manquer (l'état reste `unknown` jusque-là).
+  # as_timestamp(…, none) : sûr au boot, capteur pas encore initialisé (cf.
+  # règles HA du projet).
+  # ==========================================================================
+  # REDÉMARRAGE DEMANDÉ (27/09/2026) : une mise à jour (depuis HA ou `esphome
+  # upload`), le bouton « Redémarrage Système », un changement de langue ou un reset
+  # par l'USB (flasheur web) ne sont pas inattendus. La raison du démarrage arrive
+  # avec les autres états à la reconnexion, dans un ordre quelconque : on attend
+  # qu'elle soit celle de CE démarrage (elle repasse par `unavailable` à chaque
+  # coupure), au plus 1 min. Raisons « demandées » : « Reboot request from … »
+  # (ESPHome : esphome.ota, http_request.update, api…), « software via esp_restart »
+  # (le firmware, ex. le select Langue), « USB peripheral », et depuis la 3.0.1
+  # « First boot after install (…) » : premier démarrage après une installation par
+  # l'USB, flash effacée, que le flash termine par un reset du chien de garde RTC
+  # (« other watchdogs », fausse alerte à l'installation à neuf du 28/09/2026 ; le
+  # firmware ne l'excuse que si sa mémoire vient d'être effacée). Depuis le 06/10/2026
+  # (discussion #278) : « Power button or RTC watchdog (…) », un appui sur le bouton
+  # d'alimentation (chien de garde sans rapport de plantage, voir Tab5/ecran/tab5_journal.cpp) ;
+  # un chien de garde AVEC rapport (« Crash, other watchdogs ») notifie toujours. Sans
+  # raison fraîche (délai dépassé), on notifie : mieux vaut une alerte de trop qu'un
+  # plantage muet.
+  - id: tab5_health_unexpected_reboot
+    alias: "Tab5 — health: unexpected reboot (new boot)"
+    description: >-
+      Alerte quand l'heure de démarrage du Tab5 change sans que le redémarrage ait
+      été demandé : brownout, crash firmware, coupure d'alimentation. Une mise à
+      jour, un redémarrage demandé ou un changement de langue ne notifient pas.
+    # Un passage par écran (ADR-0071, 25/10/2026) : chaque tablette émet
+    # esphome.tab5_connected à chaque connexion de l'API ; c'est un démarrage si son
+    # « Tab5 Uptime » (heure du démarrage) a moins de 5 min à cet instant. Une coupure
+    # du Wi-Fi ou un redémarrage de HA reconnectent une tablette démarrée depuis
+    # longtemps : rien. Avant, le déclencheur était le miroir sensor.tab5_demarrage,
+    # qui ne suit qu'un écran (et changeait quand il passait de l'un à l'autre).
+    # parallel : deux écrans peuvent redémarrer ensemble (coupure de courant).
+    mode: parallel
+    max: 10
+    triggers:
+      - trigger: event
+        event_type: esphome.tab5_connected
+    conditions:
+      - alias: "tab5_connected : seulement depuis une tablette (modele tab5-ha-hmi)"
+        condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_origine -%}
+          {{ tab5_origine(trigger) == 'oui' }}
+    actions:
+      - variables:
+          appareil: "{{ trigger.event.data.device_id | default('', true) | string }}"
+          nom: "{% from 'tab5_tablette.jinja' import tab5_nom %}{{ tab5_nom(appareil) }}"
+          e_demarrage: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'demarrage') }}"
+          e_raison: "{% from 'tab5_tablette.jinja' import tab5_entite %}{{ tab5_entite(appareil, 'raison') }}"
+          connexion: "{{ as_timestamp(trigger.event.time_fired) }}"
+      # Juste après la connexion, HA reçoit les états de la tablette : on attend son
+      # heure de démarrage (une minute au plus). Démarrée depuis plus de 5 min : simple
+      # reconnexion, on s'arrête là.
+      - wait_template: >-
+          {{ as_timestamp(states(e_demarrage), 0) >= connexion - 300 }}
+        timeout: "00:01:00"
+        continue_on_timeout: true
+      # Écran ajouté à HA il y a moins de 10 min (HA neuf, installation) : son arrivée
+      # n'est pas un redémarrage, comme l'ancien attribut `source` vide du miroir.
+      - condition: template
+        value_template: >-
+          {{ wait.completed and as_timestamp(device_attr(appareil, 'created_at'), connexion) <= connexion - 600 }}
+      - variables:
+          demarrage: "{{ states(e_demarrage) }}"
+      # « Raison du redémarrage » de CET écran, reçue après la connexion.
+      - wait_template: >-
+          {% set r = expand(e_raison) | first | default(none) %}
+          {{ r is not none and r.state not in ['unavailable', 'unknown']
+             and as_timestamp(r.last_changed) >= connexion - 60 }}
+        timeout: "00:01:00"
+        continue_on_timeout: true
+      - variables:
+          raison: "{{ states(e_raison) }}"
+          demande: >-
+            {{ wait.completed and (raison is match('Reboot request from ')
+               or raison is match('First boot after install')
+               or raison is match('Power button or RTC watchdog')
+               or raison in ['software via esp_restart', 'USB peripheral']) }}
+      # Statistiques longues (lot K, 09/10/2026) : chaque redémarrage reconnu ici,
+      # demandé ou non, est compté par « Tab5 · restarts » et, s'il est inattendu
+      # (même classement que la notification), par « Tab5 · unexpected restarts »
+      # (fin de ce fichier). Avant la condition : un redémarrage demandé compte aussi.
+      - event: tab5_sante_redemarrage
+        event_data:
+          inattendu: "{{ 'non' if demande else 'oui' }}"
+      - condition: template
+        value_template: "{{ not demande }}"
+      - action: script.tab5_health_notify
+        data:
+          # Une notification par écran : celle d'un écran ne remplace pas celle de l'autre.
+          notification_id: "tab5_health_reboot_{{ appareil }}"
+          title: "⚠️ {{ nom }} : reboot inattendu détecté"
+          titre_court: "⚠️ {{ nom }} : reboot inattendu"
+          message: >-
+            L'écran « {{ nom }} » a redémarré le
+            {{ as_timestamp(demarrage) | timestamp_custom('%d/%m à %H:%M:%S') }}.
+            Raison : {{ raison if wait.completed else 'pas encore reçue' }}.
+            Vérifier l'alimentation et les logs ESPHome.
+          message_court: >-
+            Redémarré à
+            {{ as_timestamp(demarrage) | timestamp_custom('%H:%M:%S') }}
+            ({{ raison if wait.completed else 'raison inconnue' }})
+            — vérifier alimentation / logs ESPHome.
+
+  # ==========================================================================
+  # (c) API ESPHome déconnectée — HA API Status off/unavailable > 2 min
+  # --------------------------------------------------------------------------
+  # Le capteur `platform: status` passe à `off` quand la connexion API native
+  # tombe ; selon les versions/configurations, l'intégration ESPHome peut
+  # aussi marquer l'entité `unavailable` quand l'appareil disparaît du réseau.
+  # Les deux cas comptent « hors ligne » dans l'attribut `hors_ligne` du registre
+  # sensor.tab5_ecrans (tab5_reglages.yaml, ADR-0071) : une alerte par écran, pour
+  # chaque écran entré dans la liste et resté hors ligne 2 min. Rien au démarrage de
+  # HA (le registre n'avait pas encore d'attribut) : un écran resté dans HA sans être
+  # rebranché n'alerte pas à chaque redémarrage.
+  # ==========================================================================
+  - id: tab5_health_api_off_2min
+    alias: "Tab5 — health: ESPHome API disconnected for 2 min"
+    description: >-
+      Alerte si un écran Tab5 est déconnecté de l'API native Home Assistant depuis
+      plus de 2 minutes (une alerte par écran) : toutes ses poussées échouent pendant ce temps.
+    mode: queued
+    max: 5
+    triggers:
+      - trigger: state
+        entity_id: sensor.tab5_ecrans
+        attribute: hors_ligne
+        for: "00:02:00"
+    variables:
+      nouveaux: >-
+        {%- set avant = trigger.from_state.attributes.get('hors_ligne') if trigger.from_state is not none else none -%}
+        {%- set apres = trigger.to_state.attributes.get('hors_ligne') if trigger.to_state is not none else none -%}
+        {{ (apres or []) | reject('in', avant) | list if avant is not none else [] }}
+    conditions:
+      - condition: template
+        value_template: "{{ nouveaux | count > 0 }}"
+    actions:
+      - repeat:
+          for_each: "{{ nouveaux }}"
+          sequence:
+            - variables:
+                nom: "{% from 'tab5_tablette.jinja' import tab5_nom %}{{ tab5_nom(repeat.item) }}"
+            - action: script.tab5_health_notify
+              data:
+                notification_id: "tab5_health_api_{{ repeat.item }}"
+                title: "⚠️ {{ nom }} : API Home Assistant déconnectée"
+                titre_court: "⚠️ {{ nom }} : API déconnectée"
+                message: >-
+                  L'écran « {{ nom }} » est déconnecté de l'API native depuis plus de
+                  2 minutes. Vérifier le Wi-Fi, l'alimentation, ou si l'appareil a
+                  planté. Toutes les poussées vers cet écran échouent pendant la coupure.
+                message_court: >-
+                  {{ nom }} hors ligne (API ESPHome) depuis plus de 2 min — vérifier
+                  Wi-Fi / alimentation.
+
+  # ==========================================================================
+  # (d) Erreur de rendu d'un template dans une poussée vers l'écran
+  # --------------------------------------------------------------------------
+  # Incident du 18/09/2026 : `fcasts[i].templow` (absent du 15e jour chez
+  # Météo-France) levait UndefinedError, le payload des prévisions n'était
+  # jamais rendu, et `continue_on_error: true` laissait l'automation finir
+  # « réussie » : icônes figées sans aucune alerte. HA journalise pourtant
+  # l'erreur en ERROR avant de continuer (helpers/script.py, `log_exceptions`
+  # vrai par défaut pour les automations) : « <alias>: Error executing script.
+  # … Error rendering data template: … ». On la capte via `system_log_event`
+  # (prérequis `system_log: fire_event: true`, cf. @install).
+  # Anti-rafale : mode single + délai d'une heure + max_exceeded silent — au
+  # plus une notification par heure tant que l'erreur se répète (le push
+  # /10 min la reproduit à chaque cycle).
+  # ==========================================================================
+  - id: tab5_health_template_error
+    alias: "Tab5 — health: render error in a screen push"
+    description: >-
+      Alerte quand une automation ou un script Tab5 journalise « Error
+      rendering » : une action de poussée a été sautée en silence par
+      continue_on_error, l'écran garde des données périmées.
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: event
+        event_type: system_log_event
+        event_data:
+          level: ERROR
+    conditions:
+      - condition: template
+        value_template: >-
+          {% set m = trigger.event.data.message %}
+          {% set msg = ((m | join(' ')) if m is not string else m) | lower %}
+          {{ 'tab5' in msg and 'error rendering' in msg }}
+    actions:
+      - action: script.tab5_health_notify
+        data:
+          notification_id: tab5_health_template
+          title: "⚠️ Tab5 : erreur de template dans une poussée écran"
+          titre_court: "⚠️ Tab5 : erreur de template"
+          message: >-
+            {% set m = trigger.event.data.message %}
+            {{ ((m | join(' ')) if m is not string else m)[:400] }}
+            — l'action concernée a été sautée (continue_on_error) et l'écran
+            garde ses anciennes données. Lire la trace de l'automation
+            (Paramètres → Automatisations → ⋮ → Traces).
+          message_court: >-
+            Une poussée vers l'écran Tab5 échoue au rendu d'un template —
+            voir la notification persistante.
+      - delay: "01:00:00"
+
+  # ==========================================================================
+  # (e) Journal des démarrages et des coupures, envoyé par le Tab5
+  # --------------------------------------------------------------------------
+  # Le firmware (Tab5/ecran/tab5_journal.cpp, 26/09/2026) garde ses erreurs, et ses
+  # avertissements tant que HA n'est pas connecté, dans une mémoire qui survit
+  # aux redémarrages logiciels et aux plantages, avec une copie NVS quand le
+  # Wi-Fi manque 90 s (pour survivre à une coupure de courant). À la connexion
+  # de HA, il envoie `esphome.tab5_journal` pour : un reset anormal ou un
+  # rapport de plantage (PC et pile d'appels des deux cœurs, à décoder avec
+  # l'ELF du build), un Wi-Fi absent 90 s ou plus (lien du co-processeur C6,
+  # routeur), un démarrage qui n'a jamais joint HA, une erreur (ESPHome ou
+  # ESP-IDF) après la connexion à HA, ou HA joint plus de 90 s après le
+  # démarrage. Les lignes d'avant la première connexion (lien ESP-Hosted « not
+  # yet up », drapeaux d'état d'ESPHome) ne sont que du contexte : un démarrage
+  # normal n'envoie rien, une absence de HA avec Wi-Fi présent non plus.
+  # Données : raison, demarrages (depuis le dernier envoi), grave (oui/non),
+  # lignes (« #n +t s [niveau][étiquette:ligne]: message »).
+  # Chaque événement reste en base (table events). Notification persistante à
+  # chaque fois (une par envoi, id daté), téléphone seulement si `grave` :
+  # reset anormal, plantage, ou Wi-Fi absent 90 s ou plus.
+  # ==========================================================================
+  - id: tab5_health_journal
+    alias: "Tab5 — health: log of boots and disconnections"
+    description: >-
+      Notifie le journal envoyé par le Tab5 à sa reconnexion : plantage, erreurs
+      du lien Wi-Fi (co-processeur C6), avertissements pendant une absence de HA.
+    mode: queued
+    triggers:
+      - trigger: event
+        event_type: esphome.tab5_journal
+    # Garde d'origine (audit sécurité du 30/09/2026) : seulement le journal d'une
+    # tablette, reconnue au modèle de son appareil comme dans tab5_evenements.yaml.
+    # Sans elle, un autre appareil ESPHome pouvait créer une notification par
+    # événement, et une alerte téléphone au titre choisi (`grave: oui`).
+    # tests/test_garde_origine.py.
+    conditions:
+      - condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_origine -%}
+          {{ tab5_origine(trigger) == 'oui' }}
+    variables:
+      raison: "{{ trigger.event.data.raison | default('inconnue') }}"
+      demarrages: "{{ trigger.event.data.demarrages | default('?') }}"
+      lignes: "{{ trigger.event.data.lignes | default('') }}"
+      id_notif: "tab5_journal_{{ as_timestamp(trigger.event.time_fired) | int }}"
+      titre: >-
+        {{ '⚠️ Tab5 : ' if trigger.event.data.grave == 'oui' else 'Tab5 : ' }}journal
+        du démarrage ({{ raison }})
+      # Bloc littéral : un bloc replié (>-) collerait le bloc de code sur une ligne.
+      corps: |-
+        Raison du dernier démarrage : {{ raison }}. Démarrages depuis le dernier journal : {{ demarrages }} (#0 = suite du démarrage déjà signalé).
+
+        ```
+        {{ lignes }}
+        ```
+    actions:
+      - if:
+          - condition: template
+            value_template: "{{ trigger.event.data.grave == 'oui' }}"
+        then:
+          - action: script.tab5_health_notify
+            data:
+              notification_id: "{{ id_notif }}"
+              title: "{{ titre }}"
+              titre_court: "⚠️ Tab5 : {{ raison }}"
+              message: "{{ corps }}"
+              message_court: >-
+                {{ demarrages }} démarrage(s) depuis le dernier journal ; détail dans
+                la notification persistante de HA.
+        else:
+          - action: persistent_notification.create
+            data:
+              notification_id: "{{ id_notif }}"
+              title: "{{ titre }}"
+              message: "{{ corps }}"
+
+  # ==========================================================================
+  # (f) Fichiers HA plus anciens que le firmware (29/09/2026)
+  # --------------------------------------------------------------------------
+  # Le firmware se met à jour depuis HA (entité « Firmware ») ; ces fichiers,
+  # eux, se remplacent à la main (archive tab5_home_assistant.zip de la même
+  # release) ou par l'intégration « Tab5 » de HACS (ADR-0035). Une tablette plus récente que ses fichiers (X.Y : une version
+  # corrective ne compte pas) peut demander ce qu'ils ne savent pas encore
+  # faire, sans aucune erreur visible. Notification
+  # persistante seulement (pas de téléphone : rien ne presse), retirée quand
+  # les versions se rejoignent.
+  # ==========================================================================
+  - id: tab5_health_fichiers_ha
+    alias: "Tab5 — health: HA files older than the firmware"
+    description: >-
+      Prévient quand la tablette tourne une version plus récente que les fichiers
+      Tab5 de Home Assistant (packages, modèles, blueprint).
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.tab5_fichiers_ha_en_retard
+        to: ["on", "off"]
+        for: "00:01:00"
+      - trigger: homeassistant
+        event: start
+    actions:
+      - if:
+          - condition: state
+            entity_id: binary_sensor.tab5_fichiers_ha_en_retard
+            state: "on"
+        then:
+          - action: persistent_notification.create
+            data:
+              notification_id: tab5_fichiers_ha
+              title: "Tab5 : fichiers Home Assistant à mettre à jour · HA files to update"
+              message: >-
+                La tablette est en {{ state_attr('binary_sensor.tab5_fichiers_ha_en_retard', 'tablette') }},
+                ses fichiers Home Assistant en {{ state_attr('binary_sensor.tab5_fichiers_ha_en_retard', 'fichiers') }} :
+                remplacez-les par ceux de l'archive tab5_home_assistant.zip de la release
+                {{ state_attr('binary_sensor.tab5_fichiers_ha_en_retard', 'tablette') }},
+                ou installez la mise à jour « Tab5 — fichiers HA » de HACS (Paramètres →
+                Mises à jour). Guide : docs/installation/updates.md.
+
+
+                The tablet runs {{ state_attr('binary_sensor.tab5_fichiers_ha_en_retard', 'tablette') }},
+                its Home Assistant files {{ state_attr('binary_sensor.tab5_fichiers_ha_en_retard', 'fichiers') }}:
+                replace them with the tab5_home_assistant.zip archive of release
+                {{ state_attr('binary_sensor.tab5_fichiers_ha_en_retard', 'tablette') }},
+                or install the « Tab5 — fichiers HA · HA files » update from HACS
+                (Settings → Updates). Guide: docs/installation/updates.md.
+        else:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: tab5_fichiers_ha
+
+  # ==========================================================================
+  # (g) Batterie faible, envoyée par le Tab5 (08/10/2026)
+  # --------------------------------------------------------------------------
+  # Le firmware émet `esphome.tab5_batterie_faible` quand la tablette tourne sur
+  # sa batterie (seul le courant de la batterie est mesuré, par l'INA226) et que
+  # le niveau passe sous 20 %, puis sous 10 % : une fois par seuil, ré-armé à
+  # 30 % ou quand la charge reprend. Sans batterie, ou branchée, rien n'est émis.
+  # Données : niveau (en %, entier, ex. « 18 ») et seuil (« 20 » ou « 10 »).
+  # Une seule notification persistante (même id) : celle du seuil de 10 %
+  # remplace celle de 20 % ; téléphone à chaque seuil. Message court, sans
+  # entité ni code : il est lu tel quel sur le téléphone.
+  # ==========================================================================
+  - id: tab5_health_batterie_faible
+    alias: "Tab5 — health: low battery"
+    description: >-
+      Prévient quand la tablette tourne sur sa batterie et passe sous 20 %, puis
+      sous 10 % : il est temps de la brancher.
+    mode: queued
+    triggers:
+      - trigger: event
+        event_type: esphome.tab5_batterie_faible
+    # Garde d'origine, comme la garde (e) : seulement l'événement d'une tablette,
+    # reconnue au modèle de son appareil. tests/test_garde_origine.py.
+    conditions:
+      - condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_origine -%}
+          {{ tab5_origine(trigger) == 'oui' }}
+    variables:
+      niveau: "{{ trigger.event.data.niveau | default('?', true) }}"
+      titre: >-
+        {{ '⚠️ Tab5 : batterie presque vide'
+           if (trigger.event.data.seuil | default('', true) | string) == '10'
+           else '⚠️ Tab5 : batterie faible' }}
+    actions:
+      - action: script.tab5_health_notify
+        data:
+          notification_id: tab5_health_batterie
+          title: "{{ titre }}"
+          message: "La tablette tourne sur sa batterie : {{ niveau }} %. Branchez-la."
+
+  # ==========================================================================
+  # (h) Coupure de sécurité du chargeur, envoyée par le Tab5 (16/10/2026)
+  # --------------------------------------------------------------------------
+  # Après la panne du 11/10/2026 (une Tab5 perdue, très probablement par une
+  # charge dans le vide : chargeur allumé sans batterie), le firmware coupe le
+  # chargeur quand le CPU chauffe (≥ 55 °C), quand la tension dépasse celle
+  # d'une batterie 2S pleine, ou quand aucun courant de charge ne passe pendant
+  # 30 s. Il émet alors `esphome.tab5_securite_chargeur`. Données : cause
+  # (« thermique », « tension », « courant »), mesure (°C, V ou A, en texte) et
+  # verrouille (« oui » : deuxième coupure dans l'heure, chargeur bloqué jusqu'au
+  # prochain redémarrage). « Tab5 Sécurité chargeur » reste allumé tant qu'un
+  # verrou est posé. Une seule notification persistante (même id), téléphone à
+  # chaque coupure. Message court, sans entité ni code.
+  # ==========================================================================
+  - id: tab5_health_securite_chargeur
+    alias: "Tab5 — health: charger safety"
+    description: >-
+      Prévient quand la tablette coupe son chargeur par sécurité (surchauffe,
+      tension anormale, charge sans batterie).
+    mode: queued
+    triggers:
+      - trigger: event
+        event_type: esphome.tab5_securite_chargeur
+    # Garde d'origine, comme la garde (g). tests/test_garde_origine.py.
+    conditions:
+      - condition: template
+        value_template: >-
+          {%- from 'tab5_tablette.jinja' import tab5_origine -%}
+          {{ tab5_origine(trigger) == 'oui' }}
+    variables:
+      cause: "{{ trigger.event.data.cause | default('', true) | string }}"
+      mesure: "{{ trigger.event.data.mesure | default('?', true) | string | replace('.', ',') }}"
+      verrouille: "{{ (trigger.event.data.verrouille | default('non', true) | string) == 'oui' }}"
+      raison: >-
+        {%- if cause == 'thermique' -%}
+          la tablette chauffe ({{ mesure }} °C). Il reprendra une fois refroidie
+        {%- elif cause == 'tension' -%}
+          tension anormale ({{ mesure }} V). Batterie absente ou inadaptée ?
+        {%- elif cause == 'courant' -%}
+          il ne chargeait rien. Batterie absente ?
+        {%- else -%}
+          raison inconnue
+        {%- endif -%}
+    actions:
+      - action: script.tab5_health_notify
+        data:
+          notification_id: tab5_health_chargeur
+          title: "⚠️ Tab5 : chargeur coupé par sécurité"
+          message: >-
+            Chargeur coupé : {{ raison }}.{{ ' Bloqué jusqu’au prochain redémarrage de la tablette.' if verrouille else '' }}
+
+template:
+  # Version de ces fichiers : « dépôt » dans le dépôt, remplacée par la version de la
+  # release dans l'archive tab5_home_assistant.zip (tools/publication/archive_ha.py,
+  # marqueur en fin de ligne : une seule ligne le porte, tests/test_publication.py).
+  - sensor:
+      - name: "Tab5 · HA files version"
+        unique_id: tab5_version_des_fichiers_ha
+        default_entity_id: sensor.tab5_version_des_fichiers_ha
+        icon: mdi:package-variant
+        state: "dépôt"  # >>> version de l'archive
+    binary_sensor:
+      # Allumé quand la tablette tourne une version X.Y (majeure, mineure) plus
+      # récente que ces fichiers. Le correctif Z et un suffixe -rc.N ou -dev sont
+      # ignorés : une version corrective ne change pas le contrat, et ne demande
+      # parfois qu'un seul fichier (la 3.3.1 : le blueprint seul), ce qui laissait
+      # ce marqueur à 3.3.0 et l'alerte allumée à tort (audit du 30/09/2026).
+      # Éteint si l'une des deux est illisible : fichiers copiés depuis le dépôt
+      # (« dépôt »), firmware sans version ; « 3.3.1-dev » est lisible et sert.
+      # Rendu par tests/test_version.py.
+      - name: "Tab5 · HA files out of date"
+        unique_id: tab5_fichiers_ha_en_retard
+        default_entity_id: binary_sensor.tab5_fichiers_ha_en_retard
+        device_class: update
+        state: >-
+          {%- set f = states('sensor.tab5_version_des_fichiers_ha') | regex_findall('^(\\d+)\\.(\\d+)') -%}
+          {%- set ns = namespace(retard=false) -%}
+          {#- Plusieurs écrans (ADR-0071) : allumé si l'un d'eux est plus récent. -#}
+          {%- for e in state_attr('sensor.tab5_ecrans', 'ecrans') or [] -%}
+            {%- set t = (e.version | default('') | string) | regex_findall('^(\\d+)\\.(\\d+)') -%}
+            {%- if f | count > 0 and t | count > 0 and (t[0] | map('int') | list) > (f[0] | map('int') | list) -%}
+              {%- set ns.retard = true -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.retard }}
+        attributes:
+          fichiers: "{{ states('sensor.tab5_version_des_fichiers_ha') }}"
+          # « 3.9.0-rc.8 » avec un écran, comme avant ; « Salon 3.9.0 · Chambre 3.8.1 » avec plusieurs.
+          tablette: >-
+            {%- set l = state_attr('sensor.tab5_ecrans', 'ecrans') or [] -%}
+            {%- if l | count == 1 -%}{{ l[0].version }}
+            {%- else -%}
+              {%- set ns = namespace(l=[]) -%}
+              {%- for e in l -%}{%- set ns.l = ns.l + [e.nom ~ ' ' ~ e.version] -%}{%- endfor -%}
+              {{ ns.l | join(' · ') }}
+            {%- endif -%}
+
+  # ==========================================================================
+  # Statistiques longues de fiabilité (lot K, 09/10/2026)
+  # --------------------------------------------------------------------------
+  # Le recorder ne garde les états que quelques jours (purge_keep_days ; ≈ 7 chez
+  # l'auteur, audit du 30/09/2026) ; « Tab5 Uptime » est un horodatage et « Raison du
+  # redémarrage » un texte : ni l'un ni l'autre n'a de statistiques. Ces trois capteurs ont un state_class : HA en garde
+  # les statistiques longue durée (moyenne, min, max par heure ; somme d'un compteur)
+  # sans limite de temps. Lecture : Outils de développement → Statistiques, ou une
+  # carte « Graphique de statistiques ».
+  # --------------------------------------------------------------------------
+  # Compteurs : +1 à chaque événement tab5_sante_redemarrage, émis par la garde (b)
+  # (même détection, même classement « demandé / inattendu » que sa notification :
+  # aucune logique recopiée). Un retour de la tablette sans nouveau démarrage, le
+  # démarrage de HA ou l'arrivée de la tablette dans HA ne passent pas sa condition :
+  # ils ne comptent pas. Modèles à déclencheurs : HA restaure leur état à son
+  # redémarrage (doc de l'intégration Template), `this.state` repart de là ; au
+  # démarrage et au rechargement des modèles, +0 (un HA neuf affiche 0 tout de suite).
+  # Si l'état restauré manquait, le compteur repartirait de 0 : total_increasing lit
+  # une baisse comme une remise à zéro, la somme des statistiques continue de monter.
+  # Limite : un redémarrage de HA pendant l'attente de la raison (≤ 1 min) le perd.
+  - triggers:
+      - trigger: event
+        event_type: tab5_sante_redemarrage
+        id: redemarrage
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+    sensor:
+      - name: "Tab5 · restarts"
+        unique_id: tab5_redemarrages
+        default_entity_id: sensor.tab5_redemarrages
+        icon: mdi:restart
+        state_class: total_increasing
+        state: "{{ (this.state | int(0)) + (1 if trigger.id == 'redemarrage' else 0) }}"
+      - name: "Tab5 · unexpected restarts"
+        unique_id: tab5_redemarrages_inattendus
+        default_entity_id: sensor.tab5_redemarrages_inattendus
+        icon: mdi:restart-alert
+        state_class: total_increasing
+        state: >-
+          {{ (this.state | int(0))
+             + (1 if trigger.id == 'redemarrage' and trigger.event.data.inattendu == 'oui' else 0) }}
+
+  # Durée de fonctionnement continue, en heures : depuis le dernier démarrage de la
+  # tablette (miroir sensor.tab5_demarrage, tab5_reglages.yaml), recalculée toutes les
+  # 15 min (96 lignes par jour en base) et à chaque changement du démarrage. Le max
+  # d'une journée = la plus longue période sans redémarrage. Indisponible quand la
+  # tablette l'est (HA ne la voit plus, heure pas encore réglée) : pas de point faux
+  # dans les statistiques.
+  # Sans now() : l'instant est celui du déclencheur, `trigger.now` (time_pattern) ou
+  # `trigger.to_state.last_updated` (le démarrage ou son attribut `source` vient de
+  # changer : last_changed, lui, ne bouge pas pour un attribut) ; rien n'est passé
+  # à une action, le nombre arrondi seul est rendu. max(0, …) : le démarrage est
+  # arrondi à ±64 s (float 32 bits, garde (b)) et peut tomber après l'instant.
+  - triggers:
+      - trigger: time_pattern
+        minutes: "/15"
+        id: horloge
+      - trigger: state
+        entity_id: sensor.tab5_demarrage
+        id: demarrage
+    sensor:
+      - name: "Tab5 · continuous uptime"
+        unique_id: tab5_fonctionnement_continu
+        default_entity_id: sensor.tab5_fonctionnement_continu
+        icon: mdi:timer-outline
+        device_class: duration
+        state_class: measurement
+        unit_of_measurement: h
+        availability: "{{ as_timestamp(states('sensor.tab5_demarrage'), none) is not none }}"
+        state: >-
+          {%- set debut = as_timestamp(states('sensor.tab5_demarrage'), none) -%}
+          {%- set instant = trigger.now if trigger.id == 'horloge'
+              else (trigger.to_state.last_updated if trigger.to_state is not none else none) -%}
+          {%- if debut is none or instant is none -%}{{ none }}
+          {%- else -%}{{ ([0, (as_timestamp(instant) - debut) / 3600] | max) | round(2) }}
+          {%- endif -%}

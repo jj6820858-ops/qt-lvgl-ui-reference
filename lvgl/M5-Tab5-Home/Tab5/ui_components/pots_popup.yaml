@@ -1,0 +1,45 @@
+# ═══════════════════════════════════════════════════════
+# [AI-CONTEXT]
+# @file pots_popup.yaml
+# @role Popup plein écran détails plantes (carte 1250×690, 15 px des bords écran 1280×720).
+#       5 cartes de verre FIXES (carte N = capteur moisture_N, MÊME icône que le dashboard) :
+#       nom, icône colorée par l'humidité, % humidité, statut (OK / Bientôt sec /
+#       À arroser / Hors ligne) + 4 métriques (fertilité EC, éclairement, température,
+#       batterie du capteur). Ouvert par on_long_press de btn_rangee (tab5-lvgl.yaml, zone
+#       tactile de la rangée sous l'horloge, ADR-0031) quand la ligne des plantes est affichée.
+# @architecture_constraint Contrairement aux 4 slots du dashboard (tri dynamique
+#       sort_and_update_moisture_slots), les 5 cartes sont FIXES. Les valeurs arrivent en
+#       continu : humidité+statut via update_pots_popup_moisture_ui (script
+#       tab5_pots_maj), autres métriques via update_pot_metric_ui (capteurs
+#       pot*_ec/lux/temp/bat, tab5-sensors-domotique.yaml) — aucune synchro à l'ouverture.
+# @ai_instruction Cadre modal v3 (ADR-0008). Cartes via pot_detail_card.yaml.
+# ═══════════════════════════════════════════════════════
+obj:
+  id: pots_detail_popup
+  align: CENTER
+  width: 100%
+  height: 100%
+  hidden: true
+  scrollable: false
+  styles: style_invisible
+  widgets:
+    - !include { file: modal_scrim.yaml, vars: { scrim_opa: "100", popup_id: pots_detail_popup } }
+
+    # Carte modale — 15 px des bords écran (1280×720)
+    - obj:
+        align: CENTER
+        width: ${modal_card_w}
+        height: ${modal_card_h}
+        styles: style_modal_card
+        scrollable: false
+        widgets:
+
+          # ═══ BARRE DE TITRE (cadre v4 : icône + titre + croix, corps à y=72) ═══
+          - !include { file: modal_header.yaml, vars: { icon: "\U000F024A", icon_style: "style_text_success", title: "Mes Plantes", title_id: "popup_pots_title", close_btn_id: "btn_pots_close", popup_id: pots_detail_popup } }
+
+          # ═══ 5 CARTES POTS (ordre = plante_1..plante_5, icônes du dashboard) ═══
+          - !include { file: pot_detail_card.yaml, vars: { pot_idx: "1", x_pos: "24", pot_nom: "Pot 1", icon: "\U000F0E66" } }
+          - !include { file: pot_detail_card.yaml, vars: { pot_idx: "2", x_pos: "268", pot_nom: "Pot 2", icon: "\U000F09F1" } }
+          - !include { file: pot_detail_card.yaml, vars: { pot_idx: "3", x_pos: "512", pot_nom: "Pot 3", icon: "\U000F0D08" } }
+          - !include { file: pot_detail_card.yaml, vars: { pot_idx: "4", x_pos: "756", pot_nom: "Pot 4", icon: "\U000F024A" } }
+          - !include { file: pot_detail_card.yaml, vars: { pot_idx: "5", x_pos: "1000", pot_nom: "Pot 5", icon: "\U000F02E5" } }

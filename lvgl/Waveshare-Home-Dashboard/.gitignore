@@ -1,0 +1,9 @@
+.vscode
+.DS_Store
+.history
+.claude
+fonts
+firmware
+TODO.md
+docs
+server/run_demo.sh

@@ -1,0 +1,37 @@
+[Unit]
+Description=SmarTon Qt application
+After=network.target
+Conflicts=thinclient.service weston.service
+
+[Service]
+# Keep runtime configuration (especially MQTT credentials) outside the unit
+# and outside the executable's command line. Create this root-owned file from
+# packaging/smarton.env.example during provisioning.
+EnvironmentFile=-/etc/smarton/smarton.env
+User=root
+Group=root
+Environment=XDG_RUNTIME_DIR=/run
+Environment=XDG_DATA_HOME=/var/lib/smarton
+Environment=XDG_CONFIG_HOME=/var/lib/smarton/config
+Environment=QT_QPA_PLATFORM=eglfs
+Environment=QT_QUICK_BACKEND=software
+Environment=QT_QPA_EGLFS_ALWAYS_SET_MODE=1
+StateDirectory=smarton
+RuntimeDirectory=smarton
+UMask=0077
+ExecStart=/usr/bin/smarton
+Restart=always
+RestartSec=2
+# Conservative hardening that does not prevent EGLFS from using /dev/dri. The
+# process still runs as root on the current image; move it to a dedicated user
+# only after the target's DRM/input group permissions are verified.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/smarton /run
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,495 @@
+# [AI-CONTEXT]
+# @file tab5-scripts.yaml
+# @role Scripts ESPHome transverses : volet (dont le
+#       tap de sa carte), volume, debounces (lumière, clim du blueprint, clim d'une
+#       tuile), widgets de la clim (tab5_clim_ui, ADR-0026 et ADR-0027),
+#       rotateur de la carte centrale, popup lumière, touches de la télécommande TV,
+#       retour automatique à l'accueil.
+# @architecture_constraint Depuis le 25/09/2026 (audit, lot 8c), les familles qui
+#       ont leur fonctionnalité propre vivent dans leur package : tab5-arcade.yaml
+#       (jeux), tab5-calendar.yaml (popup calendrier), tab5-assist.yaml (voix et
+#       popup Assistant), tab5-alarm.yaml (réveil), tab5-navigation.yaml (registre
+#       des fenêtres modales, ouverture d'un écran ; 08/10/2026). Un script de ces
+#       familles va là-bas, pas ici.
+# @ai_instruction Garder les scripts simples. La logique d'affichage pure doit aller dans le C++.
+# ============================================================================
+# tab5-scripts.yaml — Scripts ESPHome reutilisables (sequences temporisees,
+# debounce). Preferer un script ici a un delay:+action duplique inline.
+#
+# ÉVÉNEMENTS SEULEMENT (ADR-0025, 28/09/2026) : le firmware n'appelle plus aucune
+# action de HA (`homeassistant.service` / `homeassistant.action`) ; il émet des
+# événements `esphome.tab5_*`, que packages/tab5_evenements.yaml (HA) traduit en une
+# liste blanche d'actions. Plus d'option « autoriser l'appareil à effectuer des
+# actions HA » à cocher, et plus d'entité de la tablette à nommer ici : les
+# substitutions entity_tab5_satellite / _media_player / _pipeline_select,
+# entity_primary_active et entity_push_automation ont disparu, HA retrouve ces
+# entités par l'appareil qui a émis l'événement. Une ligne restée dans un ancien
+# user_entities.yaml est simplement ignorée. tests/test_actions_ha.py le vérifie.
+
+script:
+
+  # Commande d'un emplacement de la maison (lot 6a, ADR-0019) : la tablette ne
+  # connaît plus aucune entité de la maison. Événement esphome.tab5_action, traité
+  # par le blueprint « Tab5 — emplacements »
+  # (HomeAssistant_Config/blueprints/automation/tab5/tab5_emplacements.yaml), qui
+  # l'applique à l'entité choisie pour cet emplacement. Un événement `esphome.*` ne
+  # demande pas l'option « autoriser les actions HA » (manager.py de HA). Emplacements
+  # et commandes : voir le blueprint, et tests/test_emplacements.py qui les compare.
+  # `parallel` : chaque appui part (aucun délai).
+  - id: tab5_action
+    mode: parallel
+    parameters:
+      emplacement: string
+      commande: string
+      valeur: string
+    then:
+      - homeassistant.event:
+          event: esphome.tab5_action
+          data:
+            emplacement: !lambda 'return emplacement;'
+            action: !lambda 'return commande;'
+            valeur: !lambda 'return valeur;'
+
+  # Active le wake word interne « Stop » (désactivé par défaut par ESPHome, 2e modèle).
+  # Uniquement via tab5_maj_volet_etat (push HA) — pas d'état optimiste au tap écran.
+  - id: tab5_volet_end_movement
+    mode: restart
+    then:
+      - globals.set:
+          id: volet_en_mouvement
+          value: 'false'
+      - script.execute: tab5_stop_model_release
+
+  # Stop vocal local : annule un pipeline Okay Nabu en cours + TTS court (évite « aucune réponse reçue »).
+  - id: tab5_volet_stop_voice_feedback
+    mode: restart
+    then:
+      - voice_assistant.stop:
+          id: va
+      # Événement (ADR-0025) : HA l'annonce sur le satellite de cette tablette
+      # (packages/tab5_evenements.yaml).
+      # Phrase dite par la tablette : dans la langue de l'écran (lot 4).
+      - lambda: 'id(tab5_annonce_dire).execute(std::string(tr("Volet arrêté.")));'
+
+  # [AI-WARNING] Une annonce reçoit sa phrase en paramètre : depuis ESPHome 2026.10.0, les
+  # champs `data:` d'un événement HA sont écrits avant les `includes:` et ne voient pas
+  # tr() ; la phrase est donc traduite dans la `lambda:` qui appelle ce script
+  # (tests/test_includes_esphome.py).
+  - id: tab5_annonce_dire
+    mode: queued
+    max_runs: 2
+    parameters:
+      message: string
+    then:
+      - homeassistant.event:
+          event: esphome.tab5_annonce
+          data:
+            message: !lambda 'return message;'
+
+  # Tap sur la carte volet — même geste sur les deux vues (btn_j1_action de
+  # forecast_daily.yaml, btn_sw1_action de switches_card.yaml), recopié à
+  # l'identique dans les deux fichiers jusqu'au lot 7.3 de l'audit (26/09/2026).
+  # Volet en mouvement → stop ; sinon ouvre ou ferme selon la flèche de la carte
+  # (volet_target_open, basculée par btn_j1_dir). Aucun état optimiste : l'écran
+  # attend la poussée HA (tab5_maj_volet_etat). `parallel` : chaque tap va au
+  # bout (aucun délai), comme l'action en ligne qu'il remplace.
+  - id: tab5_volet_tap
+    mode: parallel
+    then:
+      - if:
+          condition:
+            lambda: 'return id(volet_en_mouvement);'
+          then:
+            - script.execute: tab5_volet_end_movement
+            - script.execute: { id: tab5_action, emplacement: volet, commande: arreter, valeur: "" }
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(volet_target_open);'
+                then:
+                  - script.execute: { id: tab5_action, emplacement: volet, commande: ouvrir, valeur: "" }
+                else:
+                  - script.execute: { id: tab5_action, emplacement: volet, commande: fermer, valeur: "" }
+
+  # Debounce du slider volume : chaque glissement redémarre le délai, un seul
+  # media_player.volume_set part réellement une fois le doigt immobile.
+  - id: tab5_debounce_volume_set
+    mode: restart
+    then:
+      - delay: 150ms
+      - media_player.volume_set:
+          id: speaker_player
+          volume: !lambda 'return id(system_volume);'
+
+  # ═══ Point d'entrée UNIQUE du volume ═══
+  # Les 3 sources (slider console, slider popup assistant, number.tab5_volume
+  # exposé à Home Assistant) passent obligatoirement par ici, sinon elles
+  # divergent : avant, chaque slider n'écrivait que `system_volume` et ne
+  # repeignait que le sien, donc un réglage venu de HA laissait l'écran sur
+  # l'ancien % et le prochain démute le ré-appliquait — le réglage HA sautait.
+  # `push_device: false` = on ne fait que refléter un volume déjà appliqué au
+  # haut-parleur (rattrapage d'un media_player.volume_set venu de HA) ; renvoyer
+  # un volume_set dans ce cas serait redondant.
+  # Glisser le volume démute : c'était déjà le cas du slider assistant, la
+  # console, elle, remontait le son sans jamais éteindre son icône « muet ».
+  - id: tab5_volume_apply
+    mode: restart
+    parameters:
+      vol: float
+      push_device: bool
+    then:
+      - lambda: |-
+          float v = vol < 0.0f ? 0.0f : (vol > 1.0f ? 1.0f : vol);
+          id(system_volume) = v;
+          id(system_muted) = false;
+          ui_sync_volume_widgets(id(slider_volume), id(lbl_sys_vol_val),
+                                 id(slider_assist_volume), v);
+          ui_sync_mute_icon(id(icon_assist_mute), false);
+          // Horodate AVANT le debounce : le haut-parleur va rester en retard
+          // sur `system_volume` pendant tout le geste (le volume_set ne part
+          // qu'à l'immobilité). Sans cette marque, le rattrapage de 5 s
+          // recopierait le niveau périmé par-dessus le réglage en cours.
+          if (push_device) id(volume_push_ts) = millis();
+          // Tuile − / + : le volume de la tablette y est un appareil (ADR-0033).
+          reglables_volume_tablette();
+      - if:
+          condition:
+            lambda: 'return push_device;'
+          then:
+            - script.execute: tab5_debounce_volume_set
+      - lambda: 'id(tab5_volume_pct).publish_state(id(system_volume) * 100.0f);'
+
+  # Debounce de l'arc luminosité du popup lumière : chaque tick de glissement
+  # redémarre le délai, un seul light.turn_on part une fois le doigt immobile
+  # (même contrainte que le volume — ne pas spammer HA à chaque tick).
+  # La lampe (`cible`) et la valeur sont celles du geste (ADR-0046, relecture du
+  # 09/10/2026) : une autre lampe choisie, ou une autre pièce glissée, pendant les
+  # 200 ms ne reçoit pas la luminosité de la précédente.
+  - id: tab5_debounce_light_brightness
+    mode: restart
+    parameters:
+      cible: string
+      valeur: int
+    then:
+      - delay: 200ms
+      - script.execute:
+          id: tab5_action
+          emplacement: !lambda 'return cible;'
+          commande: luminosite
+          valeur: !lambda 'return to_string(valeur);'
+
+  # Debounce de la cible de la clim du blueprint (boutons ± de la carte de l'accueil,
+  # arc et boutons ± du popup quand il la montre) : un seul climate.set_temperature par
+  # geste — les taps rapides ± sont groupés, la cible affichée est optimiste en attendant
+  # le retour HA via tab5_maj_clim. Si la clim est éteinte, le blueprint allume le premier
+  # mode de consigne qu'elle connaît (froid d'abord : Daikin refuse set_temperature en
+  # mode off), et il borne la consigne aux limites de l'appareil (ADR-0026). Valeur en
+  # texte court (« 21.5 », pas « 21.500000 ») : le blueprint la relit en nombre, pareil.
+  # Lancé par la carte (climate_card.yaml) et, pour le popup, par clim_popup_consigne()
+  # / clim_popup_pas() (ecran/tab5_clim.cpp, pointeur posé par tab5_clim_ui).
+  - id: tab5_debounce_clim_temp
+    mode: restart
+    then:
+      - delay: 250ms
+      - script.execute:
+          id: tab5_action
+          emplacement: clim
+          commande: consigne
+          valeur: !lambda 'return clim_consigne_texte(id(clim_target_temp));'
+
+  # Debounce de la cible d'une clim de tuile (popup ouvert par une tuile cli sans
+  # l'option m, ADR-0027) : même délai, mais l'emplacement (« tRT ») et la valeur sont
+  # pris au geste (ecran/tab5_clim.cpp), pour que la consigne parte à sa clim même si le popup
+  # a été refermé entre-temps. Le blueprint la traduit comme celle de la clim du
+  # blueprint, sur l'entité de la tuile. Clé vide : la tuile a changé d'appareil entre
+  # le geste et l'envoi (clim_tuile_oublier), rien ne part.
+  - id: tab5_debounce_clim_tuile
+    mode: restart
+    then:
+      - delay: 250ms
+      - if:
+          condition:
+            lambda: 'return clim_tuile_attente_cle()[0] != 0;'
+          then:
+            - script.execute:
+                id: tab5_action
+                emplacement: !lambda 'return clim_tuile_attente_cle();'
+                commande: consigne
+                valeur: !lambda 'return clim_tuile_attente_texte();'
+
+  # Prévisions gardées en NVS (16/10/2026, previsions_relire, tab5_forecast.cpp) : pose
+  # les slots des tuiles météo et relit les dernières prévisions, une fois, avant la
+  # première image (lancé par tab5_zones_apply, comme tab5_tuiles_ui). Les slots sont
+  # aussi posés par l'on_boot de tab5-ha-hmi.yaml (qu'on ne modifie pas sans Axel), mais
+  # seulement après l'attente de HA : mêmes lignes, tenues égales par
+  # tests/test_previsions_nvs.py. Aucun lv_* ici.
+  - id: tab5_previsions_relire
+    then:
+      - lambda: |-
+          // Slots meteo jour (D2 : plus de duplication dans chaque lambda).
+          g_day_slots[0] = {id(j0_day), id(j0_max), id(j0_min), id(j0_icon_layer1), id(j0_icon_layer2), id(btn_j0_action), id(icon_card_pc), nullptr, nullptr};
+          g_day_slots[1] = {id(j1_day), id(j1_max), id(j1_min), id(j1_icon_layer1), id(j1_icon_layer2), id(btn_j1_action), id(icon_card_shutter1), id(icon_card_shutter_arrow), id(btn_j1_dir)};
+          g_day_slots[2] = {id(j2_day), id(j2_max), id(j2_min), id(j2_icon_layer1), id(j2_icon_layer2), id(btn_j2_action), id(icon_card_lit_j2), id(icon_card_light_j2), nullptr};
+          g_day_slots[3] = {id(j3_day), id(j3_max), id(j3_min), id(j3_icon_layer1), id(j3_icon_layer2), id(btn_j3_action), id(icon_card_salon_j3), id(icon_card_light_j3), nullptr};
+          g_day_slots[4] = {id(j4_day), id(j4_max), id(j4_min), id(j4_icon_layer1), id(j4_icon_layer2), id(btn_j4_action), id(icon_card_led_j4), id(icon_card_light_j4), nullptr};
+          // Slots meteo heure.
+          g_hour_slots[0] = {id(h4_time), id(h4_temp), id(h4_prob), id(h4_icon_layer1), id(h4_icon_layer2)};
+          g_hour_slots[1] = {id(h3_time), id(h3_temp), id(h3_prob), id(h3_icon_layer1), id(h3_icon_layer2)};
+          g_hour_slots[2] = {id(h2_time), id(h2_temp), id(h2_prob), id(h2_icon_layer1), id(h2_icon_layer2)};
+          g_hour_slots[3] = {id(h1_time), id(h1_temp), id(h1_prob), id(h1_icon_layer1), id(h1_icon_layer2)};
+          g_hour_slots[4] = {id(h0_time), id(h0_temp), id(h0_prob), id(h0_icon_layer1), id(h0_icon_layer2)};
+          previsions_relire(g_day_slots, g_hour_slots, id(font_meteo_card), id(font_meteo_card_small),
+                            id(previsions_perimees), id(lbl_previsions_perimees));
+
+  # Widgets de la clim (ADR-0026, ADR-0027) posés dans g_clim_ui : ceux que les réglages
+  # de l'appareil adaptent (bornes de l'arc, unité, titre, boutons gérés, sections des
+  # options), ceux que clim_recolorer() colore (icônes des modes et options, libellé
+  # « Chaud »), les pastilles du carrousel (ADR-0038), l'état de la clim du blueprint (ses
+  # globals) et les deux débounces de la consigne. id() n'existe que dans les lambdas YAML. Lancé par tab5_zones_apply à la
+  # fin du setup, avant toute poussée de HA, comme tab5_tuiles_ui. Aucun lv_* ici.
+  # La coloration (ancien script tab5_clim_recolor) est dans le C++ depuis le 29/09/2026 :
+  # la carte suit la clim du blueprint, le popup la clim affichée.
+  - id: tab5_clim_ui
+    then:
+      - lambda: |-
+          ClimUI& u = g_clim_ui;
+          u.popup = id(clim_options_popup);
+          u.consigne_carte = id(clim_target);
+          u.consigne_popup = id(clim_target_popup);
+          u.arc = id(arc_temp_popup);
+          u.unite = id(clim_unite_popup);
+          u.piece = id(val_temp_int_popup);
+          u.titre = id(popup_clim_title);
+          u.mode_froid = id(popup_btn_clim_cool);
+          u.mode_chaud = id(popup_btn_clim_heat);
+          u.mode_sec = id(popup_btn_clim_dry);
+          u.mode_ventilation = id(popup_btn_clim_fan);
+          u.titre_presets = id(clim_titre_presets);
+          u.rangee_presets = id(clim_rangee_presets);
+          u.eco = id(popup_btn_clim_eco);
+          u.boost = id(popup_btn_clim_boost);
+          u.titre_ventilation = id(clim_titre_ventilation);
+          u.silence = id(popup_btn_clim_quiet);
+          u.titre_flux = id(clim_titre_flux);
+          u.oscillation = id(popup_btn_clim_swing);
+          u.brise = id(popup_btn_clim_windnice);
+          u.icone_froid = id(popup_icon_clim_cool);
+          u.icone_chaud = id(popup_icon_clim_heat);
+          u.icone_sec = id(popup_icon_clim_dry);
+          u.icone_ventilation = id(popup_icon_clim_fan);
+          u.icone_eteint = id(popup_icon_clim_off);
+          u.icone_eco = id(popup_icon_clim_eco);
+          u.icone_boost = id(popup_icon_clim_boost);
+          u.icone_silence = id(popup_icon_clim_quiet);
+          u.icone_oscillation = id(popup_icon_clim_swing);
+          u.icone_brise = id(popup_icon_clim_windnice);
+          u.libelle_chaud = id(popup_lbl_clim_heat);
+          u.pastilles_cadre = id(clim_pastilles);
+          u.pastilles[0] = id(clim_pastille_0);
+          u.pastilles[1] = id(clim_pastille_1);
+          u.pastilles[2] = id(clim_pastille_2);
+          u.pastilles[3] = id(clim_pastille_3);
+          u.pastilles[4] = id(clim_pastille_4);
+          u.pastilles[5] = id(clim_pastille_5);
+          u.pastilles[6] = id(clim_pastille_6);
+          u.pastilles[7] = id(clim_pastille_7);
+          u.consigne_bp = &id(clim_target_temp);
+          u.mode_bp = &id(clim_hvac_mode);
+          u.preset_bp = &id(clim_preset_mode);
+          u.ventilation_bp = &id(clim_fan_mode);
+          u.oscillation_bp = &id(clim_swing_mode);
+          u.debounce_blueprint = []() { id(tab5_debounce_clim_temp).execute(); };
+          u.debounce_tuile = []() { id(tab5_debounce_clim_tuile).execute(); };
+          // Carrousel des clims (ADR-0038) : geste gauche / droite arrêté au popup.
+          clim_carrousel_preparer();
+
+  # Rotateur central auto (8s) — mode restart : tout tap/advance remet le délai à zéro.
+  # Pas de rotation sous un popup ouvert (audit 25/09/2026, lot 3) : la transition
+  # repeignait toutes les 8 s la bande centrale avec le voile et la carte du popup
+  # par-dessus (LVGL ne saute pas une zone couverte de semi-transparent).
+  # Rangée sous l'horloge (ADR-0031) : calée sur ce rotateur (demande d'Axel du
+  # 06/10/2026). À chaque tour, 0,2 s AVANT la carte centrale, rangee_tour() compte ; au
+  # N-ième (durée d'une ligne du blueprint, en tours de 8 s), la rangée change de ligne,
+  # et la carte centrale suit juste après : une cascade de haut en bas (animations de
+  # 190 ms). Tour compté hors de l'accueil aussi (la carte centrale, elle, n'y tourne
+  # pas), jamais écran éteint ni popup ouvert. 7,8 s + 0,2 s = la période de 8 s
+  # (kTourCentralS de tab5_internal.h, tests/test_rangee.py). Depuis le lot 3
+  # (09/10/2026, ADR-0041), rangee_tour() fait tourner de même le panneau Ok Nabu et la
+  # tuile − / + quand le blueprint les met en « auto » (défilement au choix).
+  - id: tab5_central_rotator_auto
+    mode: restart
+    then:
+      - delay: 7800ms
+      - if:
+          condition:
+            and:
+              - light.is_on: backlight
+              - lambda: 'return !ModalRegistry::any_popup_visible();'
+          then:
+            - lambda: 'rangee_tour();'
+      - delay: 200ms
+      - if:
+          condition:
+            and:
+              - light.is_on: backlight
+              - lambda: 'return !temp_planning_active() && !id(is_showing_vocal_response) && g_central_ctx.forecast_page == 2 && !ModalRegistry::any_popup_visible();'
+          then:
+            - lambda: |-
+                advance_central_panel_rotator(g_central_ctx);
+      - script.execute: tab5_central_rotator_auto
+
+  # Tap navigation : planning / pluie / icônes MF → ligne suivante (sans dismiss HA).
+  - id: tab5_central_panel_next
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return g_central_ctx.forecast_page == 2 && !temp_planning_active();'
+          then:
+            - lambda: |-
+                advance_central_panel_rotator(g_central_ctx);
+            - script.execute: tab5_central_rotator_auto
+
+  # Tap panneau info (ligne météo HA) : dismiss définitif si vigilance, sinon navigation.
+  - id: tab5_dismiss_info_tap
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return g_central_ctx.forecast_page == 2 && !temp_planning_active() && g_central_ctx.has_info;'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(info_meteo_dismiss_id).size() > 0;'
+                then:
+                  - lambda: |-
+                      id(temp_dismiss_alert_id) = id(info_meteo_dismiss_id);
+                      tab5_dismiss_local_add(id(tab5_dismissed_local), id(temp_dismiss_alert_id));
+                      dismiss_central_info_immediate(id(lbl_info_text), g_central_ctx);
+                  # Événement (ADR-0025) → script.tab5_dismiss_alert.
+                  - homeassistant.event:
+                      event: esphome.tab5_alerte_lue
+                      data:
+                        alert_id: !lambda 'return id(temp_dismiss_alert_id);'
+                  - globals.set:
+                      id: temp_dismiss_alert_id
+                      value: '""'
+                else:
+                  - lambda: |-
+                      advance_central_panel_rotator(g_central_ctx);
+            - script.execute: tab5_central_rotator_auto
+
+  # Tap annonce HA (panneaux 4-7) : dismiss définitif + ligne suivante.
+  # Script unique paramétré (slot 0-3) — remplace les ex-tab5_dismiss_ha_alert_0..3
+  # identiques (#3). Widgets et id du bandeau : g_ha_alert_slots, table unique remplie
+  # par tab5_ha_alert_slots_init (tab5-alertes.yaml).
+  - id: tab5_dismiss_ha_alert
+    mode: restart
+    parameters:
+      slot: int
+    then:
+      - lambda: |-
+          id(temp_dismiss_alert_id) = "";
+          id(tab5_ha_alert_slots_init).execute();
+          if (slot < 0 || slot >= kHaAlertSlotCount) return;
+          HaAlertSlotUI& s = g_ha_alert_slots[slot];
+          if (s.id_store == nullptr || s.id_store->empty()) return;
+          id(temp_dismiss_alert_id) = *s.id_store;
+          tab5_dismiss_local_add(id(tab5_dismissed_local), id(temp_dismiss_alert_id));
+          dismiss_ha_alert_slot_immediate(slot, s.wrap, s.lbl, *s.id_store, g_central_ctx);
+      - if:
+          condition:
+            lambda: 'return id(temp_dismiss_alert_id).size() > 0;'
+          then:
+            # Événement (ADR-0025) → script.tab5_dismiss_alert.
+            - homeassistant.event:
+                event: esphome.tab5_alerte_lue
+                data:
+                  alert_id: !lambda 'return id(temp_dismiss_alert_id);'
+            - script.execute: tab5_central_rotator_auto
+
+  # Touche physique de la télécommande (tv_remote_popup.yaml et ses gabarits
+  # tv_pad_btn.yaml / tv_touche.yaml / tv_transport_btn.yaml) : une seule commande
+  # paramétrée au lieu des quatorze blocs recopiés avant le lot 7.3 de l'audit (26/09/2026).
+  # touche = code Samsung (KEY_UP, KEY_VOLUP…), le vocabulaire commun. Depuis le lot 6a,
+  # commande « touche » (tab5_action) : le blueprint l'envoie à la télécommande choisie.
+  # Marche/Arrêt (« alimentation ») et les applications (« appli ») aussi. Emplacement
+  # (ADR-0056) : celui de la télécommande de la page montrée, telecommande_cle()
+  # (tab5_telecommande.cpp) — « tv » pour la première, « tv1 » à « tv3 » ensuite.
+  # `parallel` : chaque appui va au bout (aucun délai).
+  - id: tab5_tv_key
+    mode: parallel
+    parameters:
+      touche: string
+    then:
+      - script.execute: { id: tab5_action, emplacement: !lambda 'return telecommande_cle();', commande: touche, valeur: !lambda 'return touche;' }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Retour automatique à l'écran principal (inactivité tactile)
+# ───────────────────────────────────────────────────────────────────────────────
+# [28/07/2026, demande Axel] Deux minuteries :
+#   - un popup ouvert se referme au bout de UIIdle::POPUP_MS    (45 s)
+#   - une page météo ≠ panneau principal revient page 2 au bout
+#     de UIIdle::FORECAST_MS                                     (25 s)
+#
+# Ce sont des délais d'INACTIVITÉ, pas des délais depuis l'ouverture : le
+# compteur LVGL repart de zéro à chaque appui, donc un popup ne se ferme jamais
+# pendant qu'on s'en sert (lire le calendrier ou régler la clim prend plus de
+# 45 s). Les événements du pipeline vocal le remettent aussi à zéro
+# (ui_mark_activity() dans tab5_vocal_arm_stop / _disarm_stop / tab5_assist_open)
+# — une conversation mains libres ne touche pas la dalle et fermerait sinon le
+# popup Assistant en pleine réponse.
+#
+# Ordre volontaire popup PUIS météo : tant qu'un popup couvre l'écran, repeindre
+# les prévisions cachées dessous ne sert à rien. Le retour météo se fait donc au
+# tick suivant la fermeture (l'inactivité continue de courir), ce qui évite en
+# prime de cumuler le fondu de fermeture et un refresh de prévisions dans la
+# même frame.
+#
+# Les jeux sont volontairement exclus : un jeu n'est pas un popup, il ne doit
+# jamais se fermer seul (une partie en pause, c'est zéro toucher pendant des
+# minutes). Le sélecteur arcade (page_arcade) est géré séparément : si aucun
+# jeu n'est ouvert et que l'inactivité dépasse le seuil popup, on revient au
+# dashboard. Le panneau des switches HA l'est aussi : il s'affiche sur demande
+# explicite (bouton « HA »), on ne le rend pas à la météo dans son dos.
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          // Prévisions périmées (08/10/2026) : une comparaison d'heures par seconde,
+          // repeinte seulement si la mention change (tab5_forecast.cpp).
+          previsions_fraicheur_tick(id(previsions_perimees), id(lbl_previsions_perimees));
+
+          // Liste des fenêtres : ModalRegistry (tab5_registry.h), remplie une
+          // fois par tab5_modal_registry_init (tab5-navigation.yaml). La
+          // sonnerie du réveil y est un LAYER : jamais refermée ici. Le script
+          // n'est lancé que tant que la liste est vide (PERF-5, lot L10) : ensuite
+          // il ne faisait que revenir, une fois par seconde, écran éteint compris.
+          // Écran éteint, le reste de ce tick tourne encore, exprès : il referme
+          // les popups et ramène l'accueil après l'inactivité, pour que l'écran
+          // se rallume (HA, tape, réveil, toucher) sur l'accueil, comme avant.
+          if (!ModalRegistry::ready()) id(tab5_modal_registry_init).execute();
+
+          // Ce qui se ferme et quand : retour_auto_tick() (tab5_anim.cpp). Ici, ce qui
+          // demande un id() : la page LVGL et les widgets des prévisions.
+          // Hors de page_main : le sélecteur ou une console (pages du module des jeux,
+          // ADR-0065 ; une console ouverte, retour_auto_tick ne ferme rien).
+          const bool arcade = !id(page_main)->is_showing();
+          switch (retour_auto_tick(arcade)) {
+            case RetourAuto::QUITTER_ARCADE:
+              id(tab5_lvgl)->show_page(0, LV_SCREEN_LOAD_ANIM_NONE, 0);
+              break;
+            case RetourAuto::POPUPS_FERMES:
+              id(assist_popup_open) = false;
+              break;
+            case RetourAuto::PREVISIONS:
+              reset_forecast_to_main_page(
+                  id(layer_forecast_daily), id(layer_forecast_hourly),
+                  g_day_slots, g_hour_slots,
+                  id(font_meteo_card), id(font_meteo_card_small),
+                  id(page_title_wrapper), id(lbl_page_title),
+                  g_central_ctx);
+              break;
+            case RetourAuto::RIEN:
+              break;
+          }

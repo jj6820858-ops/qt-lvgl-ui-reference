@@ -1,0 +1,26 @@
+# ============================================================================
+# [AI-CONTEXT]
+# @file placeholders.example.yaml — MODÈLE public de `placeholders.yaml` (gitignoré).
+# @role Depuis le 28/09/2026 (ADR-0024), les fichiers Home Assistant publics n'ont
+#       PLUS de placeholder : chaque valeur de la maison se choisit dans Home
+#       Assistant (listes « Tab5 · … »), la tablette est trouvée par le modèle de son
+#       appareil. Pour INSTALLER, ce fichier ne sert à rien : prendre l'archive
+#       `tab5_home_assistant.zip` d'une release (docs/installation.md, étape 4).
+#       Il ne sert plus qu'aux contributeurs qui font tourner les packages chez eux :
+#       `placeholders.yaml` liste LEURS identifiants réels, et
+#       `python tools/render_ha_config.py --check` (hook pre-commit, et la CI avec le
+#       secret HA_PLACEHOLDERS) échoue si l'un d'eux retombe dans un fichier public.
+#       Il n'affiche jamais la valeur, seulement le nom de la clé, le fichier et la
+#       ligne.
+# @install cp HomeAssistant_Config/placeholders.example.yaml HomeAssistant_Config/placeholders.yaml
+#          puis une ligne `nom: valeur réelle` par identifiant à ne jamais publier.
+# @ai_instruction Une valeur = un identifiant complet ou un JETON distinctif (ville,
+#       adresse e-mail d'un agenda, nom d'un appareil) ; 6 caractères au moins,
+#       sinon elle est ignorée (trop ambiguë). Les noms sont libres (les anciens
+#       noms `VOTRE_…` restent valables).
+# ============================================================================
+
+# --- Exemples (à remplacer par vos valeurs) ---
+MA_VILLE: ma_ville                         # weather.ma_ville, sensor.ma_ville_next_rain…
+MON_AGENDA: mon_adresse_gmail_com          # calendar.mon_adresse_gmail_com
+MA_TV: ma_tv_samsung                       # media_player.ma_tv_samsung
