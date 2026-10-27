@@ -1,0 +1,426 @@
+#include "module_bouncing_ball_mode.h"
+
+// Fallback BPM to prevent division by zero
+static constexpr uint16_t MIN_SAFE_BPM = 1;
+
+static Ball *balls = nullptr;
+int numActiveBalls = 1;
+static Wall *walls = nullptr;
+int ballScale = 0;  // Scale selection
+int ballKey = 0;    // Key selection
+int ballOctave = 4;
+
+// Note scheduling for 16th note durations
+struct ScheduledNote {
+  uint8_t note;
+  unsigned long offTime;
+  bool active;
+};
+static ScheduledNote scheduledNotes[8];  // Track up to 8 concurrent notes
+
+// Implementations
+void initializeBouncingBallMode() {
+  ballScale = 0;
+  ballKey = 0;
+  ballOctave = 4;
+  numActiveBalls = 1;
+  // Clear scheduled notes
+  for (int i = 0; i < 8; i++) {
+    scheduledNotes[i].active = false;
+  }
+  initializeBalls();
+  initializeWalls();
+}
+
+void drawBouncingBallMode() {
+  if (!balls || !walls) {
+    return;
+  }
+  tft.fillScreen(THEME_BG);
+  drawHeader("ZEN", "Ambient Bouncing");
+  
+  // Controls
+  drawRoundButton(SCALE_X(10), SCALE_Y(200), BTN_SMALL_W, BTN_SMALL_H, "ADD", THEME_SUCCESS);
+  drawRoundButton(SCALE_X(60), SCALE_Y(200), BTN_SMALL_W, BTN_SMALL_H, "RESET", THEME_WARNING);
+  drawRoundButton(SCALE_X(110), SCALE_Y(200), BTN_MEDIUM_W, BTN_SMALL_H, "SCALE", THEME_ACCENT);
+  drawRoundButton(SCALE_X(170), SCALE_Y(200), BTN_SMALL_W, BTN_SMALL_H, "KEY-", THEME_SECONDARY);
+  drawRoundButton(SCALE_X(220), SCALE_Y(200), BTN_SMALL_W, BTN_SMALL_H, "KEY+", THEME_SECONDARY);
+  drawRoundButton(SCALE_X(270), SCALE_Y(200), BTN_SMALL_W, BTN_SMALL_H, "OCT", THEME_PRIMARY);
+  
+  // Status display
+  tft.setTextColor(THEME_TEXT_DIM, THEME_BG);
+  String keyName = getNoteNameFromMIDI(ballKey);
+  tft.drawString(keyName + " " + scales[ballScale].name, MARGIN_SMALL, SCALE_Y(180), 1);
+  tft.drawString("Oct:" + String(ballOctave), SCALE_X(150), SCALE_Y(180), 1);
+  tft.drawString("Balls:" + String(numActiveBalls), SCALE_X(270), SCALE_Y(180), 1);
+  
+  // Draw play area background
+  int playAreaX = SCALE_X(53);
+  int playAreaY = HEADER_HEIGHT + SCALE_Y(18);
+  int playAreaW = SCALE_X(219);
+  int playAreaH = SCALE_Y(114);
+  tft.fillRect(playAreaX, playAreaY, playAreaW, playAreaH, THEME_BG);
+  
+  drawWalls();
+  drawBalls();
+}
+
+void initializeBalls() {
+  if (!balls) {
+    balls = new (std::nothrow) Ball[MAX_BALLS];
+  }
+  if (!balls) {
+    return;
+  }
+  for (int i = 0; i < MAX_BALLS; i++) {
+    balls[i].x = random(SCALE_X(80), SCALE_X(240));
+    balls[i].y = random(SCALE_Y(80), SCALE_Y(150));
+    // Slower, more zen-like movement (scale velocity for different screens)
+    float velocityScale = (displayConfig.scaleX + displayConfig.scaleY) / 2.0;
+    balls[i].vx = random(-15, 15) / 10.0 * velocityScale; // -1.5 to 1.5
+    balls[i].vy = random(-15, 15) / 10.0 * velocityScale;
+    if (abs(balls[i].vx) < 0.5 * velocityScale) balls[i].vx = (balls[i].vx >= 0) ? 0.8 * velocityScale : -0.8 * velocityScale;
+    if (abs(balls[i].vy) < 0.5 * velocityScale) balls[i].vy = (balls[i].vy >= 0) ? 0.8 * velocityScale : -0.8 * velocityScale;
+    // Softer, more zen colors
+    balls[i].color = random(0x2000, 0x8FFF);
+    balls[i].size = random(4, 7) * displayConfig.scaleX;
+    balls[i].active = (i < numActiveBalls);
+  }
+}
+
+void initializeWalls() {
+  if (!walls) {
+    walls = new (std::nothrow) Wall[NUM_WALLS];
+  }
+  if (!walls) {
+    return;
+  }
+  int wallIndex = 0;
+  
+  // Top wall - 8 segments
+  for (int i = 0; i < 8; i++) {
+    walls[wallIndex].x = SCALE_X(50 + i * 28);
+    walls[wallIndex].y = HEADER_HEIGHT + SCALE_Y(15);
+    walls[wallIndex].w = SCALE_X(28);
+    walls[wallIndex].h = SCALE_Y(3);
+    walls[wallIndex].note = getNoteInScale(ballScale, i, ballOctave) + ballKey;
+    walls[wallIndex].noteName = getNoteNameFromMIDI(walls[wallIndex].note);
+    walls[wallIndex].color = THEME_PRIMARY;
+    walls[wallIndex].active = false;
+    walls[wallIndex].side = 0;
+    wallIndex++;
+  }
+  
+  // Right wall - 4 segments
+  for (int i = 0; i < 4; i++) {
+    walls[wallIndex].x = DISPLAY_WIDTH - SCALE_X(48);
+    walls[wallIndex].y = HEADER_HEIGHT + SCALE_Y(18 + i * 28);
+    walls[wallIndex].w = SCALE_X(3);
+    walls[wallIndex].h = SCALE_Y(28);
+    walls[wallIndex].note = getNoteInScale(ballScale, i, ballOctave + 1) + ballKey;
+    walls[wallIndex].noteName = getNoteNameFromMIDI(walls[wallIndex].note);
+    walls[wallIndex].color = THEME_SECONDARY;
+    walls[wallIndex].active = false;
+    walls[wallIndex].side = 1;
+    wallIndex++;
+  }
+  
+  // Bottom wall - 8 segments
+  for (int i = 0; i < 8; i++) {
+    walls[wallIndex].x = SCALE_X(50 + i * 28);
+    walls[wallIndex].y = SCALE_Y(177);
+    walls[wallIndex].w = SCALE_X(28);
+    walls[wallIndex].h = SCALE_Y(3);
+    walls[wallIndex].note = getNoteInScale(ballScale, 7 - i, ballOctave) + ballKey;
+    walls[wallIndex].noteName = getNoteNameFromMIDI(walls[wallIndex].note);
+    walls[wallIndex].color = THEME_ACCENT;
+    walls[wallIndex].active = false;
+    walls[wallIndex].side = 2;
+    wallIndex++;
+  }
+  
+  // Left wall - 4 segments
+  for (int i = 0; i < 4; i++) {
+    walls[wallIndex].x = SCALE_X(50);
+    walls[wallIndex].y = HEADER_HEIGHT + SCALE_Y(18 + i * 28);
+    walls[wallIndex].w = SCALE_X(3);
+    walls[wallIndex].h = SCALE_Y(28);
+    walls[wallIndex].note = getNoteInScale(ballScale, 3 - i, ballOctave + 1) + ballKey;
+    walls[wallIndex].noteName = getNoteNameFromMIDI(walls[wallIndex].note);
+    walls[wallIndex].color = THEME_WARNING;
+    walls[wallIndex].active = false;
+    walls[wallIndex].side = 3;
+    wallIndex++;
+  }
+}
+
+void handleBouncingBallMode() {
+  // Back button
+  if (touch.justPressed && isButtonPressed(BACK_BUTTON_X, BACK_BUTTON_Y, BACK_BUTTON_W, BACK_BUTTON_H)) {
+    exitToMenu();
+    return;
+  }
+  
+  if (touch.justPressed) {
+    // Add ball button
+    if (isButtonPressed(SCALE_X(10), SCALE_Y(200), BTN_SMALL_W, BTN_SMALL_H)) {
+      if (numActiveBalls < MAX_BALLS) {
+        numActiveBalls++;
+        initializeBalls();
+        requestRedraw();
+      }
+      return;
+    }
+    
+    // Reset button
+    if (isButtonPressed(SCALE_X(60), SCALE_Y(200), BTN_SMALL_W, BTN_SMALL_H)) {
+      numActiveBalls = 1;
+      initializeBalls();
+      requestRedraw();
+      return;
+    }
+    
+    // Scale button
+    if (isButtonPressed(SCALE_X(110), SCALE_Y(200), BTN_MEDIUM_W, BTN_SMALL_H)) {
+      ballScale = (ballScale + 1) % NUM_SCALES;
+      initializeWalls();
+      requestRedraw();
+      return;
+    }
+    
+    // Key controls
+    if (isButtonPressed(SCALE_X(170), SCALE_Y(200), BTN_SMALL_W, BTN_SMALL_H)) {
+      ballKey = (ballKey - 1 + 12) % 12;
+      initializeWalls();
+      requestRedraw();
+      return;
+    }
+    
+    if (isButtonPressed(SCALE_X(220), SCALE_Y(200), BTN_SMALL_W, BTN_SMALL_H)) {
+      ballKey = (ballKey + 1) % 12;
+      initializeWalls();
+      requestRedraw();
+      return;
+    }
+    
+    // Octave button
+    if (isButtonPressed(SCALE_X(270), SCALE_Y(200), BTN_SMALL_W, BTN_SMALL_H)) {
+      ballOctave = (ballOctave == 7) ? 2 : ballOctave + 1;
+      initializeWalls();
+      requestRedraw();
+      return;
+    }
+  }
+  
+  // Update physics and display
+  updateBouncingBall();
+}
+
+void updateBouncingBall() {
+  if (!balls || !walls) {
+    return;
+  }
+  
+  // Check for scheduled note-offs
+  unsigned long now = millis();
+  for (int i = 0; i < 8; i++) {
+    if (scheduledNotes[i].active) {
+      // Rollover-safe expiration check
+      if (static_cast<long>(now - scheduledNotes[i].offTime) >= 0) {
+        sendMIDI(0x80, scheduledNotes[i].note, 0);
+        scheduledNotes[i].active = false;
+      }
+    }
+  }
+  
+  // Smooth 60 FPS animation
+  static unsigned long lastUpdate = 0;
+  if (millis() - lastUpdate > 16) {
+    updateBalls();
+    checkWallCollisions();
+    requestRedraw();  // Request redraw to trigger render event for animation
+    lastUpdate = millis();
+  }
+}
+
+void updateBalls() {
+  if (!balls) {
+    return;
+  }
+  int minX = SCALE_X(53);
+  int maxX = DISPLAY_WIDTH - SCALE_X(48);
+  int minY = HEADER_HEIGHT + SCALE_Y(18);
+  int maxY = SCALE_Y(177);
+  
+  for (int i = 0; i < numActiveBalls; i++) {
+    if (!balls[i].active) continue;
+    
+    // Update position
+    balls[i].x += balls[i].vx;
+    balls[i].y += balls[i].vy;
+    
+    // Bounce off walls with proper collision detection
+    if (balls[i].x - balls[i].size <= minX) {
+      balls[i].vx = abs(balls[i].vx);
+      balls[i].x = minX + balls[i].size;
+    }
+    if (balls[i].x + balls[i].size >= maxX) {
+      balls[i].vx = -abs(balls[i].vx);
+      balls[i].x = maxX - balls[i].size;
+    }
+    if (balls[i].y - balls[i].size <= minY) {
+      balls[i].vy = abs(balls[i].vy);
+      balls[i].y = minY + balls[i].size;
+    }
+    if (balls[i].y + balls[i].size >= maxY) {
+      balls[i].vy = -abs(balls[i].vy);
+      balls[i].y = maxY - balls[i].size;
+    }
+  }
+}
+
+void drawBalls() {
+  if (!balls) {
+    return;
+  }
+  for (int i = 0; i < numActiveBalls; i++) {
+    if (!balls[i].active) continue;
+    tft.fillCircle(balls[i].x, balls[i].y, balls[i].size, balls[i].color);
+    tft.drawCircle(balls[i].x, balls[i].y, balls[i].size, THEME_TEXT);
+  }
+}
+
+void drawWalls() {
+  if (!walls) {
+    return;
+  }
+  for (int i = 0; i < NUM_WALLS; i++) {
+    uint16_t color = walls[i].color;
+    
+    // Bright flash when active
+    if (walls[i].active) {
+      unsigned long elapsed = millis() - walls[i].activeTime;
+      if (elapsed < 200) {
+        color = THEME_TEXT; // Bright white flash
+      } else {
+        walls[i].active = false;
+      }
+    }
+    
+    // Draw wall
+    tft.fillRect(walls[i].x, walls[i].y, walls[i].w, walls[i].h, color);
+    
+    // Add note name for longer walls
+    if (walls[i].w > walls[i].h && walls[i].w > 50) {
+      tft.setTextColor(THEME_BG, color);
+      tft.drawCentreString(walls[i].noteName, 
+                          walls[i].x + walls[i].w/2, 
+                          walls[i].y - 2, 1);
+    }
+  }
+}
+
+
+void checkWallCollisions() {
+  for (int b = 0; b < numActiveBalls; b++) {
+    if (!balls[b].active) continue;
+    
+    static float lastX[MAX_BALLS], lastY[MAX_BALLS];
+    static bool initialized = false;
+    
+    if (!initialized) {
+      for (int i = 0; i < MAX_BALLS; i++) {
+        lastX[i] = balls[i].x;
+        lastY[i] = balls[i].y;
+      }
+      initialized = true;
+    }
+    
+    // Check collision with each wall segment
+    for (int w = 0; w < NUM_WALLS; w++) {
+      if (walls[w].active) continue; // Skip if wall is already active
+      
+      bool collision = false;
+      
+      // Check collision based on ball position and wall bounds
+      if (walls[w].side == 0) { // Top walls
+        if (balls[b].y - balls[b].size <= walls[w].y + walls[w].h &&
+            balls[b].x >= walls[w].x && balls[b].x <= walls[w].x + walls[w].w &&
+            lastY[b] > balls[b].y) {
+          collision = true;
+        }
+      }
+      else if (walls[w].side == 1) { // Right walls
+        if (balls[b].x + balls[b].size >= walls[w].x &&
+            balls[b].y >= walls[w].y && balls[b].y <= walls[w].y + walls[w].h &&
+            lastX[b] < balls[b].x) {
+          collision = true;
+        }
+      }
+      else if (walls[w].side == 2) { // Bottom walls
+        if (balls[b].y + balls[b].size >= walls[w].y &&
+            balls[b].x >= walls[w].x && balls[b].x <= walls[w].x + walls[w].w &&
+            lastY[b] < balls[b].y) {
+          collision = true;
+        }
+      }
+      else if (walls[w].side == 3) { // Left walls
+        if (balls[b].x - balls[b].size <= walls[w].x + walls[w].w &&
+            balls[b].y >= walls[w].y && balls[b].y <= walls[w].y + walls[w].h &&
+            lastX[b] > balls[b].x) {
+          collision = true;
+        }
+      }
+      
+      if (collision) {
+        if (deviceConnected) {
+          // Guard against division by zero
+          uint16_t safeBPM = (sharedBPM == 0) ? MIN_SAFE_BPM : sharedBPM;
+          // Calculate 16th note duration in ms (60000 ms/min / BPM / 4 beats/bar)
+          unsigned long sixteenthNoteDuration = (60000 / safeBPM) / 4;
+          
+          sendMIDI(0x90, walls[w].note, random(70, 110));
+          
+          // Schedule note-off for a 16th note later
+          int slotIndex = -1;
+          // First try to find an inactive slot
+          for (int i = 0; i < 8; i++) {
+            if (!scheduledNotes[i].active) {
+              slotIndex = i;
+              break;
+            }
+          }
+          
+          // If all slots are active, find the oldest one (earliest offTime)
+          if (slotIndex == -1) {
+            unsigned long earliestTime = ULONG_MAX;
+            slotIndex = 0;
+            for (int i = 0; i < 8; i++) {
+              if (scheduledNotes[i].offTime < earliestTime) {
+                earliestTime = scheduledNotes[i].offTime;
+                slotIndex = i;
+              }
+            }
+            // Send immediate Note Off for the note being replaced
+            sendMIDI(0x80, scheduledNotes[slotIndex].note, 0);
+          }
+          
+          // Schedule the new note-off
+          scheduledNotes[slotIndex].note = walls[w].note;
+          scheduledNotes[slotIndex].offTime = millis() + sixteenthNoteDuration;
+          scheduledNotes[slotIndex].active = true;
+        }
+        
+        walls[w].active = true;
+        walls[w].activeTime = millis();
+        
+        MIDI_DEBUG("Wall segment hit: %s\n", walls[w].noteName.c_str());
+        break; // Only trigger one wall per ball per frame
+      }
+    }
+    
+    // Update last positions
+    lastX[b] = balls[b].x;
+    lastY[b] = balls[b].y;
+  }
+}

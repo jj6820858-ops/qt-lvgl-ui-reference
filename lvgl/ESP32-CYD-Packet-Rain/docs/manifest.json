@@ -1,0 +1,16 @@
+{
+  "name": "CYD Packet Rain",
+  "version": "v0.0.7",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "firmware.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// WiFi Configuration
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+
+// OpenWeatherMap API Configuration
+// Get your free API key from: https://openweathermap.org/api
+#define WEATHER_API_KEY "YOUR_API_KEY"
+#define WEATHER_CITY "New York"
+#define WEATHER_COUNTRY_CODE "US"
+#define WEATHER_UNITS "imperial" // standard, metric and imperial units are available. If you do not use the units parameter, standard units will be applied by default
+
+// Weather update interval (milliseconds)
+#define UPDATE_INTERVAL 900000  // 15 minutes
+
+// OpenWeatherMap API endpoints
+#define WEATHER_API_HOST "api.openweathermap.org"
+#define WEATHER_CURRENT_API_URL "/data/2.5/weather?q=" WEATHER_CITY "," WEATHER_COUNTRY_CODE "&units=" WEATHER_UNITS "&appid=" WEATHER_API_KEY
+#define WEATHER_FORECAST_API_URL "/data/2.5/forecast?q=" WEATHER_CITY "," WEATHER_COUNTRY_CODE "&units=" WEATHER_UNITS "&appid=" WEATHER_API_KEY
+
+#endif

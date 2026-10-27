@@ -1,0 +1,71 @@
+# PlatformIO
+.pio/
+.platformio/
+.pio.bak/
+.ccls-cache/
+.clangd/
+.worktrees/
+_codeql_detected_source_root/
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# Git worktree metadata (avoid noise in VSCode)
+.worktrees/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Linux
+*~
+
+# Build artifacts
+*.elf
+*.bin
+*.hex
+*.map
+
+# Local temp artifacts
+tmp/
+
+# Logs
+*.log
+
+# Python
+.venv/
+env/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Backup files
+*~
+*.swp
+*.bak
+*.tmp
+
+# WiFi credentials (keep template, ignore actual config)
+config/wifi_config.h
+config/wifi_config.local.h
+
+# Local secrets (API keys, tokens)
+.secrets/
+secrets.h
+
+# IDE specific
+.idea/
+*.iml
+
+# Legacy/experimental (not for public release)
+legacy/
+
+# Debug console build artifacts
+debug-console/node_modules/
+debug-console/dist/
+debug-console/.vite/

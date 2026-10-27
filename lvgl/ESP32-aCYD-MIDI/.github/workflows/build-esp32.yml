@@ -1,0 +1,513 @@
+name: Build ESP32 firmware (PlatformIO)
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      parent_issue:
+        description: 'Parent issue number (for failure reporting)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - esp32-2432S028Rv2
+          - esp32-2432S028Rv2-uart2
+          - esp32-2432S028Rv2-uart0
+          - esp32-4832S035C
+          - esp32-4832S035C-uart2
+          - esp32-4832S035C-uart0
+          - esp32-4832S035R
+          - esp32-4832S035R-uart2
+          - esp32-4832S035R-uart0
+          - esp32-4832S040R
+          - esp32-4832S040R-uart2
+          - esp32-4832S040R-uart0
+          - elecrow-esp32-7_0
+          - elecrow-esp32-7_0-uart2
+          - elecrow-esp32-7_0-uart0
+          - esp32-headless-midi-master
+          - esp32s3-headless
+          # uncomment if you also want the non-v2 board
+          # - esp32-2432S028R
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-pio-${{ hashFiles('**/platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
+
+      - name: Install PlatformIO
+        run: |
+          pip install --upgrade pip
+          pip install platformio
+
+      - name: Show PlatformIO version
+        run: pio --version
+
+      - name: Build firmware for ${{ matrix.env }}
+        run: pio run -e ${{ matrix.env }}
+      - name: Prepare firmware artifacts for upload (${{ matrix.env }})
+        run: |
+          mkdir -p .pio/build/${{ matrix.env }}/artifacts
+          if [ -f .pio/build/${{ matrix.env }}/firmware.bin ]; then cp .pio/build/${{ matrix.env }}/firmware.bin .pio/build/${{ matrix.env }}/artifacts/firmware-${{ matrix.env }}.bin; fi
+          if [ -f .pio/build/${{ matrix.env }}/firmware.elf ]; then cp .pio/build/${{ matrix.env }}/firmware.elf .pio/build/${{ matrix.env }}/artifacts/firmware-${{ matrix.env }}.elf; fi
+          
+          # Copy bootloader and partition files needed for ESP Web Tools
+          if [ -f .pio/build/${{ matrix.env }}/bootloader.bin ]; then cp .pio/build/${{ matrix.env }}/bootloader.bin .pio/build/${{ matrix.env }}/artifacts/bootloader.bin; fi
+          if [ -f .pio/build/${{ matrix.env }}/partitions.bin ]; then cp .pio/build/${{ matrix.env }}/partitions.bin .pio/build/${{ matrix.env }}/artifacts/partitions.bin; fi
+          
+          # Find and copy boot_app0.bin from PlatformIO packages
+          BOOT_APP0=$(find ~/.platformio/packages -name "boot_app0.bin" | head -n 1)
+          if [ -n "$BOOT_APP0" ]; then cp "$BOOT_APP0" .pio/build/${{ matrix.env }}/artifacts/boot_app0.bin; fi
+
+      - name: Upload firmware artifact (${{ matrix.env }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.env }}
+          path: |
+            .pio/build/${{ matrix.env }}/artifacts/firmware-${{ matrix.env }}.bin
+            .pio/build/${{ matrix.env }}/artifacts/firmware-${{ matrix.env }}.elf
+            .pio/build/${{ matrix.env }}/artifacts/bootloader.bin
+            .pio/build/${{ matrix.env }}/artifacts/partitions.bin
+            .pio/build/${{ matrix.env }}/artifacts/boot_app0.bin
+          if-no-files-found: error
+
+  deploy-pages:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all firmware artifacts
+        uses: actions/download-artifact@v4.1.3
+        with:
+          path: dist
+
+      - name: Flatten artifact structure
+        run: |
+          mkdir -p release-files
+          find dist -type f \( -name "*.bin" -o -name "*.elf" \) -exec cp {} release-files/ \;
+          ls -lh release-files/
+          
+      - name: Prepare web installer files
+        run: |
+          # Create web installer directory structure
+          mkdir -p web-installer/manifests
+          
+          # Copy index.html (landing page) and flash.html (web installer) from docs folder
+          cp docs/index.html web-installer/
+          cp docs/flash.html web-installer/
+          
+          # Copy manifest JSON files from docs/manifests
+          cp docs/manifests/*.json web-installer/manifests/
+          
+          # Copy firmware binaries to web installer directory
+          cp release-files/firmware-*.bin web-installer/manifests/
+          
+          # Copy bootloader and partition files
+          find release-files -name "bootloader.bin" -type f | head -n 1 | xargs -I {} cp {} web-installer/manifests/bootloader.bin
+          find release-files -name "partitions.bin" -type f | head -n 1 | xargs -I {} cp {} web-installer/manifests/partitions.bin
+          find release-files -name "boot_app0.bin" -type f | head -n 1 | xargs -I {} cp {} web-installer/manifests/boot_app0.bin
+          
+          # Copy S3-specific files if they exist
+          if find release-files -path "*esp32s3-headless*bootloader.bin" -type f | head -n 1 | grep -q .; then
+            find release-files -path "*esp32s3-headless*bootloader.bin" -type f | head -n 1 | xargs -I {} cp {} web-installer/manifests/bootloader-s3.bin
+          fi
+          if find release-files -path "*esp32s3-headless*partitions.bin" -type f | head -n 1 | grep -q .; then
+            find release-files -path "*esp32s3-headless*partitions.bin" -type f | head -n 1 | xargs -I {} cp {} web-installer/manifests/partitions-s3.bin
+          fi
+          
+          echo "Web installer files prepared:"
+          ls -lh web-installer/
+          ls -lh web-installer/manifests/ | head -20
+
+      - name: Deploy web installer to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./web-installer
+          publish_branch: gh-pages
+          keep_files: true
+          commit_message: 'Deploy web installer from main branch - commit ${{ github.sha }}'
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all firmware artifacts
+        uses: actions/download-artifact@v4.1.3
+        with:
+          path: dist
+
+      - name: Flatten artifact structure
+        run: |
+          mkdir -p release-files
+          find dist -type f \( -name "*.bin" -o -name "*.elf" \) -exec cp {} release-files/ \;
+          ls -lh release-files/
+          
+      - name: Prepare web installer files
+        run: |
+          # Create web installer directory structure
+          mkdir -p web-installer/manifests
+          
+          # Copy index.html (landing page) and flash.html (web installer) from docs folder
+          # These have the correct paths for GitHub Pages deployment
+          cp docs/index.html web-installer/
+          cp docs/flash.html web-installer/
+          
+          # Copy manifest JSON files from docs/manifests (source of truth for web installer)
+          cp docs/manifests/*.json web-installer/manifests/
+          
+          # Copy firmware binaries to web installer directory
+          cp release-files/firmware-*.bin web-installer/manifests/
+          
+          # Copy bootloader and partition files (they should be the same for all ESP32 builds)
+          # Find the first occurrence of each file type from any build
+          find release-files -name "bootloader.bin" -type f | head -n 1 | xargs -I {} cp {} web-installer/manifests/bootloader.bin
+          find release-files -name "partitions.bin" -type f | head -n 1 | xargs -I {} cp {} web-installer/manifests/partitions.bin
+          find release-files -name "boot_app0.bin" -type f | head -n 1 | xargs -I {} cp {} web-installer/manifests/boot_app0.bin
+          
+          # For ESP32-S3, we need separate bootloader and partitions
+          # Copy S3-specific files if they exist (from esp32s3-headless build)
+          if find release-files -path "*esp32s3-headless*bootloader.bin" -type f | head -n 1 | grep -q .; then
+            find release-files -path "*esp32s3-headless*bootloader.bin" -type f | head -n 1 | xargs -I {} cp {} web-installer/manifests/bootloader-s3.bin
+          fi
+          if find release-files -path "*esp32s3-headless*partitions.bin" -type f | head -n 1 | grep -q .; then
+            find release-files -path "*esp32s3-headless*partitions.bin" -type f | head -n 1 | xargs -I {} cp {} web-installer/manifests/partitions-s3.bin
+          fi
+          
+          echo "Web installer files prepared:"
+          ls -lh web-installer/
+          ls -lh web-installer/manifests/ | head -20
+
+      - name: Deploy web installer to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./web-installer
+          publish_branch: gh-pages
+          keep_files: true
+          commit_message: 'Deploy web installer for ${{ github.ref_name }}'
+
+      - name: Extract changelog for this release
+        id: changelog
+        run: |
+          # Extract version from tag (e.g., v0.0.3 -> 0.0.3)
+          VERSION=${GITHUB_REF#refs/tags/v}
+          
+          # Extract the changelog section for this version
+          # This awk script extracts content between the version header and the next version header
+          CHANGELOG_CONTENT=$(awk -v version="$VERSION" '
+            /^## \[/ {
+              if (found) exit
+              if ($0 ~ "\\[" version "\\]") {
+                found=1
+                next
+              }
+            }
+            found { print }
+          ' docs/CHANGELOG.md)
+          
+          # If no changelog found, use a default message
+          if [ -z "$CHANGELOG_CONTENT" ]; then
+            CHANGELOG_CONTENT="See [docs/CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) for details."
+          fi
+          
+          # Save to output using multiline string format
+          {
+            echo 'content<<EOF'
+            echo "$CHANGELOG_CONTENT"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-files/*
+          body: ${{ steps.changelog.outputs.content }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  report_failure:
+    needs: build
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Download build logs
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: build-logs
+
+      - name: Get job logs
+        id: get-logs
+        continue-on-error: true
+        run: |
+          # Create a comprehensive log summary
+          echo "Collecting failure information..."
+          
+          # Get workflow run details
+          WORKFLOW_NAME="${{ github.workflow }}"
+          RUN_ID="${{ github.run_id }}"
+          RUN_NUMBER="${{ github.run_number }}"
+          ACTOR="${{ github.actor }}"
+          EVENT="${{ github.event_name }}"
+          REF="${{ github.ref }}"
+          SHA="${{ github.sha }}"
+          
+          # Create log summary file
+          LOG_FILE="failure-summary.txt"
+          
+          cat > "$LOG_FILE" << 'EOF'
+          ====================================
+          CI BUILD FAILURE REPORT
+          ====================================
+          
+          Workflow: ${{ github.workflow }}
+          Run ID: ${{ github.run_id }}
+          Run Number: ${{ github.run_number }}
+          Triggered by: ${{ github.actor }}
+          Event: ${{ github.event_name }}
+          Ref: ${{ github.ref }}
+          Commit: ${{ github.sha }}
+          Repository: ${{ github.repository }}
+          
+          ====================================
+          FAILURE CONTEXT
+          ====================================
+          
+          The build job failed during execution.
+          
+          Build Matrix Information:
+          - Multiple environments were being built
+          - Check the logs URL below for specific environment failures
+          
+          ====================================
+          LOGS AND ARTIFACTS
+          ====================================
+          
+          Full workflow logs available at:
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          
+          To view detailed logs:
+          1. Visit the workflow run URL above
+          2. Click on the failed job(s) in the matrix
+          3. Review the build output for specific error messages
+          
+          ====================================
+          NEXT STEPS
+          ====================================
+          
+          1. Review the workflow logs at the URL above
+          2. Check for compilation errors, dependency issues, or test failures
+          3. Fix the identified issues
+          4. Re-run the workflow or push a new commit
+          
+          ====================================
+          
+          NOTE: Full job logs will be fetched via GitHub API in the next step.
+          ====================================
+          EOF
+          
+          # Save log file content for later use
+          echo "log-content<<EOF" >> "$GITHUB_OUTPUT"
+          cat "$LOG_FILE" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          
+          echo "Log summary created successfully"
+
+      - name: Create failure issue and link to parent
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const logsUrl = `${runUrl}#artifacts`;
+            const title = `CI Build Failure: ${context.workflow} (Run #${process.env.GITHUB_RUN_NUMBER})`;
+            
+            // Build comprehensive issue body with full log details
+            const logContent = `${{ steps.get-logs.outputs.log-content }}`;
+            
+            // Fetch all jobs for this workflow run to get full logs
+            let fullJobLogs = '';
+            try {
+              core.info('Fetching job details and logs...');
+              
+              const jobs = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+              });
+              
+              core.info(`Found ${jobs.data.jobs.length} jobs in this workflow run`);
+              
+              // Filter for failed jobs
+              const failedJobs = jobs.data.jobs.filter(job => 
+                job.status === 'completed' && job.conclusion === 'failure'
+              );
+              
+              if (failedJobs.length > 0) {
+                fullJobLogs += '\n\n## Failed Job Details\n\n';
+                
+                for (const job of failedJobs) {
+                  fullJobLogs += `### Job: ${job.name}\n`;
+                  fullJobLogs += `- **Status:** ${job.status}\n`;
+                  fullJobLogs += `- **Conclusion:** ${job.conclusion}\n`;
+                  fullJobLogs += `- **Started:** ${job.started_at}\n`;
+                  fullJobLogs += `- **Completed:** ${job.completed_at || 'N/A'}\n`;
+                  fullJobLogs += `- **Job URL:** ${job.html_url}\n\n`;
+                  
+                  // Get logs for this specific job
+                  try {
+                    const logResponse = await github.rest.actions.downloadJobLogsForWorkflowRun({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      job_id: job.id,
+                    });
+                    
+                    // The response is a redirect URL, we need to fetch the actual logs
+                    if (logResponse.url) {
+                      const logsText = await fetch(logResponse.url).then(r => r.text());
+                      
+                      // Truncate if too long (GitHub issues have size limits)
+                      const maxLogLength = 30000; // Keep logs reasonable
+                      const truncatedLogs = logsText.length > maxLogLength 
+                        ? logsText.substring(0, maxLogLength) + '\n\n... (truncated, see full logs at job URL above)'
+                        : logsText;
+                      
+                      fullJobLogs += `#### Full Job Logs:\n\`\`\`\n${truncatedLogs}\n\`\`\`\n\n`;
+                    }
+                  } catch (logError) {
+                    core.warning(`Could not fetch logs for job ${job.id}: ${logError.message}`);
+                    fullJobLogs += `*Could not retrieve full logs for this job. Please view logs at the job URL above.*\n\n`;
+                  }
+                }
+              } else {
+                fullJobLogs += '\n\n*Note: No explicitly failed jobs found, but workflow reported failure. Check the workflow run URL for details.*\n\n';
+              }
+            } catch (error) {
+              core.warning(`Error fetching job logs: ${error.message}`);
+              fullJobLogs = '\n\n*Unable to fetch detailed job logs via API. Please view the workflow run URL for complete logs.*\n\n';
+            }
+            
+            const body = `## 🔴 Automated CI Build Failure Report
+            
+            **Workflow:** ${context.workflow}  
+            **Run ID:** [#${process.env.GITHUB_RUN_ID}](${runUrl})  
+            **Run Number:** #${process.env.GITHUB_RUN_NUMBER}  
+            **Triggered by:** @${context.actor}  
+            **Event:** ${context.eventName}  
+            **Branch/Ref:** \`${context.ref}\`  
+            **Commit:** \`${context.sha.substring(0, 7)}\`  
+            
+            ---
+            
+            ### 📋 Failure Summary
+            
+            \`\`\`
+            ${logContent}
+            \`\`\`
+            
+            ---
+            
+            ${fullJobLogs}
+            
+            ---
+            
+            ### 🔗 Useful Links
+            
+            - **[View Full Workflow Run](${runUrl})** - Complete logs and details
+            - **[View Artifacts](${logsUrl})** - Build artifacts (if any)
+            - **[Repository](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo})**
+            
+            ---
+            
+            ### 🛠️ How to Debug
+            
+            1. Review the job logs above (if available)
+            2. Click the "View Full Workflow Run" link for complete logs
+            3. Expand the failed job(s) in the build matrix
+            4. Look for error messages, missing dependencies, or test failures
+            5. Fix the issues and re-run or push a new commit
+            
+            ---
+            
+            *This issue was automatically created by the CI failure reporting system.*`;
+            
+            // Create the issue
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['ci-failure', 'automated']
+            });
+            
+            core.info(`✅ Created failure issue #${issue.data.number}: ${issue.data.html_url}`);
+            
+            // Link to parent issue if provided
+            const parent = process.env.PARENT_ISSUE || '';
+            if (parent) {
+              try {
+                const comment = `## 🔗 Automated CI Failure Sub-Issue Created
+            
+            A build failure was detected during workflow execution.
+            
+            **Failure Issue:** #${issue.data.number}  
+            **Workflow Run:** [#${process.env.GITHUB_RUN_NUMBER}](${runUrl})
+            
+            Please review the [failure issue](${issue.data.html_url}) for complete logs and debugging information.`;
+            
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: parseInt(parent, 10),
+                  body: comment
+                });
+                
+                core.info(`✅ Posted comment linking to parent issue #${parent}`);
+              } catch (error) {
+                core.warning(`⚠️ Could not link to parent issue #${parent}: ${error.message}`);
+              }
+            } else {
+              core.info('ℹ️ No parent issue provided; skipping link creation.');
+            }
+        env:
+          PARENT_ISSUE: ${{ github.event.inputs.parent_issue }}

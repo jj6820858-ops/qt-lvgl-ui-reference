@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CYD Packet Rain – Web Flasher</title>
+    <style>
+        :root {
+            --green: #00ff41;
+            --bg: #0d0d0d;
+            --card: #1a1a1a;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background: var(--bg);
+            color: var(--green);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem 1rem;
+        }
+
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .subtitle {
+            color: #888;
+            font-size: 0.9rem;
+            margin-bottom: 0.35rem;
+        }
+
+        .version {
+            color: #80ffa0;
+            font-size: 0.9rem;
+            margin-bottom: 2rem;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 2rem;
+            max-width: 560px;
+            width: 100%;
+            margin-bottom: 1.5rem;
+        }
+
+        .card h2 {
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+        }
+
+        .steps {
+            list-style: none;
+            counter-reset: step;
+        }
+
+        .steps li {
+            counter-increment: step;
+            padding: 0.4rem 0;
+            padding-left: 2rem;
+            position: relative;
+            color: #ccc;
+        }
+
+        .steps li::before {
+            content: counter(step);
+            position: absolute;
+            left: 0;
+            color: var(--green);
+            font-weight: bold;
+        }
+
+        .flash-box {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        esp-web-install-button {
+            --inst-button-color: var(--green);
+        }
+
+        esp-web-install-button button {
+            background: var(--green);
+            color: #000;
+            border: none;
+            padding: 0.75rem 2rem;
+            font-family: 'Courier New', monospace;
+            font-size: 1.1rem;
+            font-weight: bold;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        esp-web-install-button button:hover {
+            opacity: 0.85;
+        }
+
+        .note {
+            color: #888;
+            font-size: 0.8rem;
+            text-align: center;
+            max-width: 400px;
+        }
+
+        a {
+            color: var(--green);
+        }
+
+        footer {
+            margin-top: auto;
+            padding-top: 2rem;
+            color: #555;
+            font-size: 0.75rem;
+        }
+
+        .unsupported {
+            display: none;
+            color: #ff5555;
+            border: 1px solid #ff5555;
+            padding: 1rem;
+            border-radius: 4px;
+            text-align: center;
+            max-width: 560px;
+            width: 100%;
+        }
+
+        .card p {
+            margin: 0;
+            line-height: 1.5;
+        }
+    </style>
+    <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</head>
+
+<body>
+    <h1>CYD Packet Rain</h1>
+    <p class="subtitle">ESP32-2432S028 Web Flasher</p>
+    <p class="version">Version: <span id="firmwareVersion">Loading...</span></p>
+
+    <div class="unsupported" id="unsupported">
+        Your browser does not support Web Serial.<br />
+        Please use <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong> on desktop.
+    </div>
+
+    <div class="card">
+        <h2>Prerequisites</h2>
+        <ol class="steps">
+            <li>Use <strong>Chrome</strong> or <strong>Edge</strong> on a Windows computer.</li>
+            <li>Install the <a href="https://www.wch-ic.com/downloads/CH341SER_EXE.html">CH340 USB driver</a> if needed.
+            </li>
+            <li>Connect your CYD board via USB.</li>
+        </ol>
+    </div>
+
+    <div class="card">
+        <div class="flash-box">
+            <h2>Flash Firmware</h2>
+            <esp-web-install-button manifest="manifest.json">
+                <button slot="activate">Install CYD Packet Rain</button>
+                <span slot="unsupported">
+                    Your browser does not support Web Serial. Use Chrome or Edge.
+                </span>
+                <span slot="not-allowed">
+                    Web Serial is not allowed in this context.
+                </span>
+            </esp-web-install-button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>After Flashing</h2>
+        <ol class="steps">
+            <li>Connect to WiFi by using the device's setup menu.</li>
+            <li>Open the board's IP address in a browser to access the web admin. (IP available in the System menu)</li>
+            <li>Configure OpenWrt (Optional) for VPN management, and OpenWeatherMap settings (Optional).</li>
+        </ol>
+    </div>
+
+    <div class="card">
+        <h2>More Documentation</h2>
+        <p class="note">
+            For more setup instructions and detailed documentation, visit the <a
+                href="https://github.com/buzzcola81/cyd-packet-rain/blob/main/README.md">README</a> on GitHub.
+        </p>
+    </div>
+
+    <div class="card" style="border-color: #ff5555; background: rgba(255, 85, 85, 0.1);">
+        <h2 style="color: #ff5555;">⚠️ Disclaimer</h2>
+        <p class="note" style="color: #ccc; font-size: 0.75rem;">
+            This is a personal project and has only been tested with the CYD ESP32-2432S028. It has not been tested
+            against any other boards. Use at your own risk.
+        </p>
+    </div>
+
+    <footer>
+        <a href="https://github.com/buzzcola81/cyd-packet-rain">GitHub Repository</a>
+    </footer>
+
+    <script>
+        if (!("serial" in navigator)) {
+            document.getElementById("unsupported").style.display = "block";
+        }
+
+        async function loadFirmwareVersion() {
+            const versionEl = document.getElementById("firmwareVersion");
+            try {
+                const response = await fetch("manifest.json", { cache: "no-store" });
+                if (!response.ok) {
+                    throw new Error("Failed to load manifest");
+                }
+                const manifest = await response.json();
+                const version = manifest && manifest.version ? manifest.version : "Unknown";
+                versionEl.textContent = version;
+            } catch (error) {
+                versionEl.textContent = "Unavailable";
+            }
+        }
+
+        loadFirmwareVersion();
+    </script>
+</body>
+
+</html>

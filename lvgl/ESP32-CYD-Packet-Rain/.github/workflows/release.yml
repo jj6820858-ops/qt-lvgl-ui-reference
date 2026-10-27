@@ -1,0 +1,84 @@
+name: Build and Release Firmware
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PlatformIO
+        run: pip install platformio esptool
+
+      - name: Build firmware
+        run: pio run -e cyd
+
+      - name: Get version from tag
+        id: version
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare release binaries
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32 -name boot_app0.bin | head -1)
+          python -m esptool --chip esp32 merge_bin \
+            --output "cyd-packet-rain-${TAG}.bin" \
+            --flash_mode dio \
+            --flash_freq 40m \
+            --flash_size 4MB \
+            0x1000  .pio/build/cyd/bootloader.bin \
+            0x8000  .pio/build/cyd/partitions.bin \
+            0xe000  "$BOOT_APP0" \
+            0x10000 .pio/build/cyd/firmware.bin
+
+      - name: Update docs for GitHub Pages
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          cp "cyd-packet-rain-${TAG}.bin" docs/firmware.bin
+          cat > docs/manifest.json <<EOF
+          {
+            "name": "CYD Packet Rain",
+            "version": "${TAG}",
+            "new_install_prompt_erase": true,
+            "builds": [
+              {
+                "chipFamily": "ESP32",
+                "parts": [
+                  {
+                    "path": "firmware.bin",
+                    "offset": 0
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+
+      - name: Commit updated docs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          git add docs/manifest.json docs/firmware.bin
+          git diff --cached --quiet || git commit -m "Update firmware for ${{ steps.version.outputs.tag }}"
+          git push
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: cyd-packet-rain-${{ steps.version.outputs.tag }}.bin
+          generate_release_notes: true

@@ -232,5 +232,101 @@
     "excluded_paths": [
       "boards"
     ]
+  },
+  {
+    "path": "lvgl/ESP32-CYD-Packet-Rain",
+    "upstream": "https://github.com/Buzzcola81/cyd-packet-rain",
+    "commit": "85cfb5c59e3f678678a3c4334620b5fb305fe8d6",
+    "license": "MIT",
+    "tracked_files": 25,
+    "preview": "lvgl/ESP32-CYD-Packet-Rain/docs/images/cyd-packet-rain-2.jpg",
+    "preview_type": "上游实机菜单照片",
+    "board_and_constraints": "ESP32-2432S028 / 320×240 / LVGL 8.3.11 / PlatformIO；天气及路由器功能需自行配置网络和服务"
+  },
+  {
+    "path": "lvgl/ESP32-EVSE-HMI",
+    "upstream": "https://github.com/nagyrobi/esp32evse_esphome-lvgl",
+    "commit": "b14de637c4b09dd62d6c913aac4287b3b4a23b50",
+    "license": "MIT",
+    "tracked_files": 11,
+    "preview": "lvgl/ESP32-EVSE-HMI/images/esp32-evse_esphome-lvgl.gif",
+    "preview_type": "上游效果动画",
+    "board_and_constraints": "ESP32 系列 / ESPHome + LVGL；界面源码为 YAML 配置，需 ESP32-EVSE 控制器和对应屏幕"
+  },
+  {
+    "path": "lvgl/ESP32-CrowView-SDR",
+    "upstream": "https://github.com/TrevTron/crowview-cyberdeck",
+    "commit": "ef494cc123b28adeab0bc0e4d15320d1abb50365",
+    "license": "MIT",
+    "tracked_files": 17,
+    "preview": "lvgl/ESP32-CrowView-SDR/images/crowpanel-closeup.jpg",
+    "preview_type": "上游实机照片",
+    "board_and_constraints": "ESP32-S3 CrowPanel 7 英寸 / 800×480 / LVGL 8.3 / PlatformIO；动态数据需外接 Linux SBC 和 SDR"
+  },
+  {
+    "path": "lvgl/ESP32-aCYD-MIDI",
+    "upstream": "https://github.com/julesdg6/aCYD-MIDI",
+    "commit": "f0916b10a720b65d88b134b6632fb0c751ba7644",
+    "license": "MIT",
+    "tracked_files": 294,
+    "preview": "previews/ESP32-aCYD-MIDI-menu.png",
+    "preview_type": "上游实际屏幕截图（BMP 转 PNG 展示）",
+    "board_and_constraints": "ESP32 CYD / PlatformIO；支持菜单、音序器和 XY 触控；LVGL 版本由依赖确定，需按上游核对",
+    "preview_origin": "lvgl/ESP32-aCYD-MIDI/assets/screenshots/00_main_menu.bmp",
+    "preview_note": "原始 BMP 无损转换为 PNG，用于网页展示；原 BMP 仍在源码快照中。"
+  },
+  {
+    "path": "lvgl/ESP32-SensorStation3",
+    "upstream": "https://github.com/ScorpionZZZ/SensorStation3",
+    "commit": "0a94eca0f530c1c5ecf42d6730a849dfed581310",
+    "license": "Apache-2.0",
+    "tracked_files": 104,
+    "preview": "lvgl/ESP32-SensorStation3/docs/images/device-photo.jpg",
+    "preview_type": "上游实机照片",
+    "board_and_constraints": "ESP32-2432S028 / ESP-IDF 6.0.2 / LVGL 9.5；可选 Bosch BSEC 不随上游分发，需单独获取"
+  },
+  {
+    "path": "lvgl/ESP32-AgentScreen",
+    "upstream": "https://github.com/JerrettDavis/AgentScreen",
+    "commit": "2ea1c7c31ae6378802c21defde0f3e1276b84cb7",
+    "license": "MIT",
+    "tracked_files": 125,
+    "preview": "lvgl/ESP32-AgentScreen/docs/screenshots/device-320x480.png",
+    "preview_type": "上游设计预览图",
+    "board_and_constraints": "ESP32 E32R40T / ST7796S / LVGL 8.4 / PlatformIO；截图为设计预览，项目还含 .NET 服务"
+  },
+  {
+    "path": "lvgl/ESP32-CYD-Jukebox",
+    "upstream": "https://github.com/TheDiffi/cyd-jukebox",
+    "commit": "b1d865ae566e5dcdd234041edb2b34921ee879b4",
+    "license": "MIT",
+    "tracked_files": 27,
+    "preview": "lvgl/ESP32-CYD-Jukebox/assets/cyd-jukebox-cover-image-1.jpeg",
+    "preview_type": "上游设备照片",
+    "board_and_constraints": "ESP32-2432S028 / ESPHome + LVGL；需 Home Assistant 和 AppDaemon；上游建议 ESPHome 2026.3 或更早"
+  },
+  {
+    "path": "lvgl/ESP32-Stripe-Metrics",
+    "upstream": "https://github.com/cosjef/stripe-business-metrics-monitor",
+    "commit": "bb5ff9c4f8acf273a52b68f0e8244549ee5afb7a",
+    "license": "MIT",
+    "tracked_files": 140,
+    "preview": "lvgl/ESP32-Stripe-Metrics/docs/img/mrr.png",
+    "preview_type": "上游固件界面渲染图",
+    "board_and_constraints": "ESP32-C6 / 480×480 AMOLED / LVGL 9.2 / PlatformIO；应用数据需 Stripe 服务，图为界面参考",
+    "excluded_paths": [
+      "core/test/test_stripe_key.c"
+    ],
+    "snapshot_note": "上游测试文件含 Stripe 测试密钥格式字符串，被 GitHub 推送保护拦截；本快照不包含该测试文件，可从上游查看。"
+  },
+  {
+    "path": "lvgl/ESP32-Weather-Station",
+    "upstream": "https://github.com/dcoric/weather-station",
+    "commit": "d12a708832ee10ce0e796b409efd7d472d7f1acc",
+    "license": "MIT",
+    "tracked_files": 15,
+    "preview": "lvgl/ESP32-Weather-Station/weather-station-display.jpg",
+    "preview_type": "上游实机显示照片",
+    "board_and_constraints": "ESP32 / ILI9341 2.8 英寸 240×320 / LVGL 8.3.11 / PlatformIO；天气服务和 Wi-Fi 需自行配置"
   }
 ]

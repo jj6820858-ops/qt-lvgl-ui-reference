@@ -1,0 +1,63 @@
+name: Deploy Debug Console to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'debug-console/**'
+      - '.github/workflows/deploy-debug-console.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: debug-console/package-lock.json
+
+      - name: Install dependencies
+        working-directory: debug-console
+        run: npm ci
+
+      - name: Build
+        working-directory: debug-console
+        run: npm run build
+
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages-branch
+
+      - name: Clean debug-console directory
+        run: |
+          # Remove all files in debug-console except .git
+          rm -rf gh-pages-branch/debug-console/*
+          # Keep hidden files like .nojekyll at root level
+          echo "Cleaned debug-console directory"
+
+      - name: Copy built files
+        run: |
+          # Copy the built files to gh-pages debug-console directory
+          cp -r debug-console/dist/* gh-pages-branch/debug-console/
+          echo "Copied built files to gh-pages/debug-console/"
+
+      - name: Deploy to GitHub Pages
+        working-directory: gh-pages-branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add debug-console
+          git commit -m "Deploy debug console" || echo "No changes to commit"
+          git push origin gh-pages
