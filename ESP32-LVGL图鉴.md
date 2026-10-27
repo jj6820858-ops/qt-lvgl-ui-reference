@@ -16,7 +16,6 @@
 | [320×480 状态和会话看板](lvgl/ESP32-AgentScreen/) | ESP32 E32R40T / ST7796S / LVGL 8.4 / PlatformIO；截图为设计预览，项目还含 .NET 服务 | MIT |
 | [触屏音乐遥控器](lvgl/ESP32-CYD-Jukebox/) | ESP32-2432S028 / ESPHome + LVGL；需 Home Assistant 和 AppDaemon；上游建议 ESPHome 2026.3 或更早 | MIT |
 | [圆角数据指标看板](lvgl/ESP32-Stripe-Metrics/) | ESP32-C6 / 480×480 AMOLED / LVGL 9.2 / PlatformIO；应用数据需 Stripe 服务，图为界面参考 | MIT |
-
 | [独立天气站](lvgl/ESP32-Weather-Station/) | ESP32 / ILI9341 2.8 英寸 240×320 / LVGL 8.3.11 / PlatformIO；天气服务和 Wi-Fi 需自行配置 | MIT |
 
 ## 界面预览与源码
