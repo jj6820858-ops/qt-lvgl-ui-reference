@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Qt 6.2 or newer, as the library itself requires (CMakeLists.txt)
+find_dependency(Qt6 6.2 COMPONENTS Core Gui Widgets)
+
+include("${CMAKE_CURRENT_LIST_DIR}/QtIndustrialWidgetsTargets.cmake")
+
+check_required_components(QtIndustrialWidgets)

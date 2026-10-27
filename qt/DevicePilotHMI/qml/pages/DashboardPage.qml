@@ -1,0 +1,434 @@
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+
+import "../components" as Components
+
+Item {
+    id: root
+    clip: true
+
+    required property var runtime
+    required property var alarm
+    required property var simulCtrl
+    required property var settingsSession
+    required property var scenarioOptions
+    required property int currentScenarioIndex
+
+    readonly property int pageMargin: 16
+    readonly property int cardRadius: 12
+    readonly property int cardInnerMargin: 14
+    readonly property color cardBorderColor: "#314056"
+    readonly property string riskLabel: root.alarm.stateLabel
+    readonly property color riskColor: root.alarm.isFault
+        ? "#ef4444"
+        : (root.alarm.hasWarning ? "#f59e0b" : "#22c55e")
+    readonly property string riskHeadlineText: root.alarm.headline
+    readonly property string riskDetailText: root.alarm.detail
+    readonly property string riskHintText: root.alarm.operatorHint
+    readonly property string activeAlarmMetric: root.alarm.activeMetric
+    function metricLiveSeverity(metricKey) {
+        if (metricKey === "temperature") {
+            if (root.runtime.temperature >= root.settingsSession.committedFaultTemperature)
+                return "fault"
+            if (root.runtime.temperature >= root.settingsSession.committedWarningTemperature)
+                return "warning"
+            return "normal"
+        }
+        if (metricKey === "pressure") {
+            if (root.runtime.pressure >= root.settingsSession.committedFaultPressure)
+                return "fault"
+            if (root.runtime.pressure >= root.settingsSession.committedWarningPressure)
+                return "warning"
+            return "normal"
+        }
+        return "normal"
+    }
+
+    function metricSeverity(metricKey) {
+        if (root.alarm.isFault)
+            return root.activeAlarmMetric === metricKey ? "fault" : root.metricLiveSeverity(metricKey)
+        const liveSeverity = root.metricLiveSeverity(metricKey)
+        if (liveSeverity !== "normal")
+            return liveSeverity
+        if (root.alarm.recoveryActive)
+            return root.activeAlarmMetric === metricKey ? "recovered" : "normal"
+        return "normal"
+    }
+
+    function metricAccentColor(metricKey) {
+        const severity = root.metricSeverity(metricKey)
+        if (severity === "fault")
+            return "#ef4444"
+        if (severity === "warning")
+            return "#f59e0b"
+        if (severity === "recovered")
+            return "#22c55e"
+        return ""
+    }
+
+    function metricTitleColor(metricKey) {
+        const accentColor = root.metricAccentColor(metricKey)
+        return accentColor.length > 0 ? accentColor : "#9ca3af"
+    }
+
+    function metricValueColor(metricKey) {
+        const accentColor = root.metricAccentColor(metricKey)
+        return accentColor.length > 0 ? accentColor : "white"
+    }
+
+    function metricUnitColor(metricKey) {
+        const accentColor = root.metricAccentColor(metricKey)
+        return accentColor.length > 0 ? accentColor : "#d1d5db"
+    }
+
+    function metricStatusText(metricKey) {
+        const severity = root.metricSeverity(metricKey)
+        if (severity === "fault")
+            return "Fault"
+        if (severity === "warning")
+            return "Warning"
+        if (severity === "recovered")
+            return "Recovered"
+        return "Normal"
+    }
+
+    function metricStatusColor(metricKey) {
+        const severity = root.metricSeverity(metricKey)
+        if (severity === "fault")
+            return "#ef4444"
+        if (severity === "warning")
+            return "#f59e0b"
+        if (severity === "recovered")
+            return "#22c55e"
+        return "#94a3b8"
+    }
+
+    function metricStatusBackgroundColor(metricKey) {
+        const severity = root.metricSeverity(metricKey)
+        if (severity === "fault")
+            return "#261313"
+        if (severity === "warning")
+            return "#2a1f0a"
+        if (severity === "recovered")
+            return "#10251a"
+        return "#0f172a"
+    }
+
+    function metricStatusBorderColor(metricKey) {
+        const severity = root.metricSeverity(metricKey)
+        if (severity === "fault")
+            return "#7f1d1d"
+        if (severity === "warning")
+            return "#92400e"
+        if (severity === "recovered")
+            return "#2d6a4f"
+        return "#334155"
+    }
+
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        Item {
+            Layout.fillWidth: true
+            Layout.topMargin: root.pageMargin
+            Layout.leftMargin: root.pageMargin
+            Layout.rightMargin: root.pageMargin
+            implicitHeight: pinnedContent.implicitHeight
+
+            ColumnLayout {
+                id: pinnedContent
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                spacing: 16
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 16
+
+                    Components.MetricCard {
+                        Layout.fillWidth: true
+                        title: "Temperature"
+                        valueText: Number(root.runtime.temperature).toFixed(1)
+                        unitText: "°C"
+                        titleColor: root.metricTitleColor("temperature")
+                        valueColor: root.metricValueColor("temperature")
+                        unitColor: root.metricUnitColor("temperature")
+                        statusText: root.metricStatusText("temperature")
+                        statusColor: root.metricStatusColor("temperature")
+                        statusBackgroundColor: root.metricStatusBackgroundColor("temperature")
+                        statusBorderColor: root.metricStatusBorderColor("temperature")
+                    }
+
+                    Components.MetricCard {
+                        Layout.fillWidth: true
+                        title: "Pressure"
+                        valueText: Number(root.runtime.pressure).toFixed(2)
+                        unitText: "bar"
+                        titleColor: root.metricTitleColor("pressure")
+                        valueColor: root.metricValueColor("pressure")
+                        unitColor: root.metricUnitColor("pressure")
+                        statusText: root.metricStatusText("pressure")
+                        statusColor: root.metricStatusColor("pressure")
+                        statusBackgroundColor: root.metricStatusBackgroundColor("pressure")
+                        statusBorderColor: root.metricStatusBorderColor("pressure")
+                    }
+
+                    Components.MetricCard {
+                        Layout.fillWidth: true
+                        title: "Speed"
+                        valueText: Number(root.runtime.speed).toFixed(0)
+                        unitText: "rpm"
+                        titleColor: root.metricTitleColor("speed")
+                        valueColor: root.metricValueColor("speed")
+                        unitColor: root.metricUnitColor("speed")
+                        statusText: root.metricStatusText("speed")
+                        statusColor: root.metricStatusColor("speed")
+                        statusBackgroundColor: root.metricStatusBackgroundColor("speed")
+                        statusBorderColor: root.metricStatusBorderColor("speed")
+                    }
+                }
+            }
+
+        }
+
+        Item {
+            Layout.fillWidth: true
+            Layout.leftMargin: root.pageMargin
+            Layout.rightMargin: root.pageMargin
+            implicitHeight: 14
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: 2
+                anchors.rightMargin: 2
+                height: 12
+                radius: 6
+                gradient: Gradient {
+                    GradientStop {
+                        position: 0.0
+                        color: "#00182334"
+                    }
+                    GradientStop {
+                        position: 0.34
+                        color: "#121b2a3d"
+                    }
+                    GradientStop {
+                        position: 0.5
+                        color: "#22324754"
+                    }
+                    GradientStop {
+                        position: 0.66
+                        color: "#121b2a3d"
+                    }
+                    GradientStop {
+                        position: 1.0
+                        color: "#00182334"
+                    }
+                }
+                opacity: 0.42
+            }
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                height: 1
+                radius: 1
+                color: "#9eb3cb"
+                opacity: 0.14
+            }
+        }
+
+        ScrollView {
+            id: scrollArea
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.bottomMargin: root.pageMargin
+            clip: true
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 16
+                x: root.pageMargin
+                y: 0
+                width: Math.max(0, scrollArea.availableWidth - (root.pageMargin * 2))
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 16
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 140
+                        radius: root.cardRadius
+                        color: "#111827"
+                        border.width: 1
+                        border.color: root.cardBorderColor
+
+                        Column {
+                            anchors.fill: parent
+                            anchors.margins: root.cardInnerMargin
+                            spacing: 8
+
+                            Label {
+                                text: "Temperature Trend"
+                                color: "#9ca3af"
+                                font.pixelSize: 13
+                                font.weight: Font.Medium
+                            }
+
+                            Components.TrendChart {
+                                width: parent.width
+                                height: 80
+                                samples: root.runtime.temperatureHistory
+                                markers: root.runtime.historyMarkers
+                                thresholds: [
+                                    {
+                                        value: root.settingsSession.committedWarningTemperature,
+                                        label: "Warn limit",
+                                        color: "#f59e0b"
+                                    },
+                                    {
+                                        value: root.settingsSession.committedFaultTemperature,
+                                        label: "Fault limit",
+                                        color: "#ef4444"
+                                    }
+                                ]
+                                historyStartSampleIndex: root.runtime.historyStartSampleIndex
+                                autoScale: true
+                                minimumAutoRange: 10
+                                valueDecimals: 1
+                                valueSuffix: "°C"
+                                lineColor: "#f97316"
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 140
+                        radius: root.cardRadius
+                        color: "#111827"
+                        border.width: 1
+                        border.color: root.cardBorderColor
+
+                        Column {
+                            anchors.fill: parent
+                            anchors.margins: root.cardInnerMargin
+                            spacing: 8
+
+                            Label {
+                                text: "Pressure Trend"
+                                color: "#9ca3af"
+                                font.pixelSize: 13
+                                font.weight: Font.Medium
+                            }
+
+                            Components.TrendChart {
+                                width: parent.width
+                                height: 80
+                                samples: root.runtime.pressureHistory
+                                markers: root.runtime.historyMarkers
+                                thresholds: [
+                                    {
+                                        value: root.settingsSession.committedWarningPressure,
+                                        label: "Warn limit",
+                                        color: "#f59e0b"
+                                    },
+                                    {
+                                        value: root.settingsSession.committedFaultPressure,
+                                        label: "Fault limit",
+                                        color: "#ef4444"
+                                    }
+                                ]
+                                historyStartSampleIndex: root.runtime.historyStartSampleIndex
+                                autoScale: true
+                                minimumAutoRange: 10
+                                valueDecimals: 2
+                                valueSuffix: "bar"
+                                lineColor: "#38bdf8"
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 140
+                        radius: root.cardRadius
+                        color: "#111827"
+                        border.width: 1
+                        border.color: root.cardBorderColor
+
+                        Column {
+                            anchors.fill: parent
+                            anchors.margins: root.cardInnerMargin
+                            spacing: 8
+
+                            Label {
+                                text: "Speed Trend"
+                                color: "#9ca3af"
+                                font.pixelSize: 13
+                                font.weight: Font.Medium
+                            }
+
+                            Components.TrendChart {
+                                width: parent.width
+                                height: 80
+                                samples: root.runtime.speedHistory
+                                markers: root.runtime.historyMarkers
+                                historyStartSampleIndex: root.runtime.historyStartSampleIndex
+                                autoScale: true
+                                minimumAutoRange: 200
+                                valueDecimals: 0
+                                valueSuffix: "rpm"
+                                lineColor: "#22c55e"
+                            }
+                        }
+                    }
+                }
+
+                Components.StateContextCard {
+                    Layout.fillWidth: true
+                    stateText: root.runtime.status
+                    durationText: root.runtime.currentStateDurationText
+                    lastTransitionText: root.runtime.lastTransitionTimeText
+                    scenarioText: root.simulCtrl.scenarioName
+                    riskText: root.riskLabel
+                    riskColor: root.riskColor
+                    riskHeadlineText: root.riskHeadlineText
+                    riskDetailText: root.riskDetailText
+                    riskHintText: root.riskHintText
+                }
+
+                Components.ControlPanel {
+                    Layout.fillWidth: true
+                    canStart: root.runtime.canStart
+                    canStop: root.runtime.canStop
+                    canResetFault: root.runtime.canResetFault
+                    scenarioOptions: root.scenarioOptions
+                    currentScenarioIndex: root.currentScenarioIndex
+                    scenarioSelectionEnabled: root.runtime.canStart
+                    startDisabledReason: root.runtime.startDisabledReason
+                    stopDisabledReason: root.runtime.stopDisabledReason
+                    resetDisabledReason: root.runtime.resetDisabledReason
+
+                    onScenarioSelected: index => {
+                        root.simulCtrl.scenario = root.scenarioOptions[index].scenario
+                    }
+                    onStartRequested: root.runtime.start()
+                    onStopRequested: root.runtime.stop()
+                    onResetRequested: root.runtime.resetFault()
+                }
+            }
+        }
+    }
+}

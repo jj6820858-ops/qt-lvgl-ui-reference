@@ -1,0 +1,51 @@
+[
+  {
+    "path": "qt/DevicePilotHMI",
+    "upstream": "https://github.com/cequnyang/DevicePilotHMI",
+    "commit": "19b8d165798ed2468f69cc6401f2d31b92086ea6",
+    "license": "MIT",
+    "tracked_files": 90
+  },
+  {
+    "path": "qt/Dashboard",
+    "upstream": "https://github.com/jpavlek/Dashboard",
+    "commit": "4e597651213aa82b5878b74c6349f110a9223164",
+    "license": "MIT",
+    "tracked_files": 23
+  },
+  {
+    "path": "lvgl/LVGL-Car-Dashboard",
+    "upstream": "https://github.com/codeempereor/LVGL-Car-Dashboard",
+    "commit": "cf29121298c40cb4ba2966180071d1ecc0418a91",
+    "license": "MIT",
+    "tracked_files": 35
+  },
+  {
+    "path": "lvgl/ESP32-LVGL-Thermostat",
+    "upstream": "https://github.com/zetapersei/ESP32_LVGL_Thermostat_Panel",
+    "commit": "bdd4333081e685d3ab983c32b8b9243b55dd46ee",
+    "license": "MIT",
+    "tracked_files": 10
+  },
+  {
+    "path": "lvgl/DIY-Filament-Dryer",
+    "upstream": "https://github.com/itarozzi/diy_filament_dryer",
+    "commit": "a9f9d3ee061b6af0d7c692db0b6e3a38b808bcdd",
+    "license": "MIT",
+    "tracked_files": 55
+  },
+  {
+    "path": "qt/QtIndustrialWidgets",
+    "upstream": "https://github.com/paolosereno/QtIndustrialWidgets",
+    "commit": "cc7ad610b14982cf9ed740eff9ff74cf8aed85ac",
+    "license": "MIT; see included third-party notices",
+    "tracked_files": 207
+  },
+  {
+    "path": "lvgl/esp32flight",
+    "upstream": "https://github.com/theqkash/esp32flight",
+    "commit": "da06b177bcc4002ba32b6f3e4f08a0fc5eed432a",
+    "license": "MIT; see included third-party notices",
+    "tracked_files": 255
+  }
+]

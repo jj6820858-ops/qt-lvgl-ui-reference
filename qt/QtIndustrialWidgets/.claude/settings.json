@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git push origin issue-*)",
+      "Bash(git push -u origin issue-*)",
+      "Bash(git push origin pr-assets*)",
+      "Bash(git pull*)",
+      "Bash(gh pr create*)",
+      "Bash(gh pr edit*)",
+      "Bash(gh pr checks*)",
+      "Bash(gh run view*)",
+      "Bash(gh issue create*)",
+      "Bash(gh issue edit*)",
+      "Bash(gh issue comment*)"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push origin main*)",
+      "Bash(git push -u origin main*)",
+      "Bash(git push * main*)",
+      "Bash(gh pr merge*)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f*)",
+      "Bash(git push *:main*)",
+      "Bash(git push * +*)",
+      "Bash(gh issue close*)",
+      "Bash(gh issue delete*)",
+      "Bash(gh issue transfer*)"
+    ]
+  }
+}

@@ -1,0 +1,97 @@
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "37 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: analyze-cpp-qt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4.3.1
+        with:
+          version: 6.11.0
+          aqtversion: ==3.3.*
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Prepare scripts
+        run: |
+          chmod +x ./scripts/build.sh
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: c-cpp
+          build-mode: manual
+          queries: security-extended,security-and-quality
+
+      # CodeQL needs to observe real compiler invocations for C/C++.
+      # The repo's Qt/CMake preset is more reliable than CodeQL autobuild here.
+      - name: Build for CodeQL
+        run: |
+          ./scripts/build.sh --preset linux-ninja-debug --skip-tests --fresh
+
+      - name: Perform CodeQL Analysis
+        id: codeql-analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:c-cpp"
+          output: sarif-results
+          upload: failure-only
+
+      # Manual C/C++ CodeQL analysis follows the observed compiler invocations,
+      # so generated Qt/CMake files are filtered from the uploaded alerts instead
+      # of relying on paths-ignore to scope a build-backed database.
+      - name: Locate CodeQL SARIF
+        id: codeql-sarif
+        shell: bash
+        run: |
+          set -euo pipefail
+          sarif_dir="${{ steps.codeql-analyze.outputs.sarif-output }}"
+          sarif_file="$(find "$sarif_dir" -name '*.sarif' -print -quit)"
+          if [[ -z "$sarif_file" ]]; then
+            echo "No CodeQL SARIF file found in $sarif_dir" >&2
+            exit 1
+          fi
+          echo "path=$sarif_file" >> "$GITHUB_OUTPUT"
+
+      - name: Filter generated build results
+        uses: advanced-security/filter-sarif@v1
+        with:
+          patterns: |
+            -build/**
+            -**/build/**
+          input: ${{ steps.codeql-sarif.outputs.path }}
+          output: ${{ steps.codeql-sarif.outputs.path }}
+
+      - name: Upload filtered SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ steps.codeql-sarif.outputs.path }}
+          category: "/language:c-cpp"

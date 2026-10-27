@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 Paolo Sereno <pablitos1024@gmail.com>
+#
+# SPDX-License-Identifier: MIT
+
+name: Release Pipeline
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ============================================================
+  # 1. Package Linux (.deb & .tar.gz) + SPDX SBOM
+  # ============================================================
+  package-linux:
+    name: Package Linux (DEB & TGZ)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify REUSE Compliance
+        uses: fsfe/reuse-action@v6
+        with:
+          args: lint
+
+      - name: Generate SPDX SBOM
+        uses: fsfe/reuse-action@v6
+        with:
+          args: spdx --creator-person "Paolo Sereno <pablitos1024@gmail.com>" --output QtIndustrialWidgets-${{ github.ref_name }}-SBOM.spdx
+
+      # The same script builds the packages that the deb job of linux-packages.yml checks (#133)
+      - name: Build the Linux packages (DEB & TGZ)
+        run: tools/package_linux.sh --install-deps .
+
+      - name: Upload Linux Packages & SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-linux
+          path: |
+            QtIndustrialWidgets-${{ github.ref_name }}-SBOM.spdx
+            *.deb
+            *.tar.gz
+
+  # ============================================================
+  # 2. Package Windows (.zip)
+  # ============================================================
+  package-windows:
+    name: Package Windows (ZIP)
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.6.3'
+          arch: 'win64_msvc2019_64'
+
+      - name: Configure CMake
+        run: |
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_DOCS=OFF `
+            -DBUILD_TESTS=OFF `
+            -DBUILD_EXAMPLES=OFF `
+            -DBUILD_DESIGNER_PLUGIN=OFF
+
+      - name: Build Library
+        run: cmake --build build --config Release
+
+      - name: Create CPack Package (ZIP)
+        run: cpack --config build/CPackConfig.cmake -G ZIP -C Release
+
+      - name: Upload Windows Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-windows
+          path: "*.zip"
+
+  # ============================================================
+  # 3. Publish GitHub Release with All Assets
+  # ============================================================
+  publish-release:
+    name: Publish GitHub Release
+    needs: [package-linux, package-windows]
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download Linux Assets & SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-linux
+          path: ./dist
+
+      - name: Download Windows Assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-windows
+          path: ./dist
+
+      - name: Create Official GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Release ${{ github.ref_name }}"
+          files: ./dist/*
+          generate_release_notes: true

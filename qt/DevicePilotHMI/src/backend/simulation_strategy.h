@@ -1,0 +1,78 @@
+#pragma once
+
+#include <memory>
+
+#include "backend/simulation_scenario.h"
+#include "runtime/machine_types.h"
+#include "settings/settings_defined.h"
+
+class SimulationStrategy
+{
+public:
+    virtual ~SimulationStrategy() = default;
+
+    SimulationStrategy() = default;
+    SimulationStrategy(const SimulationStrategy &) = delete;
+    SimulationStrategy &operator=(const SimulationStrategy &) = delete;
+    SimulationStrategy(SimulationStrategy &&) = delete;
+    SimulationStrategy &operator=(SimulationStrategy &&) = delete;
+
+    virtual Simulation::Scenario scenario() const = 0;
+
+    virtual int startupSpeed(const Settings::Snapshot &settings) const = 0;
+    virtual void reset() = 0;
+    virtual void advance(TelemetryFrame &telemetry, const Settings::Snapshot &settings) = 0;
+};
+
+std::unique_ptr<SimulationStrategy> makeSimulationStrategy(Simulation::Scenario scenario);
+
+class NormalRampStrategy final : public SimulationStrategy
+{
+public:
+    Simulation::Scenario scenario() const override;
+    int startupSpeed(const Settings::Snapshot &) const override;
+    void reset() override;
+    void advance(TelemetryFrame &telemetry, const Settings::Snapshot &) override;
+};
+
+class OverloadStrategy final : public SimulationStrategy
+{
+public:
+    Simulation::Scenario scenario() const override;
+    int startupSpeed(const Settings::Snapshot &) const override;
+    void reset() override;
+    void advance(TelemetryFrame &telemetry, const Settings::Snapshot &settings) override;
+
+private:
+    int m_ticks{0};
+};
+
+class CoolingFailureStrategy final : public SimulationStrategy
+{
+public:
+    Simulation::Scenario scenario() const override;
+    int startupSpeed(const Settings::Snapshot &) const override;
+    void reset() override;
+    void advance(TelemetryFrame &telemetry, const Settings::Snapshot &) override;
+
+private:
+    int m_ticks{0};
+    bool m_failureActive{false};
+};
+
+class LoadStepResponseStrategy final : public SimulationStrategy
+{
+public:
+    Simulation::Scenario scenario() const override;
+    int startupSpeed(const Settings::Snapshot &) const override;
+    void reset() override;
+    void advance(TelemetryFrame &telemetry, const Settings::Snapshot &settings) override;
+
+private:
+    void updatePhase();
+
+private:
+    enum class Phase { Warmup, LoadStep, ControlRecovery, LoadRelief };
+    int m_ticks{0};
+    Phase m_phase{Phase::Warmup};
+};

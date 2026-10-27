@@ -1,0 +1,185 @@
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  portability-*,
+  clang-analyzer-core.*,
+  clang-analyzer-cplusplus.*,
+  clang-analyzer-*,
+
+  cppcoreguidelines-pro-type-member-init,
+  cppcoreguidelines-init-variables,
+  cppcoreguidelines-prefer-member-initializer,
+
+  cppcoreguidelines-special-member-functions,
+  cppcoreguidelines-pro-type-reinterpret-cast,
+  cppcoreguidelines-pro-type-const-cast,
+  cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  cppcoreguidelines-avoid-goto,
+  cppcoreguidelines-no-malloc,
+  cppcoreguidelines-owning-memory,
+  cppcoreguidelines-rvalue-reference-param-not-last,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-prefer-pointer-const-members,
+  cppcoreguidelines-prefer-member-initialization,
+  cppcoreguidelines-pro-type-static-cast-downcast,
+  cppcoreguidelines-pro-bounds-decreasing,
+  cppcoreguidelines-pro-bounds-increment,
+  cppcoreguidelines-pro-type-cstyle-cast,
+  cppcoreguidelines-pro-type-union-access,
+  cppcoreguidelines-acerbic,
+  cppcoreguidelines-interfaces-global,
+
+  modernize-use-override,
+  modernize-use-nullptr,
+  modernize-use-equals-default,
+  modernize-use-equals-delete,
+  modernize-use-default-member-init,
+  modernize-deprecated-headers,
+  modernize-use-transparent-functors,
+  modernize-avoid-c-arrays,
+  modernize-return-braced-init-list,
+  modernize-move-const-arg,
+  modernize-unique-pointer,
+  modernize-use-default,
+  modernize-use-emplace,
+  modernize-use-std-array,
+  modernize-loop-convert,
+  modernize-use-invoke-simd,
+  modernize-regex,
+  modernize-concat-nested-namespaces,
+
+  readability-identifier-naming,
+  readability-container-size-empty,
+  readability-redundant-string-init,
+  readability-simplify-boolean-expr,
+  readability-simplify-subscript-expr,
+  readability-make-member-function-const,
+  readability-implicit-bool-conversion,
+  readability-unsigned-bitwise,
+  readability-magic-numbers,
+  readability-isolate-declaration,
+  readability-braces-around-statements,
+  readability-duplicate-include,
+  readability-else-after-return,
+
+  cert-err33-c,
+  cert-msc50-cpp,
+  cert-str34-c,
+
+  misc-*,
+  misc-const-correctness,
+
+  hicpp-*,
+
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -bugprone-reserved-identifier,
+  -bugprone-macro-parentheses,
+  -bugprone-narrowing-conversions,
+
+  -performance-move-const-arg,
+  -performance-enum-size,
+  -performance-no-int-to-ptr,
+
+  -portability-avoid-pragma-once,
+
+  -clang-analyzer-cplusplus.NewDelete,
+  -clang-analyzer-cplusplus.SmartPtrModeling,
+
+  -readability-function-size,
+
+  -hicpp-named-parameter,
+  -hicpp-vararg,
+  -readability-magic-numbers,
+  -cppcoreguidelines-pro-type-cstyle-cast,
+  -modernize-regex,
+  -misc-non-private-member-variables-in-classes,
+  -misc-include-cleaner
+SystemHeaders: false
+
+CheckOptions:
+  # =========================
+  # naming style
+  # =========================
+
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+
+  - key: readability-identifier-naming.FunctionCase
+    value: camelBack
+
+  - key: readability-identifier-naming.VariableCase
+    value: camelBack
+
+  - key: readability-identifier-naming.MemberCase
+    value: camelBack
+
+  - key: readability-identifier-naming.PrivateMemberPrefix
+    value: m_
+
+  - key: readability-identifier-naming.ProtectedMemberPrefix
+    value: m_
+
+  - key: readability-identifier-naming.ConstantCase
+    value: CamelCase
+
+  - key: readability-identifier-naming.GlobalConstantPrefix
+    value: k
+
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: CamelCase
+
+  - key: readability-identifier-naming.StaticConstantPrefix
+    value: k
+
+  - key: readability-identifier-naming.StaticConstantCase
+    value: CamelCase
+
+  - key: readability-identifier-naming.LocalConstantCase
+    value: camelBack
+
+  - key: readability-identifier-naming.ParameterCase
+    value: camelBack
+
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE
+
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+
+  - key: readability-identifier-naming.EnumConstantCase
+    value: CamelCase
+
+  - key: readability-identifier-naming.TypeAliasCase
+    value: CamelCase
+
+  - key: readability-identifier-naming.TypedefCase
+    value: CamelCase
+
+  - key: readability-identifier-naming.GlobalVariableCase
+    value: camelBack
+
+  - key: readability-identifier-naming.StaticVariableCase
+    value: camelBack
+
+  # =========================
+  # readability
+  # =========================
+
+  - key: readability-braces-around-statements.ShortStatementLines
+    value: '0'
+
+  - key: readability-identifier-naming.MacroDefinitionRegex
+    value: '^Q[A-Z].*$'
+  - key: readability-identifier-naming.IgnoreMacros
+    value: '1'
+  - key: cppcoreguidelines-special-member-functions.IgnoreMissingMoveFunctions
+    value: '1'
+  - key: modernize-use-override.FinalWeight
+    value: '1'
+  - key: modernize-use-override.IgnoreDestructors
+    value: '0'

@@ -1,0 +1,318 @@
+/* See esp_lcd_touch_gsl3680.h for provenance. */
+#include "esp_lcd_touch_gsl3680.h"
+
+#include <string.h>
+#include "driver/gpio.h"
+#include "esp_check.h"
+#include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_timer.h"
+
+#include "gsl3680_fw.inc"
+
+static const char *TAG = "gsl3680";
+
+#define GSL_REG_TOUCH      0x80   /* finger count byte + point records */
+#define GSL_REG_CTRL       0xE0   /* 0x88 = hold in reset, 0x00 = run */
+#define GSL_REG_CLOCK      0xE4   /* 0x04 = clock on */
+#define GSL_REG_POWER      0xBC   /* 4 zero bytes = power all blocks */
+#define GSL_REG_PAGE       0xF0   /* firmware page select */
+#define GSL_REG_SOFTRST    0x88
+#define GSL_MAX_POINTS     5
+#define GSL_RAW_X_MAX      1664   /* factory-fw sensor grid, long axis */
+#define GSL_RAW_Y_MAX      896    /* short axis */
+#define GSL_TOUCH_LEN      (4 + GSL_MAX_POINTS * 4)
+
+static esp_err_t gsl_write(esp_lcd_touch_handle_t tp, uint8_t reg, const uint8_t *data, size_t len)
+{
+    return esp_lcd_panel_io_tx_param(tp->io, reg, data, len);
+}
+
+static esp_err_t gsl_read(esp_lcd_touch_handle_t tp, uint8_t reg, uint8_t *data, size_t len)
+{
+    return esp_lcd_panel_io_rx_param(tp->io, reg, data, len);
+}
+
+static esp_err_t gsl_write_u8(esp_lcd_touch_handle_t tp, uint8_t reg, uint8_t v)
+{
+    return gsl_write(tp, reg, &v, 1);
+}
+
+static esp_err_t gsl_write_u32(esp_lcd_touch_handle_t tp, uint8_t reg, uint32_t v)
+{
+    uint8_t b[4] = { v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF };
+    return gsl_write(tp, reg, b, 4);
+}
+
+/* Reset as Guition's IDF driver does it for this board type: pulse the
+ * reset line, then 0xE4=0x04 and 0xBC=0. It never writes 0xE0=0x88 (that
+ * line is commented out in their source) - the core is left running.
+ * espcontrol's driver (ALT table) does hold the core with 0xE0=0x88. */
+static esp_err_t gsl_reset(esp_lcd_touch_handle_t tp)
+{
+    if (tp->config.rst_gpio_num != GPIO_NUM_NC) {
+        gpio_set_level(tp->config.rst_gpio_num, tp->config.levels.reset);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        gpio_set_level(tp->config.rst_gpio_num, !tp->config.levels.reset);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    ESP_RETURN_ON_ERROR(gsl_write_u8(tp, GSL_REG_CTRL, 0x88), TAG, "hold reset");
+    vTaskDelay(pdMS_TO_TICKS(10));
+    ESP_RETURN_ON_ERROR(gsl_write_u8(tp, GSL_REG_CLOCK, 0x04), TAG, "clock on");
+    vTaskDelay(pdMS_TO_TICKS(10));
+    ESP_RETURN_ON_ERROR(gsl_write_u32(tp, GSL_REG_POWER, 0), TAG, "power on");
+    vTaskDelay(pdMS_TO_TICKS(10));
+    return ESP_OK;
+}
+
+static esp_err_t gsl_clear(esp_lcd_touch_handle_t tp)
+{
+    vTaskDelay(pdMS_TO_TICKS(20));
+    ESP_RETURN_ON_ERROR(gsl_write_u8(tp, GSL_REG_CTRL, 0x88), TAG, "hold");
+    vTaskDelay(pdMS_TO_TICKS(20));
+    ESP_RETURN_ON_ERROR(gsl_write_u8(tp, GSL_REG_SOFTRST, 0x01), TAG, "softrst");
+    vTaskDelay(pdMS_TO_TICKS(5));
+    ESP_RETURN_ON_ERROR(gsl_write_u8(tp, GSL_REG_CLOCK, 0x04), TAG, "clock");
+    vTaskDelay(pdMS_TO_TICKS(5));
+    ESP_RETURN_ON_ERROR(gsl_write_u8(tp, GSL_REG_CTRL, 0x00), TAG, "run");
+    vTaskDelay(pdMS_TO_TICKS(20));
+    return ESP_OK;
+}
+
+static esp_err_t gsl_load_fw(esp_lcd_touch_handle_t tp)
+{
+    const gsl3680_fw_row_t *tbl = k_gsl3680_fw;
+    size_t n = sizeof(k_gsl3680_fw) / sizeof(k_gsl3680_fw[0]);
+    for (size_t i = 0; i < n; i++) {
+        const gsl3680_fw_row_t *r = &tbl[i];
+        esp_err_t err = (r->reg == GSL_REG_PAGE)
+            ? gsl_write_u8(tp, r->reg, (uint8_t)r->val)
+            : gsl_write_u32(tp, r->reg, r->val);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "fw upload failed at row %u/%u", (unsigned)i, (unsigned)n);
+            return err;
+        }
+    }
+    ESP_LOGI(TAG, "firmware uploaded (%u rows)", (unsigned)n);
+    return ESP_OK;
+}
+
+static esp_err_t gsl_start(esp_lcd_touch_handle_t tp)
+{
+    ESP_RETURN_ON_ERROR(gsl_write_u8(tp, GSL_REG_CTRL, 0x00), TAG, "start core");
+    vTaskDelay(pdMS_TO_TICKS(10));
+    return ESP_OK;
+}
+
+/* Bus probe both references perform first: read page reg, write a marker,
+ * read it back. A wrong address or a chip held in reset fails here. */
+static esp_err_t gsl_probe(esp_lcd_touch_handle_t tp)
+{
+    uint8_t buf[4] = {0};
+    uint8_t marker[4] = {0x12, 0x34, 0x56, 0x00};
+    vTaskDelay(pdMS_TO_TICKS(50));
+    ESP_RETURN_ON_ERROR(gsl_read(tp, GSL_REG_PAGE, buf, 4), TAG, "probe read1");
+    ESP_LOGI(TAG, "probe: 0xF0 before = %02x %02x %02x %02x", buf[0], buf[1], buf[2], buf[3]);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    ESP_RETURN_ON_ERROR(gsl_write(tp, GSL_REG_PAGE, marker, 4), TAG, "probe write");
+    vTaskDelay(pdMS_TO_TICKS(20));
+    ESP_RETURN_ON_ERROR(gsl_read(tp, GSL_REG_PAGE, buf, 4), TAG, "probe read2");
+    vTaskDelay(pdMS_TO_TICKS(20));
+    ESP_LOGI(TAG, "probe: 0xF0 after  = %02x %02x %02x %02x (%s)", buf[0], buf[1], buf[2], buf[3],
+             buf[0] == 0x12 ? "bus OK" : "MISMATCH");
+    return ESP_OK;
+}
+
+static bool gsl_alive(esp_lcd_touch_handle_t tp, uint8_t sig[4])
+{
+    vTaskDelay(pdMS_TO_TICKS(30));
+    if (gsl_read(tp, 0xB0, sig, 4) != ESP_OK) {
+        return false;
+    }
+    return sig[0] == 0x5A && sig[1] == 0x5A && sig[2] == 0x5A && sig[3] == 0x5A;
+}
+
+static esp_err_t gsl_bringup(esp_lcd_touch_handle_t tp)
+{
+    ESP_RETURN_ON_ERROR(gsl_probe(tp), TAG, "probe");
+    /* BETTA-HA-PANEL, which runs on this exact board, retries the whole
+     * touch bring-up up to eight times: the Silead core does not always
+     * come up on the first upload. Loop until the 0xB0 signature reads
+     * 5A 5A 5A 5A, exactly the check Guition's own driver performs. */
+    uint8_t sig[4] = {0};
+    for (int attempt = 1; attempt <= 8; attempt++) {
+        ESP_RETURN_ON_ERROR(gsl_clear(tp), TAG, "clear");
+        ESP_RETURN_ON_ERROR(gsl_reset(tp), TAG, "reset");
+        ESP_RETURN_ON_ERROR(gsl_load_fw(tp), TAG, "load");
+        ESP_RETURN_ON_ERROR(gsl_start(tp), TAG, "start");
+        bool alive = gsl_alive(tp, sig);
+        ESP_LOGI(TAG, "firmware check (attempt %d): 0xB0 = %02x %02x %02x %02x -> %s",
+                 attempt, sig[0], sig[1], sig[2], sig[3], alive ? "ALIVE" : "NOT RUNNING");
+        if (alive) {
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    ESP_LOGE(TAG, "firmware never came up after 8 attempts");
+    return ESP_OK;   /* keep the input device registered; reads return no points */
+}
+
+static esp_err_t gsl_read_data(esp_lcd_touch_handle_t tp)
+{
+    uint8_t buf[GSL_TOUCH_LEN];
+    ESP_RETURN_ON_ERROR(gsl_read(tp, GSL_REG_TOUCH, buf, sizeof(buf)), TAG, "read");
+
+    uint8_t cnt = buf[0];
+    if (cnt > GSL_MAX_POINTS) {
+        cnt = 0;   /* garbage while the core is settling */
+    }
+    portENTER_CRITICAL(&tp->data.lock);
+    tp->data.points = cnt;
+    for (uint8_t i = 0; i < cnt; i++) {
+        const uint8_t *p = &buf[4 + i * 4];
+        /* record: Y low, Y high, X low, X high|id<<4 */
+        uint16_t y = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+        uint16_t x = (uint16_t)p[2] | ((uint16_t)(p[3] & 0x0F) << 8);
+        /* The factory firmware reports in the controller's own sensor grid,
+         * NOT pixels: 1664 x 896 (26 x 14 channels x 64), X increasing
+         * right-to-left along the long side, Y increasing bottom-to-top
+         * along the short side. Measured from a four-corner tap log on
+         * hardware (edge taps: x 28..1635, y 17..874 - symmetric margins
+         * against 1664/896). Convert straight to the native portrait
+         * pixel frame (x_max wide, y_max tall) that LVGL's rotation
+         * expects; the port then needs no swap/mirror flags at all. */
+        if (x > GSL_RAW_X_MAX) x = GSL_RAW_X_MAX;
+        if (y > GSL_RAW_Y_MAX) y = GSL_RAW_Y_MAX;
+        uint16_t land_x = (uint16_t)(((uint32_t)(GSL_RAW_X_MAX - x) * (tp->config.y_max - 1)) / GSL_RAW_X_MAX);
+        uint16_t land_y = (uint16_t)(((uint32_t)(GSL_RAW_Y_MAX - y) * (tp->config.x_max - 1)) / GSL_RAW_Y_MAX);
+        tp->data.coords[i].x = land_y;                              /* portrait x = landscape y */
+        tp->data.coords[i].y = (tp->config.y_max - 1) - land_x;     /* portrait y = flipped landscape x */
+        tp->data.coords[i].strength = 0;
+    }
+    portEXIT_CRITICAL(&tp->data.lock);
+#if CONFIG_CANFLIGHT_JC10_TP_DIAG
+    /* first-hardware diagnostics: raw controller frame, throttled */
+    static int64_t s_last_log;
+    static int64_t s_last_beat;
+    int64_t tnow = esp_timer_get_time();
+    if (tnow - s_last_beat > 2000000) {
+        /* heartbeat even with no touch: proves the read path and shows
+           the raw count byte the controller hands back */
+        s_last_beat = tnow;
+        ESP_LOGI(TAG, "heartbeat: reg80 = %02x %02x %02x %02x | %02x %02x %02x %02x",
+                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+    }
+    if (cnt > 0) {
+        int64_t now = esp_timer_get_time();
+        if (now - s_last_log > 150000) {
+            s_last_log = now;
+            const uint8_t *p = &buf[4];
+            ESP_LOGI(TAG, "raw: cnt=%u x=%u y=%u id=%u [%02x %02x %02x %02x]", cnt,
+                     (unsigned)((uint16_t)p[2] | ((uint16_t)(p[3] & 0x0F) << 8)),
+                     (unsigned)((uint16_t)p[0] | ((uint16_t)p[1] << 8)), p[3] >> 4,
+                     p[0], p[1], p[2], p[3]);
+        }
+    }
+#endif
+    return ESP_OK;
+}
+
+static bool gsl_get_xy(esp_lcd_touch_handle_t tp, uint16_t *x, uint16_t *y,
+                       uint16_t *strength, uint8_t *point_num, uint8_t max_point_num)
+{
+    portENTER_CRITICAL(&tp->data.lock);
+    *point_num = tp->data.points > max_point_num ? max_point_num : tp->data.points;
+    for (uint8_t i = 0; i < *point_num; i++) {
+        x[i] = tp->data.coords[i].x;
+        y[i] = tp->data.coords[i].y;
+        if (strength) {
+            strength[i] = tp->data.coords[i].strength;
+        }
+    }
+    tp->data.points = 0;
+    portEXIT_CRITICAL(&tp->data.lock);
+    return *point_num > 0;
+}
+
+static esp_err_t gsl_del(esp_lcd_touch_handle_t tp)
+{
+    if (tp->config.int_gpio_num != GPIO_NUM_NC) {
+        gpio_reset_pin(tp->config.int_gpio_num);
+    }
+    if (tp->config.rst_gpio_num != GPIO_NUM_NC) {
+        gpio_reset_pin(tp->config.rst_gpio_num);
+    }
+    free(tp);
+    return ESP_OK;
+}
+
+esp_err_t esp_lcd_touch_new_i2c_gsl3680(const esp_lcd_panel_io_handle_t io,
+                                        const esp_lcd_touch_config_t *config,
+                                        esp_lcd_touch_handle_t *out_touch)
+{
+    ESP_RETURN_ON_FALSE(io && config && out_touch, ESP_ERR_INVALID_ARG, TAG, "bad args");
+
+    esp_lcd_touch_handle_t tp = heap_caps_calloc(1, sizeof(esp_lcd_touch_t), MALLOC_CAP_DEFAULT);
+    ESP_RETURN_ON_FALSE(tp, ESP_ERR_NO_MEM, TAG, "no mem");
+    tp->io = io;
+    tp->read_data = gsl_read_data;
+    tp->get_xy = gsl_get_xy;
+    tp->del = gsl_del;
+    tp->data.lock.owner = portMUX_FREE_VAL;
+    memcpy(&tp->config, config, sizeof(esp_lcd_touch_config_t));
+
+    esp_err_t ret = ESP_OK;
+    /* Bring the controller out of reset BEFORE the first I2C transaction,
+     * with INT driven low meanwhile (that is how the chip settles on the
+     * 0x40 address); the first cut talked to a chip still held in reset
+     * and every write NACKed. */
+    if (config->rst_gpio_num != GPIO_NUM_NC) {
+        gpio_config_t rst = {
+            .mode = GPIO_MODE_OUTPUT,
+            .pin_bit_mask = BIT64(config->rst_gpio_num),
+        };
+        ESP_GOTO_ON_ERROR(gpio_config(&rst), fail, TAG, "rst gpio");
+    }
+    if (config->int_gpio_num != GPIO_NUM_NC) {
+        gpio_config_t intc = {
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pin_bit_mask = BIT64(config->int_gpio_num),
+        };
+        ESP_GOTO_ON_ERROR(gpio_config(&intc), fail, TAG, "int gpio");
+    }
+    if (config->rst_gpio_num != GPIO_NUM_NC) {
+        /* Guition's IDF driver: reset asserted with INT low, 10 ms, reset
+         * released, 10 + 50 ms before the first I2C byte */
+        gpio_set_level(config->rst_gpio_num, config->levels.reset);
+        if (config->int_gpio_num != GPIO_NUM_NC) {
+            gpio_set_level(config->int_gpio_num, 0);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+        gpio_set_level(config->rst_gpio_num, !config->levels.reset);
+        vTaskDelay(pdMS_TO_TICKS(60));
+    }
+    ESP_GOTO_ON_ERROR(gsl_bringup(tp), fail, TAG, "bringup");
+
+    if (config->int_gpio_num != GPIO_NUM_NC) {
+        gpio_config_t intc = {
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .intr_type = config->levels.interrupt ? GPIO_INTR_POSEDGE : GPIO_INTR_NEGEDGE,
+            .pin_bit_mask = BIT64(config->int_gpio_num),
+        };
+        ESP_GOTO_ON_ERROR(gpio_config(&intc), fail, TAG, "int gpio");
+        if (config->interrupt_callback) {
+            esp_lcd_touch_register_interrupt_callback(tp, config->interrupt_callback);
+        }
+    }
+    *out_touch = tp;
+    return ESP_OK;
+
+fail:
+    ESP_LOGE(TAG, "init failed: %s", esp_err_to_name(ret));
+    free(tp);
+    return ret;
+}

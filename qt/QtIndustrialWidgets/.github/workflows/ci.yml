@@ -1,0 +1,336 @@
+# SPDX-FileCopyrightText: 2026 Paolo Sereno <pablitos1024@gmail.com>
+#
+# SPDX-License-Identifier: MIT
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # ============================================================
+  # 0. REUSE / SPDX Compliance Check
+  # ============================================================
+  reuse-compliance:
+    name: REUSE Compliance Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: REUSE Compliance Check
+        uses: fsfe/reuse-action@v6
+
+  # ============================================================
+  # 0b. actionlint (#138): every workflow in .github/workflows (syntax, expressions, action inputs) and its run: blocks
+  # through shellcheck. Both tools at a fixed version, downloaded from their GitHub releases and checked against
+  # the SHA-256 below, so that a new release cannot change the result.
+  # ============================================================
+  actionlint:
+    name: actionlint (workflows)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      ACTIONLINT_VERSION: "1.7.12"
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      SHELLCHECK_VERSION: "0.11.0"
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install actionlint and shellcheck
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/lint-tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl --proto '=https' --tlsv1.2 -fsSLO "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | sha256sum -c
+          tar -xzf "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint
+          curl --proto '=https' --tlsv1.2 -fsSLO "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" | sha256sum -c
+          tar -xJf "shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" --strip-components=1 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          ./actionlint -version
+          ./shellcheck --version
+          echo "$tools" >> "$GITHUB_PATH"
+
+      # shellcheck by its path, so that a shellcheck of the runner image is never used
+      - name: actionlint
+        run: actionlint -shellcheck "$RUNNER_TEMP/lint-tools/shellcheck"
+
+  # ============================================================
+  # 1. Linux (Ubuntu 24.04 LTS - GCC & Qt 6)
+  # ============================================================
+  build-linux:
+    name: Linux (Ubuntu 24.04, GCC, Qt 6)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            qt6-base-dev \
+            qt6-base-dev-tools \
+            qt6-tools-dev \
+            qt6-tools-dev-tools \
+            libgl1-mesa-dev \
+            libxkbcommon-dev \
+            doxygen \
+            graphviz \
+            fonts-ubuntu
+
+      - name: Configure CMake
+        run: |
+          set -o pipefail
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_DOCS=ON \
+            -DBUILD_TESTS=ON \
+            -DBUILD_EXAMPLES=ON \
+            -DBUILD_DESIGNER_PLUGIN=ON | tee configure.log
+          # The test of the installed Designer plugin (#127) runs only when the plugin is built
+          grep -q "QtIndustrialWidgets: Qt Designer found, building designer plugin" configure.log
+
+      - name: Build all targets
+        run: cmake --build build
+
+      - name: Run unit tests (QtTest)
+        run: |
+          export QT_QPA_PLATFORM=offscreen
+          ctest --test-dir build --output-on-failure
+
+      # Smoke test of the documentation image export (#26); images are uploaded, never committed
+      - name: Export gallery images (smoke test)
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/gallery-images"
+          ./build/bin/QtIndustrialWidgetsGallery --export-gallery "$out" --theme both | tee "$RUNNER_TEMP/export.log"
+          # every printed file exists
+          while read -r f; do test -s "$f" || { echo "missing: $f"; exit 1; }; done < "$RUNNER_TEMP/export.log"
+          # the dark images are exactly the committed docs/images, each with its light variant
+          diff <(find "$out" -mindepth 1 -maxdepth 1 ! -name '.*' ! -name '*-light.png' -printf '%f\n' | sort) \
+               <(find docs/images -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' | sort)
+          for f in docs/images/*.png; do
+            n=$(basename "$f" .png)
+            test -s "$out/$n-light.png" || { echo "missing light variant: $n-light.png"; exit 1; }
+          done
+          echo "$(find "$out" -mindepth 1 -maxdepth 1 ! -name '.*' | wc -l) images exported"
+
+      - name: Upload gallery images artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gallery-images
+          path: ${{ runner.temp }}/gallery-images/
+          retention-days: 14
+
+      # docs/images must be the export of this commit (#103): a PR that changes what the gallery draws must re-export
+      # it. The gallery's style sheet asks for the Ubuntu font (fonts-ubuntu above), as on the machine that exports
+      # the committed images.
+      - name: Check that docs/images is up to date
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/gallery-images"
+          stale=()
+          for f in docs/images/*.png; do
+            cmp -s "$f" "$out/$(basename "$f")" || stale+=("$(basename "$f")")
+          done
+          if [ "${#stale[@]}" -gt 0 ]; then
+            echo "::error::docs/images is out of date: ${#stale[@]} image(s) differ from the export of this commit"
+            printf '  %s\n' "${stale[@]}"
+            echo "Regenerate them with './build/bin/QtIndustrialWidgetsGallery --export-gallery docs/images'"
+            echo "(docs/gallery_images.md), or take them from the gallery-images artifact of this run."
+            exit 1
+          fi
+          committed=(docs/images/*.png)
+          echo "docs/images: all ${#committed[@]} images equal the export"
+
+      # The GitHub Pages site (#80): landing page at the root, Doxygen under api/ with the gallery images,
+      # redirect stubs at the old addresses
+      - name: Build Doxygen documentation and the Pages site
+        run: cmake --build build --target site
+
+      - name: Check the Pages site
+        run: python3 tools/check_site.py build/site
+
+      - name: Upload Pages site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: build/site/
+          retention-days: 14
+
+  # ============================================================
+  # 1b. Linux with Qt 6.2 LTS, the oldest supported Qt (#79)
+  # ============================================================
+  build-linux-qt62:
+    name: Linux (Ubuntu 24.04, GCC, Qt 6.2.4)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libgl1-mesa-dev \
+            libxkbcommon-dev
+
+      - name: Setup Qt 6.2.4
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.2.4'
+          host: 'linux'
+          target: 'desktop'
+          arch: 'gcc_64'
+          cache: true
+
+      - name: Configure CMake
+        run: |
+          set -o pipefail
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DBUILD_DOCS=OFF \
+            -DBUILD_TESTS=ON \
+            -DBUILD_EXAMPLES=ON \
+            -DBUILD_DESIGNER_PLUGIN=ON | tee configure.log
+          # The job must build against Qt 6.2.4, not another Qt found on the runner
+          grep -q "QtIndustrialWidgets: Using Qt 6.2.4" configure.log
+          # The test of the installed Designer plugin (#127) runs only when the plugin is built
+          grep -q "QtIndustrialWidgets: Qt Designer found, building designer plugin" configure.log
+
+      - name: Build all targets
+        run: cmake --build build
+
+      - name: Run unit tests (QtTest)
+        run: |
+          export QT_QPA_PLATFORM=offscreen
+          ctest --test-dir build --output-on-failure
+
+  # ============================================================
+  # 2. Windows (MSVC 2022 & Qt 6)
+  # ============================================================
+  build-windows:
+    name: Windows (MSVC 2022, Qt 6)
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.6.3'
+          arch: 'win64_msvc2019_64'
+
+      - name: Configure CMake
+        run: |
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_DOCS=OFF `
+            -DBUILD_TESTS=ON `
+            -DBUILD_EXAMPLES=ON `
+            -DBUILD_DESIGNER_PLUGIN=OFF
+
+      - name: Build all targets
+        run: cmake --build build --config Release
+
+      - name: Run unit tests (QtTest)
+        shell: bash
+        run: |
+          export QT_QPA_PLATFORM=offscreen
+          ctest --test-dir build -C Release --output-on-failure
+
+  # ============================================================
+  # 3. macOS (AppleClang & Qt 6)
+  # ============================================================
+  build-macos:
+    name: macOS (AppleClang, Qt 6)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Qt via Homebrew
+        run: |
+          brew install qt
+
+      - name: Configure CMake
+        run: |
+          set -o pipefail
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt)" \
+            -DBUILD_DOCS=OFF \
+            -DBUILD_TESTS=ON \
+            -DBUILD_EXAMPLES=ON \
+            -DBUILD_DESIGNER_PLUGIN=ON | tee configure.log
+          # The test of the installed Designer plugin (#127) runs only when the plugin is built
+          grep -q "QtIndustrialWidgets: Qt Designer found, building designer plugin" configure.log
+
+      - name: Build all targets
+        run: cmake --build build
+
+      - name: Run unit tests (QtTest)
+        run: |
+          export QT_QPA_PLATFORM=offscreen
+          ctest --test-dir build --output-on-failure
+
+  # ============================================================
+  # 4. Deploy Documentation to GitHub Pages (Main branch only)
+  # ============================================================
+  deploy-pages:
+    name: Deploy Docs to GitHub Pages
+    needs: build-linux
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Download Pages site artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: ./public
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
